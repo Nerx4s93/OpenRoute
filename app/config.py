@@ -59,6 +59,15 @@ class Settings(BaseSettings):
     max_body_bytes: int = 20 * 1024 * 1024
     alert_webhook_url: str = ""
 
+    # --- sticky sessions / egress-group balancing (app/affinity.py) ---
+    affinity_enabled: bool = True
+    affinity_window_seconds: float = 3600.0
+    affinity_weight_sessions: float = 1.0
+    affinity_weight_requests: float = 1.0
+    affinity_weight_tokens: float = 1.0
+    quota_reset_margin_seconds: float = 60.0
+    abusive_ban_seconds: float = 86_400.0
+
 
 @lru_cache
 def get_settings() -> Settings:

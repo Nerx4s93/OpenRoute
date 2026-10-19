@@ -65,6 +65,9 @@ def test_health_open(make_gateway):
         "status": "ok", "provider": "OpenRoute",
         "proxies_total": 2, "proxies_enabled": 2, "proxies_manually_disabled": 0,
         "proxies_cooling": 0, "proxies_rpm_capped": 0, "last_proxies_fetch": None,
+        "egress_groups_total": 2, "egress_groups_ready": 2,
+        "egress_groups_quota_parked": 0, "egress_groups_banned": 0,
+        "sessions_bound": 0, "sessions_unbound": 0,
     }
 
 
@@ -236,6 +239,67 @@ def test_gate_replaces_invalid_caller_session_id(make_gateway):
     assert main.opencode.is_session_id(sent)
 
 
+def test_session_sticky_keeps_same_proxy_across_turns(make_gateway):
+    gw = make_gateway()
+    tr = gw.script_upstream(lambda req: sse_response())
+    sid = "ses_0123456789ab" + "C" * 14
+    h = {**AUTH, "x-opencode-session": sid}
+
+    first = body(messages=[{"role": "user", "content": "hello"}])
+    second = body(messages=[
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "again"},
+    ])
+    assert gw.client.post("/v1/chat/completions", json=first, headers=h).status_code == 200
+    assert gw.client.post("/v1/chat/completions", json=second, headers=h).status_code == 200
+
+    a = gw.proxy("http://proxy-a.invalid:8080")
+    b = gw.proxy("http://proxy-b.invalid:8080")
+    assert a.requests == 2 and b.requests == 0  # one stable exit IP
+    state = gw.affinity._sessions[f"sid:{sid}"]
+    assert state.proxy == a.url
+    assert len(state.events) == 2
+    assert sum(e.tokens for e in state.events) == 16  # 8 real tokens twice
+
+
+def test_admin_status_exposes_host_only_affinity_groups(make_gateway):
+    gw = make_gateway()
+    gw.script_upstream(lambda req: sse_response())
+    sid = "ses_0123456789ab" + "E" * 14
+    r = gw.client.post("/v1/chat/completions", json=body(),
+                       headers={**AUTH, "x-opencode-session": sid})
+    assert r.status_code == 200
+
+    aff = gw.client.get("/admin/status", headers=AUTH).json()["affinity"]
+    assert aff["enabled"] is True
+    assert aff["sessions_total"] == 1
+    assert aff["sessions_bound"] == 1 and aff["sessions_unbound"] == 0
+    assert len(aff["egress_groups"]) == 2
+    bound = next(g for g in aff["egress_groups"] if g["sessions"] == 1)
+    assert bound["proxy_count"] == 1
+    assert bound["requests_1h"] == 1 and bound["tokens_1h"] == 8
+    # Host-only snapshot: masked host:port entries, no scheme or credentials.
+    assert bound["proxies"] == [f"{bound['host']}:8080"]
+    assert "://" not in json.dumps(aff)
+
+
+def test_different_sessions_are_balanced_across_egress_groups(make_gateway):
+    gw = make_gateway()
+    tr = gw.script_upstream(lambda req: sse_response())
+    for i in range(4):
+        sid = f"ses_{i:012x}" + "D" * 14
+        r = gw.client.post("/v1/chat/completions", json=body(),
+                           headers={**AUTH, "x-opencode-session": sid})
+        assert r.status_code == 200
+    a = gw.proxy("http://proxy-a.invalid:8080")
+    b = gw.proxy("http://proxy-b.invalid:8080")
+    assert a.requests >= 1 and b.requests >= 1
+    assert len(tr.requests) == 4
+    # 4 bound sessions, evenly distributed (2/2).
+    assert a.requests == 2 and b.requests == 2
+
+
 def test_default_model_when_caller_omits_it(make_gateway):
     gw = make_gateway()
     tr = gw.script_upstream(lambda req: sse_response())
@@ -271,115 +335,161 @@ def test_key_model_allow_list_403(make_gateway):
     assert r2.status_code == 200
 
 
-# --- 429 cooldown + immediate retry (no sleep) ---
+# --- 429 classification: generic pass-through, daily quota parking ---
 
 
-def test_429_cooldown_and_immediate_retry_no_sleep(make_gateway):
+def test_generic_429_passthrough_no_cooldown_no_rotation(make_gateway):
+    """Provider/key 429 is NOT an exit-IP property: pass it through untouched."""
     gw = make_gateway()
-    calls = {"n": 0}
+    payload = {"error": {"type": "RateLimitError", "message": "key per-minute limit"}}
 
     def router(req):
-        calls["n"] += 1
-        if calls["n"] == 1:  # proxy A (first pick)
-            return httpx.Response(429, headers={"Retry-After": "7"}, json={"error": "rate"})
-        return sse_response()
+        return httpx.Response(429, headers={"Retry-After": "7"}, json=payload)
 
     tr = gw.script_upstream(router)
-    before = time.monotonic()
     r = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
 
-    assert r.status_code == 200
-    assert gw.sleeps == []  # no sleeping: Retry-After does not stall the pool
+    assert r.status_code == 429
+    assert r.json() == payload  # upstream body passed through verbatim
+    assert r.headers["retry-after"] == "7"
+    assert len(tr.requests) == 1  # no rotation to the next proxy
     a = gw.proxy("http://proxy-a.invalid:8080")
-    b = gw.proxy("http://proxy-b.invalid:8080")
-    assert a.cooldown_until == pytest.approx(before + 7.0, abs=1.0)
-    assert a.consecutive_errors == 1
-    assert b.requests == 1
-
-    # the next request avoids the cooling proxy
-    tr2 = tr
-    r2 = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
-    assert r2.status_code == 200
-    assert b.requests == 2 and a.requests == 1
+    assert a.requests == 1 and a.errors == 0
+    assert a.cooldown_until == 0.0
+    assert all(g.quota_until == 0.0 and g.banned_until == 0.0
+               for g in gw.manager.egress_groups())
+    assert gw.sleeps == []
 
 
-def test_429_garbage_retry_after_no_sleep_default_cooldown(make_gateway):
+def test_429_garbage_retry_after_and_unknown_body_pass_through(make_gateway):
     gw = make_gateway()
-    calls = {"n": 0}
 
     def router(req):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return httpx.Response(429, headers={"Retry-After": "not-a-number"}, json={})
-        return sse_response()
+        return httpx.Response(429, headers={"Retry-After": "not-a-number"}, json={})
 
-    gw.script_upstream(router)
-    before = time.monotonic()
+    tr = gw.script_upstream(router)
     r = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
-    assert r.status_code == 200
-    assert gw.sleeps == []
-    assert gw.proxy("http://proxy-a.invalid:8080").cooldown_until == pytest.approx(before + 60.0, abs=1.0)
+    assert r.status_code == 429
+    assert r.json() == {}
+    assert len(tr.requests) == 1
+    assert gw.proxy("http://proxy-a.invalid:8080").cooldown_until == 0.0
 
 
-def test_429_retry_after_http_date(make_gateway):
+def test_429_http_date_is_passed_through(make_gateway):
     gw = make_gateway()
     target = datetime.now(timezone.utc) + timedelta(seconds=15)
-    calls = {"n": 0}
+    header = format_datetime(target, usegmt=True)
 
     def router(req):
-        calls["n"] += 1
-        if calls["n"] == 1:
-            return httpx.Response(429, headers={"Retry-After": format_datetime(target, usegmt=True)},
-                                  json={"error": "rate"})
-        return sse_response()
+        return httpx.Response(429, headers={"Retry-After": header},
+                              json={"error": {"type": "RateLimitError"}})
 
-    gw.script_upstream(router)
-    before = time.monotonic()
+    tr = gw.script_upstream(router)
     r = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
-    assert r.status_code == 200
-    assert gw.sleeps == []
-    assert gw.proxy("http://proxy-a.invalid:8080").cooldown_until == pytest.approx(before + 15.0, abs=2.0)
+    assert r.status_code == 429
+    assert r.headers["retry-after"] == header
+    assert len(tr.requests) == 1
+    assert gw.proxy("http://proxy-a.invalid:8080").cooldown_until == 0.0
 
 
-def test_429_cooldown_expires_and_proxy_is_reused(make_gateway, monkeypatch):
-    """A proxy cooled by a 429 is skipped until its cooldown elapses, then
-    selected again — no reuse before expiry, reuse after it."""
+def test_cooldown_proxy_is_skipped_then_reused_after_expiry(make_gateway, monkeypatch):
+    """Manual/breaker cooldown still gates the pool (one-shot non-chat calls)."""
     gw = make_gateway()
-    # Freeze/advance the clock the pool's cooldown logic reads. ``prox.time`` is
-    # the shared ``time`` module, so this also drives ``main``'s timing.
     clock = {"now": 10_000.0}
     monkeypatch.setattr(prox.time, "monotonic", lambda: clock["now"])
 
+    def router(req):
+        return ok_response()
+
+    tr = gw.script_upstream(router)
+    a = gw.proxy("http://proxy-a.invalid:8080")
+    b = gw.proxy("http://proxy-b.invalid:8080")
+    a.cooldown_until = clock["now"] + 7.0
+
+    for _ in range(2):
+        assert gw.client.get("/v1/probe", headers=AUTH).status_code == 200
+    assert a.requests == 0 and b.requests == 2
+
+    clock["now"] += 7.1
+    assert gw.client.get("/v1/probe", headers=AUTH).status_code == 200
+    assert a.requests == 1
+
+
+def test_free_usage_limit_parks_group_and_evacuates_current_session(make_gateway):
+    gw = make_gateway()
+    sid = "ses_0123456789ab" + "A" * 14
     calls = {"n": 0}
 
     def router(req):
         calls["n"] += 1
-        if calls["n"] == 1:  # first pick (proxy A) answers 429
-            return httpx.Response(429, headers={"Retry-After": "7"}, json={"error": "rate"})
+        if calls["n"] == 1:
+            return httpx.Response(429, headers={"Retry-After": "30"}, json={
+                "type": "error",
+                "error": {"type": "FreeUsageLimitError", "message": "daily limit"},
+            })
         return sse_response()
 
-    gw.script_upstream(router)
-    a = gw.proxy("http://proxy-a.invalid:8080")
-    b = gw.proxy("http://proxy-b.invalid:8080")
+    tr = gw.script_upstream(router)
+    r = gw.client.post("/v1/chat/completions", json=body(),
+                       headers={**AUTH, "x-opencode-session": sid})
+    assert r.status_code == 200
+    assert len(tr.requests) == 2  # quota on A -> immediate retry on B
 
-    # 1st request: A is cooled for 7 s and the request retries on B immediately.
-    r1 = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
-    assert r1.status_code == 200
-    assert gw.sleeps == []  # 429 never stalls the pool
-    assert a.cooldown_until == pytest.approx(clock["now"] + 7.0)
-    assert a.requests == 1 and b.requests == 1
+    groups = gw.manager.egress_groups()
+    a, b = groups[0], groups[1]
+    expected = max(main.opencode.seconds_to_utc_midnight(), 30.0) \
+        + gw.settings.quota_reset_margin_seconds
+    assert a.quota_until - time.time() == pytest.approx(expected, abs=5.0)
+    assert a.banned_until == 0.0
+    a_proxy = a.proxies[0]
+    assert a_proxy.errors == 0 and a_proxy.cooldown_until == 0.0  # no mark_failure
 
-    # 2nd request BEFORE expiry: the cooling proxy must not be reused.
-    r2 = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
-    assert r2.status_code == 200
-    assert a.requests == 1  # strictly not reused while cooling
-    assert b.requests == 2
+    state = gw.affinity._sessions[f"sid:{sid}"]
+    assert gw.manager.group_of(state.proxy) is b
+    assert b.proxies[0].requests == 1
+    gw.flush_affinity()
+    row = next(r for r in gw.affinitydb.load_all() if r[0] == f"sid:{sid}")
+    assert row[1] == state.proxy
 
-    # Advance past the cooldown: A is ready again and selected by the RR walk.
-    clock["now"] += 7.1
-    r3 = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
-    assert r3.status_code == 200
-    assert a.requests == 2  # reused once the cooldown elapsed
+
+def test_generic_429_does_not_park_or_evacuate(make_gateway):
+    gw = make_gateway()
+    sid = "ses_0123456789ab" + "B" * 14
+
+    def router(req):
+        return httpx.Response(429, json={
+            "error": {"type": "RateLimitError", "message": "provider rate"}})
+
+    tr = gw.script_upstream(router)
+    r = gw.client.post("/v1/chat/completions", json=body(),
+                       headers={**AUTH, "x-opencode-session": sid})
+    assert r.status_code == 429
+    assert len(tr.requests) == 1
+    state = gw.affinity._sessions[f"sid:{sid}"]
+    assert state.proxy is not None  # binding untouched
+    assert all(g.quota_until == 0.0 for g in gw.manager.egress_groups())
+
+
+def test_all_groups_parked_429_with_retry_after(make_gateway):
+    gw = make_gateway()
+    until = time.time() + 77.0
+    for group in gw.manager.egress_groups():
+        gw.manager.mark_quota_exhausted(group, until)
+
+    tr = gw.script_upstream(lambda req: sse_response())
+    r = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
+    assert r.status_code == 429
+    assert float(r.headers["retry-after"]) == pytest.approx(77, abs=2)
+    assert r.json()["error"]["type"] == "rate_limit_error"
+    assert tr.requests == []
+
+
+def test_no_ready_after_all_attempts_is_502(make_gateway):
+    gw = make_gateway()
+    tr = gw.script_upstream(lambda req: httpx.Response(500, json={"error": "x"}))
+    r = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
+    assert r.status_code == 502
+    assert len(tr.requests) == 2
 
 
 # --- 5xx / 401 failover, 502, 504 ---
@@ -460,6 +570,49 @@ def test_upstream_403_non_free_tier_still_fails_over(make_gateway):
     a = gw.proxy("http://proxy-a.invalid:8080")
     assert a.errors == 1 and "HTTP 403" in (a.last_error or "")
     assert gw.proxy("http://proxy-b.invalid:8080").requests == 1
+
+
+def test_abusive_traffic_403_bans_group_and_evacuates(make_gateway):
+    gw = make_gateway()
+    sid = "ses_0123456789ab" + "E" * 14
+    calls = {"n": 0}
+
+    def router(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(403, content=b"Access denied: Abusive Traffic")
+        return sse_response()
+
+    tr = gw.script_upstream(router)
+    r = gw.client.post("/v1/chat/completions", json=body(),
+                       headers={**AUTH, "x-opencode-session": sid})
+    assert r.status_code == 200
+    assert len(tr.requests) == 2  # banned A -> retry on B
+
+    a, b = gw.manager.egress_groups()
+    assert a.banned_until - time.time() == pytest.approx(
+        gw.settings.abusive_ban_seconds, abs=5.0)
+    assert a.quota_until == 0.0
+    assert a.proxies[0].errors == 0  # not a proxy failure
+    state = gw.affinity._sessions[f"sid:{sid}"]
+    assert gw.manager.group_of(state.proxy) is b
+
+
+def test_free_tier_403_is_not_an_abusive_ban(make_gateway):
+    gw = make_gateway()
+
+    def router(req):
+        return httpx.Response(403, json={
+            "type": "error",
+            "error": {"type": "FreeTierError",
+                      "message": "OpenCode's free tier can only be used from within OpenCode."},
+        })
+
+    gw.script_upstream(router)
+    r = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
+    assert r.status_code == 403
+    assert all(g.banned_until == 0.0 for g in gw.manager.egress_groups())
+
 
 
 def test_all_proxies_fail_502(make_gateway):
@@ -818,6 +971,71 @@ def test_stream_usage_logged(make_gateway):
     assert row["prompt_tokens"] == 6 and row["completion_tokens"] == 2
 
 
+def test_stream_affinity_records_real_usage_on_completion(make_gateway):
+    gw = make_gateway()
+    sid = "ses_0123456789ab" + "F" * 14
+    stream = TrackingStream(SSE_CHUNKS)
+
+    def router(req):
+        return httpx.Response(200, headers=SSE_HEADERS, stream=stream)
+
+    gw.script_upstream(router)
+    with gw.client.stream("POST", "/v1/chat/completions",
+                          json=body(stream=True),
+                          headers={**AUTH, "x-opencode-session": sid}) as r:
+        assert r.status_code == 200
+        b"".join(r.iter_raw())
+
+    state = gw.affinity._sessions[f"sid:{sid}"]
+    assert len(state.events) == 1  # one client request -> one event
+    assert state.events[0].tokens == 8  # real total_tokens, not bytes/4
+    assert gw.proxy(state.proxy).consecutive_errors == 0
+
+
+def test_stream_failure_keeps_captured_real_usage_but_no_success(make_gateway):
+    gw = make_gateway()
+    sid = "ses_0123456789ab" + "G" * 14
+    usage_chunk = SSE_CHUNKS[1]
+    stream = TrackingStream([usage_chunk, b"data: {\"x\":1}\n\n"], fail_after=1)
+
+    def router(req):
+        return httpx.Response(200, headers=SSE_HEADERS, stream=stream)
+
+    gw.script_upstream(router)
+    with pytest.raises(httpx.HTTPError):
+        with gw.client.stream("POST", "/v1/chat/completions",
+                              json=body(stream=True),
+                              headers={**AUTH, "x-opencode-session": sid}) as r:
+            assert r.status_code == 200
+            b"".join(r.iter_raw())
+
+    state = gw.affinity._sessions[f"sid:{sid}"]
+    assert state.events[0].tokens == 8  # usage arrived before the disconnect
+    proxy = gw.proxy(state.proxy)
+    assert proxy.consecutive_errors == 1  # no mark_success on a broken stream
+
+
+def test_stream_failure_without_usage_records_zero_tokens(make_gateway):
+    gw = make_gateway()
+    sid = "ses_0123456789ab" + "H" * 14
+    stream = TrackingStream([SSE_CHUNKS[0], b"data: {\"x\":1}\n\n"], fail_after=1)
+
+    def router(req):
+        return httpx.Response(200, headers=SSE_HEADERS, stream=stream)
+
+    gw.script_upstream(router)
+    with pytest.raises(httpx.HTTPError):
+        with gw.client.stream("POST", "/v1/chat/completions",
+                              json=body(stream=True),
+                              headers={**AUTH, "x-opencode-session": sid}) as r:
+            assert r.status_code == 200
+            b"".join(r.iter_raw())
+
+    state = gw.affinity._sessions[f"sid:{sid}"]
+    assert state.events[0].tokens == 0
+    assert gw.proxy(state.proxy).consecutive_errors == 1
+
+
 # --- internal API ---
 
 
@@ -876,6 +1094,39 @@ def test_internal_proxies_set_delete(make_gateway):
 
     r3 = gw.internal.post("/internal/proxies/delete", json={"proxy": "http://nope:1"}, headers=h)
     assert r3.status_code == 404
+
+
+def test_internal_disable_and_delete_invalidate_affinity(make_gateway):
+    gw = make_gateway()
+    h = {"X-Internal-Token": "test-internal-token"}
+    sid = "ses_0123456789ab" + "F" * 14
+    gw.script_upstream(lambda req: sse_response())
+    auth = {**AUTH, "x-opencode-session": sid}
+
+    assert gw.client.post("/v1/chat/completions", json=body(), headers=auth).status_code == 200
+    state = gw.affinity._sessions[f"sid:{sid}"]
+    first = state.proxy
+    assert first
+    other = next(p.url for p in gw.manager.proxies if p.url != first)
+
+    r = gw.internal.post("/internal/proxies/set",
+                         json={"proxy": first, "enabled": False}, headers=h)
+    assert r.status_code == 200
+    assert state.proxy is None  # stale sticky binding invalidated at once
+    gw.flush_affinity()
+    row = next(r for r in gw.affinitydb.load_all() if r[0] == f"sid:{sid}")
+    assert row[1] is None  # persisted as proxy = NULL, row/created_at preserved
+
+    # The next turn leaves the disabled exit and binds to the remaining one.
+    assert gw.client.post("/v1/chat/completions", json=body(), headers=auth).status_code == 200
+    assert state.proxy == other
+
+    r2 = gw.internal.post("/internal/proxies/delete", json={"proxy": other}, headers=h)
+    assert r2.status_code == 200
+    assert state.proxy is None
+    gw.flush_affinity()
+    row = next(r for r in gw.affinitydb.load_all() if r[0] == f"sid:{sid}")
+    assert row[1] is None
 
 
 def test_internal_keys_add_set_delete_and_persist(make_gateway):

@@ -20,8 +20,10 @@ one opencode.ai quota bucket (see §8).
 | `app/config.py` | `Settings` (pydantic-settings) + `get_settings()` (`lru_cache`). Field set is frozen (§6). | 2 |
 | `app/opencode.py` | **Shared, self-contained** opencode.ai integration: gate headers, `new_session_id`, system-message builder, body builder, `Retry-After` parser, SSE helpers. Pure/stdlib-only. | **1 (done)** |
 | `app/sessions.py` | `SessionRegistry`: conversation fingerprint -> upstream session id (sliding TTL + LRU). Single-process, the same assumption as `KeyStore`'s rate windows. | 2 |
-| `app/proxies.py` | `Proxy` + `ProxyManager`: round-robin, circuit breaker, 429 cooldown/parking, local RPM cap, health probes, upstream `httpx` clients. Mirrors `NVRoute/app/accounts.py`. | 2 |
+| `app/proxies.py` | `Proxy` + `ProxyManager`: egress groups (exit-IP buckets), round-robin, circuit breaker, 429 cooldown/parking, group `quota_until`/`banned_until` parking, local RPM cap, health probes, upstream `httpx` clients. Mirrors `NVRoute/app/accounts.py`. | 2 |
 | `app/proxydb.py` | `ProxyDB`: PostgreSQL persistence of the pool (table `proxies`), replacing NVRoute's `acctdb.py`. | 2 |
+| `app/affinity.py` | `AffinityManager` + `SessionIdentity`/`AffinityLease`/`SessionState`: sticky session bindings per egress group, S/R/T score balancing, synchronous evacuation/forget, one-shot buffers, coalescing writer. | 3 |
+| `app/affinitydb.py` | `AffinityDB`: PostgreSQL persistence of sticky bindings (table `session_affinity`). | 3 |
 | `app/keys.py` | `KeyStore` + `KeyInfo`/`AuthError`/`RateLimitError`: client auth, model allow-list, RPM/TPM. Verbatim port of NVRoute. | 2 |
 | `app/keydb.py` | `KeyDB`: PostgreSQL persistence of client keys (table `keys`). Verbatim port of NVRoute. | 2 |
 | `app/reqlog.py` | `RequestLog` + `LogEntry`: request log in PostgreSQL (table `request_log`). Verbatim port; `account` column = **masked proxy**. | 2 |
@@ -42,7 +44,7 @@ All served on the internal port `8000`; only `edge` (host port
 | Method(s) | Path | Auth | Contract |
 |---|---|---|---|
 | ANY | `/v1/{rest:path}` | client key (Bearer) | OpenAI passthrough; body gated and forwarded to `{OPENCODE_BASE_URL}/{rest}` through one proxy. Streaming when the caller asked (`stream` truthy) *or* — because the gate forces streaming upstream — always SSE-packaged (see §7). |
-| GET | `/admin/status` | client key with `admin: true` | `ProxyManager.status()` + `keys` (key ids) + `usage` (`RequestLog.summary`). |
+| GET | `/admin/status` | client key with `admin: true` | `ProxyManager.status()` + `affinity` (`AffinityManager.status()`, host-only) + `keys` (key ids) + `usage` (`RequestLog.summary`). |
 | GET | `/admin/logs?limit=N` | client key with `admin: true` | Last N `RequestLog` rows, newest first; `limit` clamped to `1..500` (default 100). |
 | GET | `/health` | none | Liveness + pool counters (see §2.1). |
 | GET | `/docs`, `/openapi.json` | none | FastAPI docs/schema. |
@@ -55,11 +57,14 @@ Auth dependencies:
 - RPM/TPM gates run *after* the model allow-list (a 403 must not burn quota),
   in `proxy_v1`, before the retry loop.
 
-`/health` response keys (frozen):
+`/health` response keys (frozen; affinity keys are additive):
 ```json
 {"status": "ok", "provider": "OpenRoute",
  "proxies_total": 0, "proxies_enabled": 0, "proxies_manually_disabled": 0,
- "proxies_cooling": 0, "proxies_rpm_capped": 0, "last_proxies_fetch": null}
+ "proxies_cooling": 0, "proxies_rpm_capped": 0, "last_proxies_fetch": null,
+ "egress_groups_total": 0, "egress_groups_ready": 0,
+ "egress_groups_quota_parked": 0, "egress_groups_banned": 0,
+ "sessions_bound": 0, "sessions_unbound": 0}
 ```
 
 ### Internal surface (never exposed through edge)
@@ -80,7 +85,10 @@ Internal request bodies are JSON objects, capped at 64 KiB (413 over). A
 non-object / invalid JSON body → 400. Mutations mirror NVRoute's keys handlers
 (sync the in-memory manager/store after the DB write). Proxy-pool membership
 has **no manual-add path**: it is seeded exclusively by the periodic refresh
-(§4).
+(§4). Disabling or deleting a proxy via `/internal/proxies/{set,delete}` also
+calls `AffinityManager.forget_proxy(url)`: every sticky binding to it becomes
+`proxy = NULL` (row and `created_at` preserved) and the next request of those
+sessions rebinds by score (§7.1).
 
 ---
 
@@ -133,6 +141,30 @@ CREATE TABLE IF NOT EXISTS proxies (
 );
 ```
 
+`session_affinity` — sticky session bindings (one row per session; a row may
+have `proxy = NULL`, meaning "unbound, rebind on next request"). `proxy` is a
+FK to `proxies(proxy)` with `ON DELETE SET NULL`, so an admin delete never
+leaves a dangling binding:
+
+```sql
+CREATE TABLE IF NOT EXISTS session_affinity (
+    session_key TEXT PRIMARY KEY,
+    proxy TEXT REFERENCES proxies(proxy) ON DELETE SET NULL,
+    created_at DOUBLE PRECISION NOT NULL,
+    last_used_at DOUBLE PRECISION NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_session_affinity_proxy
+    ON session_affinity (proxy);
+CREATE INDEX IF NOT EXISTS idx_session_affinity_used
+    ON session_affinity (last_used_at);
+```
+
+`AffinityDB` contract: `load_all() -> [(session_key, proxy, created_at,
+last_used_at)]`, `upsert_many(rows)` (keeps the original `created_at`, refreshes
+`last_used_at`), `clear(key)` = `UPDATE ... SET proxy = NULL` (row preserved),
+`close()`. `AffinityManager` writes through a coalescing background writer;
+a FK violation (proxy deleted concurrently) is retried as `proxy = NULL`.
+
 `keys` — identical to NVRoute (`key_hash UNIQUE, key_id, name, admin, rpm, tpm,
 models JSONB, enabled, added_at`).
 
@@ -170,14 +202,32 @@ and not manually disabled.
 `refresh_proxies()->bool`, `ensure_client(proxy)->httpx.AsyncClient`,
 `record_request(proxy)`, `next_proxy(exclude=None)->Proxy`,
 `mark_failure(proxy, reason, retry_after=None)`, `mark_success(proxy)`,
-`status()->dict`, `aclose()`.
+`status()->dict`, `aclose()`, plus the egress-group surface:
+`egress_groups()->list[EgressGroup]`, `group_of(proxy_or_url)->EgressGroup|None`,
+`next_proxy_in_group(group, exclude=None)->Proxy`,
+`group_is_ready(group, *, now_mono=None, now_wall=None)->bool`,
+`mark_quota_exhausted(group, until)`, `mark_banned(group, until)`.
+
+`canonical_exit_host(proxy_or_url)` derives the group key: the URL host,
+lowercased; IP literals normalised (`ipaddress`), IPv6 truncated to `/64`.
+Ports and credentials never matter: two purchased ports on one IP are **one**
+quota/ban bucket.
+
+`EgressGroup` — `host`, `proxies` (members sharing the exit), `quota_until`
+and `banned_until` (wall-clock epoch, `time.time()` base);
+`parked_until() = max(quota_until, banned_until)`. Parking is in-memory only:
+after a restart a group is re-parked by the next `429 FreeUsageLimitError`.
+`mark_success` never lifts quota/ban parking — only time does.
 
 `next_proxy` — uniform round-robin over the **stable** `self.proxies` list
 (index `_rr` advances past non-ready entries). Ready = enabled (in pool, not
 manually disabled) **and** not cooling **and** not on the local RPM cap **and**
-not in `exclude`. None ready → `NoReadyProxyError(retry_after)` where
-`retry_after` = seconds until the earliest candidate frees up (end of cooldown
-or RPM-window slot), or `None` when waiting is pointless.
+not in a parked group **and** not in `exclude`; `next_proxy_in_group` is the
+same restricted to one group. None ready → `NoReadyProxyError(retry_after,
+kind)`, where `retry_after` = seconds until the earliest candidate frees up
+(end of cooldown, RPM-window slot or group parking), or `None` when waiting is
+pointless. `kind` is additive and maps to the HTTP answer in `main`:
+`"empty"` → 503, `"excluded"` → 502, `"saturated"` → 429 + `Retry-After`.
 
 `refresh_proxies` — `GET {PROXIES_URL}` (httpx, ~15 s timeout); payload is
 `{"proxies": [...]}` or a `[...]` list; each element is a proxy string or a
@@ -196,7 +246,9 @@ status `< 500` and `!= 407`; any transport error ⇒ dead. Timeout:
 it is simply not "ready" this cycle (mark it cooling / leave it cooling).
 Proxies are **never permanently dead** (`disabled` stays `False`); sustained
 failure is expressed purely via cooldown. On refresh, a proxy that probes alive
-may have its cooldown lifted early (mirrors NVRoute).
+may have its cooldown lifted early (mirrors NVRoute). Members of a parked group
+(`quota_until`/`banned_until` in the future) are **not probed**: upstream quota
+and bans are exit-IP properties that only time lifts.
 
 ### 5.2 Local RPM cap
 
@@ -222,6 +274,13 @@ Gateway (`app/config.py`), read from `.env`:
 | `OPENCODE_MODELS_URL` | `opencode_models_url` | `https://opencode.ai/inference/v1/models` | probe/catalogue URL |
 | `OPENCODE_MODEL` | `opencode_model` | `deepseek-v4.1-flash-free` | default model when the caller omits one |
 | `OPENROUTE_RPM_LIMIT` | `openroute_rpm_limit` | `0` | local per-proxy RPM cap (0 = off) |
+| `AFFINITY_ENABLED` | `affinity_enabled` | `true` | sticky sessions per exit IP |
+| `AFFINITY_WINDOW_SECONDS` | `affinity_window_seconds` | `3600` | session R/T statistics window, s |
+| `AFFINITY_WEIGHT_SESSIONS` | `affinity_weight_sessions` | `1.0` | score weight of S (bound sessions) |
+| `AFFINITY_WEIGHT_REQUESTS` | `affinity_weight_requests` | `1.0` | score weight of R (requests in window) |
+| `AFFINITY_WEIGHT_TOKENS` | `affinity_weight_tokens` | `1.0` | score weight of T (real tokens in window) |
+| `QUOTA_RESET_MARGIN_SECONDS` | `quota_reset_margin_seconds` | `60` | margin after 00:00 UTC before un-parking a group |
+| `ABUSIVE_BAN_SECONDS` | `abusive_ban_seconds` | `86400` | exit-IP ban for `403 abusive traffic`, s |
 | `UPSTREAM_TIMEOUT` | `upstream_timeout` | `300` | upstream timeout, s |
 | `CONNECT_TIMEOUT` | `connect_timeout` | `10` | connect timeout, s |
 | `PROXY_COOLDOWN_DEFAULT_SECONDS` | `proxy_cooldown_default_seconds` | `60` | 429 cooldown w/o Retry-After |
@@ -301,9 +360,77 @@ ignore the client's flag, and still pass through SSE verbatim). Usage is
 parsed on the fly with `parse_sse_line` / `usage_from_payload` for TPM
 accounting (fallback estimate: bytes/4 when absent).
 
+### 7.1 Sticky sessions / session affinity (frozen)
+
+One chat conversation is bound **permanently** to one egress group (exit IP).
+Identity resolution (before the retry loop, same id feeds the upstream gate):
+
+- valid caller `x-opencode-session` / `x-session-affinity` / `x-session-id` →
+  `sid:<value>`,
+- otherwise conversation fingerprint `fp:<sha256>` (key id + project + first
+  user message, via `app.sessions.SessionRegistry`),
+- otherwise one-shot: no binding, no `session_affinity` row.
+
+`AffinityManager` API (see module): `load()`, `begin_request(identity) ->
+AffinityLease`, `next_proxy(lease, exclude=None) -> Proxy`,
+`note_started(lease, proxy, ts)` (exactly one event per client request,
+idempotent across retries; `tokens=0` so `R` lands immediately),
+`note_tokens(lease, tokens)` (real `total_tokens` or prompt+completion only —
+never `bytes/4`), `evacuate(group, *, quota_until=..., banned_until=...,
+exclude=...)` (async wrapper; in-memory mutation is fully synchronous inside
+`_evacuate_sync`, so `begin_request` can call it without awaiting),
+`forget_proxy(url)`, `status()`, `flush()`, `aclose()`.
+
+Binding rules:
+
+- New session: pick the ready group with the lowest normalised score, then a
+  ready URL inside it; persist (`created_at` is preserved on re-binds).
+- Existing session: keep the bound URL; a cooling / RPM-capped URL is skipped
+  **for this request only** (temporary fallback by score, persistent binding
+  unchanged). Missing / disabled / deleted URL → permanent rebind (same exit
+  IP preferred); parked group → synchronous evacuation first.
+- Score per group: `S` = bound sessions (completed included), `R` = client
+  requests inside the session window, `T` = real upstream tokens; each session
+  window starts at `max(created_at, now - AFFINITY_WINDOW_SECONDS)`, never
+  extrapolated. Normalised against the maxima among ready candidates and
+  weighted by `AFFINITY_WEIGHT_*`; ties break round-robin.
+- One-shot requests have no binding but still contribute `R`/`T` to a
+  per-group buffer.
+- Admin delete/disable → `forget_proxy` sets `proxy = NULL` (row and
+  `created_at` preserved); a FK race is retried as `NULL` by the writer.
+
+`/admin/status` grows an `affinity` object (host-only; never full URLs or
+credentials): `enabled`, `window_seconds`, `sessions_total`, `sessions_bound`,
+`sessions_unbound`, and `egress_groups: [{ip, host, proxies: [host:port],
+proxy_count, sessions, requests_1h, tokens_1h, score, ready,
+quota_seconds_left, banned_seconds_left}]`.
+
+### 7.2 Upstream 429/403 classification (frozen)
+
+- **429 with `error.type == "FreeUsageLimitError"`** — daily per-exit-IP quota.
+  Park the whole group until `max(seconds_to_utc_midnight(), Retry-After or 0)
+  + QUOTA_RESET_MARGIN_SECONDS` (wall clock), evacuate its bound sessions
+  synchronously and retry this request on another ready group immediately.
+  All groups parked → **429 + `Retry-After`**.
+- **Any other 429** — provider/key/per-minute limits are not an exit-IP
+  property: pass the upstream response through verbatim (status, body, headers),
+  with no cooldown, no parking and no rotation.
+- **401/403 FreeTierError body verdict** — body-level rejection, identical
+  through every exit: pass through (unchanged, §7).
+- **403 with `abusive traffic`** (case-insensitive body search) — ban the whole
+  group for `ABUSIVE_BAN_SECONDS` (24 h by default), evacuate and retry on
+  another group. Ban is in-memory; time is the only cure.
+- **Other 403s** — ordinary proxy failure: `mark_failure` + retry on the next
+  proxy (proxies are never permanently dead, §8).
+
 ---
 
 ## 8. 429 → cooldown / parking semantics (frozen)
+
+> Since §7.2, `main` no longer calls `mark_failure` for upstream 429s (a generic
+> 429 is passed through, `FreeUsageLimitError` parks the egress group). The
+> per-proxy 429 cooldown/parking below remains the `mark_failure` contract,
+> kept for NVRoute parity and non-HTTP paths.
 
 `mark_failure(proxy, reason, retry_after=None)`:
 
@@ -332,7 +459,10 @@ accounting (fallback estimate: bytes/4 when absent).
 
 ### No-ready-proxy outcomes (`NoReadyProxyError`, mirrors NVRoute)
 
-- All candidates already tried and failed → **502** `All upstream attempts failed`.
+- All candidates already tried and failed and nothing is parked → **502**
+  `All upstream attempts failed`; if some egress group is parked (quota/ban),
+  the same exhausted pool is `"saturated"` → **429 + `Retry-After`** (waiting
+  for the reset is meaningful).
 - First selection and the pool is merely saturated (cooling / RPM-capped but
   will free up) → **429 + `Retry-After`** (ceil seconds to the earliest slot).
 - Pool permanently empty (no proxies configured, fetch failing) → **503**
@@ -340,8 +470,10 @@ accounting (fallback estimate: bytes/4 when absent).
   `/admin/status` → `last_proxies_fetch`).
 - Retry budget exhausted → **504** `Upstream retry budget exhausted`.
 
-`main` keeps a per-request `tried: set[str]` of proxy URLs so each proxy is
-attempted at most once per request.
+`main` maps `NoReadyProxyError.kind` to the cases above (`"excluded"` → 502,
+`"saturated"` → 429 + `Retry-After`, `"empty"` → 503) and keeps a per-request
+`tried: set[str]` of proxy URLs so each proxy is attempted at most once per
+request.
 
 ---
 

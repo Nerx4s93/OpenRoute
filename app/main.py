@@ -25,14 +25,19 @@ Request flow for ``ANY /v1/{rest:path}``:
 3. model extraction + allow-list (403), then RPM/TPM gates (429),
 4. session id resolution ONCE for the whole request: caller affinity ->
    conversation fingerprint -> one-shot (:func:`_resolve_session_id`),
-5. retry loop over ``ProxyManager.next_proxy(exclude=tried)``:
+5. retry loop over the session lease: ``affinity.next_proxy(lease, exclude=tried)``
+   when sticky sessions are enabled, else ``ProxyManager.next_proxy(exclude=tried)``:
    * build the upstream request with gate headers/body (:mod:`app.opencode`),
    * on ``httpx.HTTPError`` -> ``mark_failure`` + backoff + next proxy,
-   * on 429 -> ``mark_failure(retry_after=opencode.parse_retry_after(resp))``
-     and retry the NEXT proxy immediately (no sleep),
+   * on ``429 FreeUsageLimitError`` -> park the whole egress group until the
+     next 00:00 UTC, evacuate its sessions, retry on another group,
+   * on any other 429 -> pass the upstream body + ``Retry-After`` through to
+     the client (no cooldown, parking or rotation),
    * on 401 / 403 with a body-level ``FreeTierError`` verdict (the upstream
      gate: "not from OpenCode") -> pass the verdict through to the client:
      every proxy answers the same, so retrying would only burn the pool,
+   * on ``403 abusive traffic`` -> ban the whole egress group, evacuate its
+     sessions, retry on another group,
    * on 5xx / other 401 / 403 -> ``mark_failure`` + next proxy,
    * other statuses (2xx/4xx) are the client's answer,
 6. stream via ``StreamingResponse`` (SSE, no buffering) or convert, or return
@@ -61,6 +66,8 @@ from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import opencode, sessions
+from .affinity import AffinityLease, AffinityManager, SessionIdentity
+from .affinitydb import AffinityDB
 from .config import PROVIDER_NAME, get_settings
 from .keydb import KeyDB
 from .keys import AuthError, KeyInfo, KeyStore, RateLimitError, hash_key
@@ -82,6 +89,8 @@ session_registry = sessions.SessionRegistry()
 # not at module import.
 proxydb: ProxyDB | None = None
 keydb: KeyDB | None = None
+affinitydb: AffinityDB | None = None
+affinity: AffinityManager | None = None
 
 # Strong refs to fire-and-forget tasks (log writes): create_task returns a
 # weakref-compatible Future — without a set the task can be GC'd in flight.
@@ -127,7 +136,7 @@ async def refresh_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    global proxydb, keydb
+    global proxydb, keydb, affinitydb, affinity
     # The proxy pool and client keys live in PostgreSQL and are populated only
     # via the internal API (admin UI). env/files no longer participate.
     proxydb = ProxyDB(settings.postgres_dsn)
@@ -144,6 +153,19 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if not keystore.key_ids():
         logger.warning("No client keys configured: all /v1 requests get 401 "
                        "until keys are added via the admin UI")
+    # Sticky sessions: load persisted bindings (S survives a restart; R/T are
+    # in-memory and start empty). The manager is created even when disabled so
+    # /health and /admin/status keep a stable shape.
+    if affinitydb is None:
+        affinitydb = AffinityDB(settings.postgres_dsn)
+    if affinity is None:
+        affinity = AffinityManager(settings, manager, db=affinitydb)
+    try:
+        await affinity.load()
+    except Exception:
+        logger.exception("Failed to load session affinity; continuing without it")
+    logger.info("Session affinity enabled=%s (window=%.0fs)",
+                settings.affinity_enabled, settings.affinity_window_seconds)
     task = asyncio.create_task(refresh_loop())
     logger.info("%s gateway started: upstream=%s, proxies from %s",
                 PROVIDER_NAME, settings.opencode_base_url, settings.proxies_url)
@@ -153,6 +175,13 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         await task
     except asyncio.CancelledError:
         pass
+    if affinity is not None:
+        await affinity.aclose()
+        affinity = None
+        affinitydb = None  # closed by AffinityManager.aclose()
+    elif affinitydb is not None:
+        affinitydb.close()
+        affinitydb = None
     if keydb is not None:
         keydb.close()
         keydb = None
@@ -259,20 +288,21 @@ def _upstream_headers(request: Request, session_id: str) -> dict:
     return headers
 
 
-def _resolve_session_id(request: Request, key: KeyInfo, body: bytes) -> str:
-    """Pick the upstream session id ONCE per client request.
+def _resolve_session(request: Request, key: KeyInfo, body: bytes) -> SessionIdentity:
+    """Pick the upstream session id + sticky-affinity key ONCE per request.
 
     1. A real OpenCode client owns its session id: reuse the affinity value it
-       already sends (the same value the upstream uses for provider stickiness).
+       already sends (the same value the upstream uses for provider stickiness)
+       and key the binding by it (``sid:<id>``).
     2. Other OpenAI clients carry no session at all: reuse one id per
-       conversation fingerprint until the registry TTL expires.
-    3. Nothing to anchor on: a one-shot id (OpenCode's title generator does the
-       same for its own one-shot calls).
+       conversation fingerprint until the registry TTL expires (``fp:<hash>``).
+    3. Nothing to anchor on: a one-shot id (no binding, no ``session_affinity``
+       row).
     """
     for name in opencode.SESSION_HEADER_NAMES:
         value = request.headers.get(name)
         if opencode.is_session_id(value):
-            return value
+            return SessionIdentity(value, f"sid:{value}", "sid")
 
     fingerprint = opencode.conversation_fingerprint(
         body,
@@ -280,9 +310,15 @@ def _resolve_session_id(request: Request, key: KeyInfo, body: bytes) -> str:
         project=request.headers.get("x-opencode-project"),
     )
     if fingerprint is not None:
-        return session_registry.resolve(fingerprint)
+        return SessionIdentity(
+            session_registry.resolve(fingerprint), f"fp:{fingerprint}", "fp")
 
-    return opencode.new_session_id()
+    return SessionIdentity(opencode.new_session_id(), None, "one-shot")
+
+
+def _resolve_session_id(request: Request, key: KeyInfo, body: bytes) -> str:
+    """Backward-compatible wrapper returning only the upstream session id."""
+    return _resolve_session(request, key, body).session_id
 
 
 def _resp_headers(upstream: httpx.Response) -> dict:
@@ -321,6 +357,29 @@ async def _drain(upstream: httpx.Response, stream: bool) -> None:
         await upstream.aclose()
     except httpx.HTTPError:
         pass
+
+
+def _raise_no_ready(exc: NoReadyProxyError) -> None:
+    """Map ``NoReadyProxyError.kind`` to the client contract.
+
+    - empty pool / all disabled -> 503 (generic, no fetch diagnostics),
+    - every candidate already tried -> 502,
+    - cooling / RPM-capped / quota-parked -> 429 + ``Retry-After``.
+    """
+    kind = getattr(exc, "kind", None)
+    if kind == "excluded":
+        raise HTTPException(502, "All upstream attempts failed")
+    if kind == "empty" or (kind is None and exc.retry_after is None):
+        # Generic on purpose: the fetch status (URL/DSN/credentials) is only
+        # exposed to admins via /admin/status, never to clients.
+        raise HTTPException(503, "No enabled proxies")
+    if exc.retry_after is None:
+        raise HTTPException(503, "No enabled proxies")
+    raise RateLimitError(
+        "No ready upstream proxy (cooling, RPM-capped or quota/banned); "
+        f"earliest slot in {math.ceil(exc.retry_after)}s",
+        retry_after=exc.retry_after,
+    )
 
 
 async def _fetch_models_catalogue() -> dict:
@@ -431,14 +490,16 @@ def _stream_gen(
     upstream: httpx.Response, proxy: Proxy, key: KeyInfo,
     method: str, rest: str, model: str | None, started: float,
     stream_usage: bool = True,
+    lease: AffinityLease | None = None,
 ) -> AsyncIterator[bytes]:
     """Wrapper around ``aiter_bytes`` (httpx decompresses content-encoding, the
     header is honestly stripped for the client). The connection is closed on ANY
     outcome (including a client disconnect); success is recorded only after the
     full stream (opencode always streams); the log is written when the generator
     finishes. SSE usage is parsed on the fly for TPM accounting; if absent, a
-    rough estimate is used (text bytes / 4). All parse/count errors are swallowed
-    and never break the stream.
+    rough estimate is used (text bytes / 4) for TPM only — affinity records ONLY
+    real upstream usage (or 0). All parse/count errors are swallowed and never
+    break the stream.
     """
 
     async def gen() -> AsyncIterator[bytes]:
@@ -447,7 +508,15 @@ def _stream_gen(
         usage_total: int | None = None
         usage_prompt: int | None = None
         usage_completion: int | None = None
+        completed = False
         pending = bytearray()  # an unfinished SSE line (chunk boundary mid-event)
+
+        def real_usage_total() -> int | None:
+            if usage_total is not None:
+                return usage_total
+            if usage_prompt is not None and usage_completion is not None:
+                return usage_prompt + usage_completion
+            return None
 
         def scan_sse_usage(chunk: bytes) -> None:
             nonlocal usage_total, usage_prompt, usage_completion
@@ -482,7 +551,8 @@ def _stream_gen(
                 if stream_usage:
                     scan_sse_usage(chunk)
                 yield chunk
-            manager.mark_success(proxy)  # the stream reached the end — now it is a success
+            completed = True
+            manager.mark_success(proxy)  # full stream only — a disconnect is not success
         except httpx.HTTPError as exc:
             error = f"stream error: {type(exc).__name__}: {exc}"
             manager.mark_failure(proxy, error)
@@ -492,6 +562,14 @@ def _stream_gen(
                 await upstream.aclose()  # real leak fix (BackgroundTask is belt-and-braces)
             except httpx.HTTPError:
                 pass
+            # Affinity: exactly the request event created at first send; only
+            # real upstream usage (total_tokens or prompt+completion), else 0.
+            if lease is not None:
+                try:
+                    if affinity is not None:
+                        affinity.note_tokens(lease, real_usage_total() or 0)
+                except Exception:
+                    logger.debug("affinity stream token accounting failed", exc_info=True)
             prompt_log: int | None = None
             completion_log: int | None = None
             if error is None and upstream.status_code < 400 and stream_usage:
@@ -565,7 +643,16 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
         keystore.check_tpm(key)
         params = list(request.query_params.multi_items())
         stream = _wants_stream(rest, body)
-        session_id = _resolve_session_id(request, key, body)
+        identity = _resolve_session(request, key, body)
+        session_id = identity.session_id
+        request_wall = time.time()
+        lease: AffinityLease | None = None
+        if settings.affinity_enabled and affinity is not None:
+            try:
+                lease = affinity.begin_request(identity)
+            except Exception:
+                logger.exception("Affinity begin_request failed; request continues")
+                lease = None
 
         deadline = time.monotonic() + settings.retry_budget_seconds  # overall budget
         tried: set[str] = set()  # proxy URLs already tried in this request
@@ -578,19 +665,20 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                 raise HTTPException(504, "Upstream retry budget exhausted")
             attempt += 1
             try:
-                proxy = manager.next_proxy(exclude=tried)
+                if lease is not None and affinity is not None:
+                    proxy = affinity.next_proxy(lease, exclude=tried)
+                else:
+                    proxy = manager.next_proxy(exclude=tried)
             except NoReadyProxyError as exc:
-                if tried:
-                    raise HTTPException(502, "All upstream attempts failed")
-                if exc.retry_after is not None:
-                    raise RateLimitError(
-                        "No ready upstream proxy (all cooling or RPM-capped); "
-                        f"earliest slot in {math.ceil(exc.retry_after)}s",
-                        retry_after=exc.retry_after,
-                    )
-                # Generic on purpose: the fetch status (URL/DSN/credentials) is
-                # only exposed to admins via /admin/status, never to clients.
-                raise HTTPException(503, "No enabled proxies")
+                _raise_no_ready(exc)
+            except Exception:
+                # Affinity must never break a client request: fall back to the
+                # plain pool on an unexpected internal error.
+                logger.exception("Affinity next_proxy failed; falling back to pool")
+                try:
+                    proxy = manager.next_proxy(exclude=tried)
+                except NoReadyProxyError as exc:
+                    _raise_no_ready(exc)
             tried.add(proxy.url)
             proxy.requests += 1
             client = manager.ensure_client(proxy)
@@ -601,6 +689,13 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
             try:
                 # the local RPM slot is burned only on a REAL attempt
                 manager.record_request(proxy)
+                if lease is not None and affinity is not None:
+                    try:
+                        # exactly one affinity event per client request, at the
+                        # first real upstream send (tokens filled in later)
+                        affinity.note_started(lease, proxy, request_wall)
+                    except Exception:
+                        logger.exception("Affinity note_started failed; request continues")
                 upstream = await client.send(upstream_req, stream=True)
             except httpx.HTTPError as exc:  # network/proxy — transient
                 reason = f"{type(exc).__name__}: {exc}"
@@ -614,18 +709,49 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
 
             status = upstream.status_code
             if status == 429:
-                # Retry-After belongs to THIS proxy: it goes into cooldown (parse
-                # seconds and HTTP-date; no header -> 60s default) and the request
-                # IMMEDIATELY moves to the next proxy — no sleeping.
-                await _drain(upstream, True)
+                # Read the body BEFORE closing: the classification is body-level.
+                upstream_body_429 = await upstream.aread()
+                await upstream.aclose()
                 retry_after = opencode.parse_retry_after(upstream)
-                manager.mark_failure(proxy, "upstream HTTP 429", retry_after=retry_after)
+                if opencode.is_free_usage_limit(upstream_body_429):
+                    # Daily per-exit-IP quota: park the WHOLE IP group until the
+                    # next 00:00 UTC (+ margin), then evacuate its sessions and
+                    # continue this request on another ready group.
+                    wait = max(opencode.seconds_to_utc_midnight(),
+                               retry_after or 0.0) + settings.quota_reset_margin_seconds
+                    until = time.time() + wait
+                    group = manager.group_of(proxy)
+                    if group is not None:
+                        parked = False
+                        if affinity is not None and settings.affinity_enabled:
+                            try:
+                                await affinity.evacuate(
+                                    group, quota_until=until, exclude=tried)
+                                parked = True
+                            except Exception:
+                                logger.exception(
+                                    "Affinity evacuation failed; parking group only")
+                        if not parked:
+                            manager.mark_quota_exhausted(group, until)
+                        logger.warning(
+                            "Proxy %s got FreeUsageLimitError: egress group %s parked "
+                            "for %.0fs (until %.0f), sessions evacuated",
+                            mask_proxy(proxy.url), group.host, wait, until,
+                        )
+                    continue
+                # Any other 429 (provider/key/per-minute/unknown) is NOT an
+                # exit-IP property: pass it through without cooldown, parking or
+                # rotation.
                 logger.warning(
-                    "Proxy %s got HTTP 429 (cooldown %s) — retrying next proxy immediately",
-                    mask_proxy(proxy.url),
-                    f"{retry_after:.0f}s" if retry_after is not None else "60s (default)",
-                )
-                continue
+                    "Proxy %s got HTTP 429 (type=%s) — passing through without parking",
+                    mask_proxy(proxy.url), opencode.error_type(upstream_body_429))
+                proxy_mask = mask_proxy(proxy.url)
+                _log_request(key_id=key.key_id, method=request.method, path=rest,
+                             model=model, status=status, started=started,
+                             stream=stream, account=proxy_mask,
+                             error="upstream HTTP 429")
+                return Response(content=upstream_body_429, status_code=429,
+                                headers=_resp_headers(upstream))
             if status in (401, 403):
                 # A body-level FreeTierError verdict ("this request does not
                 # come from OpenCode") is identical through every proxy: it is
@@ -633,9 +759,9 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                 # be pointless — worse, counting it as a proxy failure cools
                 # healthy proxies down and can park the whole pool. Pass the
                 # upstream verdict through to the client instead.
-                body = await upstream.aread()
+                upstream_body_403 = await upstream.aread()
                 await upstream.aclose()
-                rejection = opencode.free_tier_rejection(body)
+                rejection = opencode.free_tier_rejection(upstream_body_403)
                 if rejection is not None:
                     logger.warning("Upstream rejected the request (HTTP %d): %s",
                                    status, rejection)
@@ -644,6 +770,33 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                                  stream=stream, account=mask_proxy(proxy.url),
                                  error=rejection)
                     return _openai_error(status, rejection, "upstream_error")
+                if status == 403 and opencode.is_abusive_ban(upstream_body_403):
+                    # Abusive-traffic ban is an exit-IP property: ban the whole
+                    # group, evacuate its sessions and retry this request on a
+                    # different IP.
+                    until = time.time() + settings.abusive_ban_seconds
+                    group = manager.group_of(proxy)
+                    if group is not None:
+                        banned = False
+                        if affinity is not None and settings.affinity_enabled:
+                            try:
+                                await affinity.evacuate(
+                                    group, banned_until=until, exclude=tried)
+                                banned = True
+                            except Exception:
+                                logger.exception(
+                                    "Affinity evacuation failed; banning group only")
+                        if not banned:
+                            manager.mark_banned(group, until)
+                        logger.warning(
+                            "Proxy %s got abusive-traffic 403: egress group %s "
+                            "banned for %.0fs (until %.0f), sessions evacuated",
+                            mask_proxy(proxy.url), group.host,
+                            settings.abusive_ban_seconds, until,
+                        )
+                    else:
+                        manager.mark_failure(proxy, "upstream abusive traffic 403")
+                    continue
                 # Not a permanent death (proxies are never permanently dead):
                 # record a failure and try the next proxy.
                 manager.mark_failure(proxy, f"upstream HTTP {status}")
@@ -667,7 +820,8 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
         if chat and stream:
             # Caller asked for SSE: pass the upstream SSE through verbatim.
             return StreamingResponse(
-                _stream_gen(upstream, proxy, key, request.method, rest, model, started),
+                _stream_gen(upstream, proxy, key, request.method, rest, model, started,
+                            lease=lease),
                 status_code=upstream.status_code,
                 headers=_resp_headers(upstream),
                 background=BackgroundTask(upstream.aclose),
@@ -686,6 +840,11 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                 prompt = p if isinstance(p, int) and not isinstance(p, bool) else None
                 completion_log = c if isinstance(c, int) and not isinstance(c, bool) else None
                 total = t if isinstance(t, int) and not isinstance(t, bool) else None
+            # Affinity counts ONLY real upstream usage, never the bytes/4
+            # estimate used below for client/TPM compatibility.
+            real_total = total
+            if real_total is None and prompt is not None and completion_log is not None:
+                real_total = prompt + completion_log
             if total is None:
                 est = len(content) // 4
                 if completion_log is None:
@@ -700,6 +859,11 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                 "total_tokens": max(total or 0, (prompt or 0) + (completion_log or 0)),
             }
             manager.mark_success(proxy)
+            if lease is not None and affinity is not None:
+                try:
+                    affinity.note_tokens(lease, real_total or 0)
+                except Exception:
+                    logger.exception("Affinity token accounting failed; request continues")
             if total:
                 keystore.count_tokens(key, total)
             _log_request(key_id=key.key_id, method=request.method, path=rest, model=model,
@@ -711,7 +875,7 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
         if stream:
             return StreamingResponse(
                 _stream_gen(upstream, proxy, key, request.method, rest, model, started,
-                            stream_usage=False),
+                            stream_usage=False, lease=lease),
                 status_code=upstream.status_code,
                 headers=_resp_headers(upstream),
                 background=BackgroundTask(upstream.aclose),
@@ -719,6 +883,11 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
         content = await upstream.aread()
         await upstream.aclose()
         manager.mark_success(proxy)
+        if lease is not None and affinity is not None:
+            try:
+                affinity.note_tokens(lease, 0)  # non-chat: usage unknown -> 0
+            except Exception:
+                logger.exception("Affinity token accounting failed; request continues")
         _log_request(key_id=key.key_id, method=request.method, path=rest, model=model,
                      status=upstream.status_code, started=started, stream=False,
                      account=proxy_mask)
@@ -753,8 +922,12 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
 
 
 async def admin_status(_: KeyInfo = Depends(require_admin)) -> dict:
-    """GET ``/admin/status`` — pool snapshot + key ids + usage summary."""
+    """GET ``/admin/status`` — pool snapshot + affinity + keys + usage summary."""
     st = manager.status()
+    st["affinity"] = affinity.status() if affinity is not None else {
+        "sessions_total": 0, "sessions_bound": 0, "sessions_unbound": 0,
+        "egress_groups": [],
+    }
     st["keys"] = keystore.key_ids()
     st["usage"] = await reqlog.summary_async()
     return st
@@ -766,8 +939,9 @@ async def admin_logs(limit: int = 100, _: KeyInfo = Depends(require_admin)) -> l
 
 
 async def health() -> dict:
-    """GET ``/health`` — liveness + pool counters (frozen keys, DESIGN §2.1)."""
+    """GET ``/health`` — liveness + pool/affinity counters (additive keys)."""
     st = manager.status()
+    aff = affinity.status() if affinity is not None else {}
     return {
         "status": "ok",
         "provider": PROVIDER_NAME,
@@ -777,6 +951,13 @@ async def health() -> dict:
         "proxies_cooling": st["proxies_cooling"],
         "proxies_rpm_capped": st["proxies_rpm_capped"],
         "last_proxies_fetch": st["last_proxies_fetch"],
+        # Additive egress-group/session counters (existing keys unchanged).
+        "egress_groups_total": st["egress_groups_total"],
+        "egress_groups_ready": st["egress_groups_ready"],
+        "egress_groups_quota_parked": st["egress_groups_quota_parked"],
+        "egress_groups_banned": st["egress_groups_banned"],
+        "sessions_bound": aff.get("sessions_bound", 0),
+        "sessions_unbound": aff.get("sessions_unbound", 0),
     }
 
 
@@ -878,6 +1059,11 @@ async def internal_proxies_set(request: Request) -> dict:
     db = _require_proxydb()
     if await asyncio.to_thread(db.set_enabled, proxy, enabled):
         manager.set_manually_disabled(proxy, not enabled)
+        if not enabled and affinity is not None:
+            try:
+                affinity.forget_proxy(proxy)  # invalidate stale sticky bindings
+            except Exception:
+                logger.exception("Affinity forget_proxy failed for %s", mask_proxy(proxy))
         return {"ok": True, "message": "Proxy enabled" if enabled else "Proxy disabled"}
     raise HTTPException(404, "Proxy not found")
 
@@ -890,6 +1076,11 @@ async def internal_proxies_delete(request: Request) -> dict:
     db = _require_proxydb()
     if await asyncio.to_thread(db.remove, proxy):
         manager.remove_proxy(proxy)
+        if affinity is not None:
+            try:
+                affinity.forget_proxy(proxy)
+            except Exception:
+                logger.exception("Affinity forget_proxy failed for %s", mask_proxy(proxy))
         return {"ok": True, "message": "Proxy deleted"}
     raise HTTPException(404, "Proxy not found")
 

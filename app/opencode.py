@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
 import secrets
 import time
@@ -302,6 +303,57 @@ def prepare_body(raw_body: bytes | str | None, model: str) -> bytes:
     data["stream"] = True
     data["stream_options"] = {"include_usage": True}
     return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+
+
+def error_type(body: bytes | str | None) -> str | None:
+    """Return ``data["error"]["type"]`` from an upstream error body, else None.
+
+    Strict/body-level and NEVER raises: malformed JSON, HTML block pages,
+    non-object shapes and missing keys all yield ``None``.
+    """
+    data = _loads_object(body)
+    if not data:
+        return None
+    err = data.get("error")
+    if not isinstance(err, dict):
+        return None
+    value = err.get("type")
+    return value if isinstance(value, str) else None
+
+
+def is_free_usage_limit(body: bytes | str | None) -> bool:
+    """True ONLY for ``error.type == "FreeUsageLimitError"``.
+
+    That is the upstream's per-exit-IP DAILY quota (reset at 00:00 UTC). Other
+    429 bodies (provider/per-key/per-minute/unknown) must pass through without
+    parking the egress group.
+    """
+    return error_type(body) == "FreeUsageLimitError"
+
+
+def is_abusive_ban(body: bytes | str | None) -> bool:
+    """Case-insensitive ``abusive traffic`` marker in a 403 body."""
+    if body is None:
+        return False
+    try:
+        if isinstance(body, bytes):
+            text = body.decode("utf-8", "replace")
+        else:
+            text = str(body)
+    except Exception:  # pragma: no cover - decode is already lossy
+        return False
+    return "abusive traffic" in text.lower()
+
+
+def seconds_to_utc_midnight(now: float | None = None) -> float:
+    """Exact seconds until the next 00:00 UTC (ceil to whole seconds).
+
+    Uses the plan's millisecond formula verbatim, so at an exact midnight it
+    returns 86400 (the *next* midnight), never 0. Pure and timezone-safe: only
+    UTC epoch milliseconds participate.
+    """
+    now_ms = int((now if now is not None else time.time()) * 1000)
+    return math.ceil((86_400_000 - (now_ms % 86_400_000)) / 1000)
 
 
 def free_tier_rejection(body: bytes | str | None) -> str | None:

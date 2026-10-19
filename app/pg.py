@@ -44,6 +44,25 @@ SCHEMA: tuple[str, ...] = (
         added_at DOUBLE PRECISION NOT NULL
     )
     """,
+    # Sticky session -> exit proxy binding (affinitydb.py). ``ON DELETE SET
+    # NULL`` unbinds a session when its proxy is removed; ``created_at`` is
+    # never changed by a move (only ``proxy``/``last_used_at`` are updated).
+    """
+    CREATE TABLE IF NOT EXISTS session_affinity (
+        session_key TEXT PRIMARY KEY,
+        proxy TEXT REFERENCES proxies(proxy) ON DELETE SET NULL,
+        created_at DOUBLE PRECISION NOT NULL,
+        last_used_at DOUBLE PRECISION NOT NULL
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_session_affinity_proxy
+        ON session_affinity (proxy)
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_session_affinity_used
+        ON session_affinity (last_used_at)
+    """,
     # Client keys (keydb.py); models is a JSONB array of model names.
     """
     CREATE TABLE IF NOT EXISTS keys (

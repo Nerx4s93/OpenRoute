@@ -1,19 +1,25 @@
 # OpenRoute
 
 OpenAI-совместимый API-шлюз, который балансирует клиентские запросы по пулу
-**HTTP(S)-прокси** (round-robin) и проксирует их в **free-tier инференс
-`opencode.ai`**. В отличие от NVRoute здесь **нет апстрим-токенов**: член пула —
-это сам прокси. Каждый выходной адрес прокси = отдельное «ведро» квоты
-opencode.ai.
+**HTTP(S)-прокси** (sticky-сессии по exit IP + round-robin для новых задач) и
+проксирует их в **free-tier инференс `opencode.ai`**. В отличие от NVRoute здесь
+**нет апстрим-токенов**: член пула — это сам прокси. Каждый выходной IP = одно
+«ведро» квоты opencode.ai (порты одного IP — одна egress-группа).
 
 - При старте и периодически шлюз забирает список прокси из `proxy6-service`,
   который фильтрует их по комментарию **`OPENROUTE`** (аналог `USE_IN_API` в
   NVRoute) через API [px6.net](https://px6.net).
+- **Sticky-сессии**: задача (`x-opencode-session`, либо fingerprint диалога)
+  закрепляется за одним exit IP — все её реплики идут через один и тот же
+  выходной адрес, а новые задачи балансируются по score (сессии/запросы/токены).
+- **`429 FreeUsageLimitError`** (дневная квота exit IP) паркует всю группу
+  портов этого IP до ближайшей полуночи UTC, сессии эвакуируются на другие IP.
+  Любой другой 429 — прозрачный passthrough без cooldown и ротации: лимиты
+  провайдера/ключа не являются свойством выходного адреса.
+- **`403 abusive traffic`** банит exit IP (по умолчанию 24 ч) и эвакуирует
+  его сессии.
 - Round-robin по готовым прокси; при сбое запрос немедленно уходит на следующий
   прокси (каждый пробуется за запрос максимум один раз).
-- **HTTP 429** от opencode → прокси уходит в cooldown по заголовку
-  `Retry-After` (парсятся и целые секунды, и HTTP-date; без заголовка — 60 с).
-  Несколько 429 подряд → долгая «парковка» (по умолчанию 3600 с).
 - Клиентская поверхность как у NVRoute: `/v1/*` (OpenAI passthrough) за
   клиентскими ключами (RPM/TPM, allow-list моделей), `/admin/status`,
   `/admin/logs`, `/health`, `/internal/*` (X-Internal-Token) и веб-админка.
@@ -65,7 +71,7 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
                         └─ /, /login, /admin/ui* ──────────────────► [admin-service] (control plane)
                                                                          │
    [openroute] ──► [openroute-proxy6] ──► px6.net      (список прокси, descr=OPENROUTE)
-   [openroute] ──► [PostgreSQL]                        (request_log + proxies + keys)
+   [openroute] ──► [PostgreSQL]                        (request_log + proxies + keys + session_affinity)
    [openroute] ──► opencode.ai                         (free-tier инференс через прокси)
    [admin-service] ──► [Redis]                         (серверные сессии админки)
    [admin-service] ──► [openroute] /internal/*         (X-Internal-Token, только внутри сети)
@@ -81,7 +87,7 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
 - **`proxy6-service/`** — микросервис списка прокси: обёртка над API px6.net с
   TTL-кэшем, фильтр `descr == "OPENROUTE"`.
 - **`postgres`** — PostgreSQL 17: хранилище шлюза (`request_log`, `proxies`,
-  `keys`). Том `pgdata`; порт наружу не публикуется.
+  `keys`, `session_affinity`). Том `pgdata`; порт наружу не публикуется.
 - **`redis`** — Redis 7: сессии админки (том `redisdata`), порт наружу не публикуется.
 
 ---
@@ -99,8 +105,10 @@ OpenRoute/
 ├── requirements-dev.txt      # + pytest/pytest-asyncio/redis
 ├── .env.example
 ├── app/                      # шлюз (data plane) — РЕАЛИЗОВАНО
-│   ├── opencode.py           # gate-заголовки, session id, body, Retry-After, SSE
+│   ├── opencode.py           # gate-заголовки, session id, body, Retry-After, SSE, классификаторы 429/403
 │   ├── sessions.py           # fingerprint диалога -> один upstream session id
+│   ├── affinity.py           # sticky-сессии: привязки, score S/R/T, эвакуация
+│   ├── affinitydb.py         # session_affinity: load/upsert/clear
 │   ├── config.py  proxies.py  proxydb.py  keys.py  keydb.py  reqlog.py  pg.py
 │   └── main.py               # FastAPI: passthrough /v1/*, ретраи, internal API, lifespan
 ├── edge/                     # nginx: nginx.conf, proxy_params_edge.conf, Dockerfile
@@ -123,17 +131,27 @@ OpenRoute/
   и не сбрасывают свой флаг `enabled`. Чтобы навсегда исключить прокси, который
   всё ещё отдаётся сервисом, — **отключите** его (удалённый вернётся на
   следующем обновлении). См. `DESIGN.md §4`.
+- **Egress-группы**: прокси с одним exit-хостом объединяются в группу — квота
+  и бан привязаны к exit IP, а не к отдельному порту (`canonical_exit_host`;
+  IPv6 нормализуется до `/64`).
 - **Round-robin** по готовым прокси (не в cooldown, не отключён, не на локальном
-  RPM-капе). Каждый прокси пробуется в запросе максимум один раз.
+  RPM-капе, группа не запаркована). Каждый прокси пробуется в запросе максимум
+  один раз.
 - **Circuit breaker** (сетевые ошибки / 5xx): ошибки копятся в скользящем окне
   `ACCOUNT_FAIL_WINDOW_SECONDS`; после `ACCOUNT_FAIL_THRESHOLD` — cooldown
   `ACCOUNT_COOLDOWN_SECONDS` с экспонентой ×2 до `ACCOUNT_COOLDOWN_MAX_SECONDS`
   (60 → 120 → … → 600 с). Успех сбрасывает счётчик и cooldown.
-- **429 → cooldown**: `Retry-After` (секунды или HTTP-date) принадлежит
-  *конкретному прокси*: он уходит в cooldown на это время (без заголовка —
-  `PROXY_COOLDOWN_DEFAULT_SECONDS`, 60 с), а запрос **немедленно** уходит на
-  следующий прокси — без ожидания. `ACCOUNT_THROTTLE_THRESHOLD` (3) подряд
-  429-кулдаунов → **парковка** на `ACCOUNT_THROTTLE_COOLDOWN_SECONDS` (час).
+- **429 → классификация по телу** (см. «Sticky-сессии» ниже):
+  `FreeUsageLimitError` → **парковка всей egress-группы** до 00:00 UTC +
+  `QUOTA_RESET_MARGIN_SECONDS`, сессии эвакуируются на другие IP; любой другой
+  429 — прозрачный passthrough без cooldown, парковки и ротации.
+  Механика cooldown/парковки отдельного прокси (`mark_failure` с 429,
+  `ACCOUNT_THROTTLE_*`) сохранена для внутренних путей, но HTTP-обработчик
+  её больше не вызывает.
+- **403 `abusive traffic`** (case-insensitive поиск в теле) → бан всей
+  egress-группы на `ABUSIVE_BAN_SECONDS` (по умолчанию 86400 с) с эвакуацией;
+  `FreeTierError` — passthrough; прочие 403 — обычный failover
+  (`mark_failure` + следующая попытка).
 - **Ретраи**: 5xx/сетевые — повтор на следующем прокси с экспоненциальным
   backoff от `RETRY_BACKOFF_BASE_SECONDS`, суммарно не дольше
   `RETRY_BUDGET_SECONDS` (исчерпан → 504).
@@ -141,14 +159,41 @@ OpenRoute/
   через cooldown; health-probe периодически проверяет прокси и может снять
   cooldown досрочно.
 
-### Один прокси = одно «ведро» IP
+### Один exit IP = одно «ведро» квоты
 
 Квота free-tier opencode.ai привязана к IP клиента; для IPv6 сервер усекает
 адрес до первых 4 групп (`/64`), т.е. **одна /64 = одно ведро**. Ротация внутри
 одной /64 бесполезна, а exit-адрес узла общий для всех его пользователей —
-бюджет делится. Поэтому пул строится из **разных** прокси-выходов: один прокси
-= один независимый дневной лимит. 429 обычно означает «лимит до полуночи UTC»,
-и его `Retry-After` — секунды до полуночи (прокси уходит в cooldown до сброса).
+бюджет делится. Поэтому пул строится из **разных** выходных адресов, а порты
+одного IP объединяются в одну egress-группу: квота, бан и эвакуация действуют
+на всю группу сразу. Дневной лимит уточняется телами ответов:
+`429 FreeUsageLimitError` → группа паркуется до ближайшей полуночи UTC
+(если `Retry-After` больше — берётся он); `403 abusive traffic` → бан группы
+на `ABUSIVE_BAN_SECONDS`.
+
+---
+
+## Sticky-сессии (affinity)
+
+- Задача закрепляется за exit IP надолго: привязка хранится в
+  `session_affinity` и не меняется, пока группа не запаркована/забанена, а
+  прокси не удалён/отключён в админке.
+- Идентификатор берётся из `x-opencode-session` / `x-session-affinity` /
+  `x-session-id` (валидный `ses_...`); если его нет — из fingerprint диалога
+  (ключ + проект + первое сообщение); одиночные запросы без истории привязку
+  не создают, но учитываются в статистике группы.
+- Новые задачи распределяются по score `S+R+T`: S — число привязанных сессий,
+  R — запросов за окно `AFFINITY_WINDOW_SECONDS`, T — реальных токенов за то
+  же окно; веса — `AFFINITY_WEIGHT_*`. Кулдаун/локальный RPM-кап родного
+  прокси не двигает привязку: текущий запрос временно уходит на другой адрес.
+- **Требование к клиенту (комбайну)**: присылать стабильный валидный
+  `x-opencode-session: ses_...` на задачу — тогда все её реплики гарантированно
+  идут через один exit IP. Без него шлюз сам выводит fingerprint диалога.
+- Переменные: `AFFINITY_ENABLED`, `AFFINITY_WINDOW_SECONDS`,
+  `AFFINITY_WEIGHT_SESSIONS`, `AFFINITY_WEIGHT_REQUESTS`,
+  `AFFINITY_WEIGHT_TOKENS`, `QUOTA_RESET_MARGIN_SECONDS`,
+  `ABUSIVE_BAN_SECONDS`. В `/admin/status` — блок `affinity` (host-only),
+  в `/health` — счётчики `egress_groups_*` и `sessions_*`.
 
 ---
 
@@ -161,11 +206,11 @@ OpenRoute/
 | ANY | `/v1/*` | openroute | Passthrough к opencode.ai (`chat/completions`, `models`, ...); стриминг поддержан |
 | GET | `/` | admin-service | Редирект на `/login` |
 | GET/POST | `/login` | admin-service | Вход в админку (только пароль) |
-| GET | `/admin/status` | openroute | Состояние пула: прокси, счётчики, usage по ключам |
+| GET | `/admin/status` | openroute | Состояние пула: прокси, egress-группы, session affinity, счётчики, usage по ключам |
 | GET | `/admin/logs?limit=N` | openroute | Последние запросы из лога (1..500, по умолчанию 100) |
 | GET | `/admin/ui` | admin-service | Веб-админка: страница «Прокси» |
 | GET | `/admin/ui/keys` | admin-service | Веб-админка: страница «Ключи» |
-| GET | `/health` | openroute | Liveness + счётчики пула |
+| GET | `/health` | openroute | Liveness + счётчики пула, egress-групп и привязанных сессий |
 | GET | `/docs`, `/openapi.json` | openroute | Swagger UI / схема |
 | ANY | `/internal/*` | — (нет наружу) | Internal API шлюза; доступен только admin-service по `X-Internal-Token` |
 
@@ -181,9 +226,11 @@ OpenRoute/
 |-----|-------|------|
 | 401 | неизвестный/отозванный клиентский ключ | `{"error": {"message": "...", "type": "invalid_request_error", "code": 401}}` |
 | 403 | модель вне allow-list ключа; неверный `X-Internal-Token` | OpenAI-конверт (шлюз отдаёт его и на `/internal/*`) |
+| 403 | `abusive traffic` от opencode — банит exit IP группы | тело upstream (passthrough) |
 | 404 | внутренний API выключен (пустой `INTERNAL_API_TOKEN`); неизвестный прокси/ключ в мутации | OpenAI-конверт |
 | 413 | тело запроса больше `MAX_BODY_BYTES` (без чтения тела при `Content-Length`) | OpenAI-конверт |
-| 429 | превышены RPM/TPM ключа; пул прокси насыщен (cooldown/кап) — с `Retry-After` | `{"error": {"type": "rate_limit_error", ...}}` |
+| 429 | превышены RPM/TPM ключа; все egress-группы запаркованы (квота до полуночи UTC / бан) — с `Retry-After` | `{"error": {"type": "rate_limit_error", ...}}` |
+| 429 | любой другой 429 upstream (провайдер/ключ) | тело upstream (passthrough, без cooldown и ротации) |
 | 502 | все прокси, которые пробовали, упали (`All upstream attempts failed`) | OpenAI-конверт |
 | 503 | пул пуст (нет прокси / фетч не удаётся) | OpenAI-конверт |
 | 504 | исчерпан бюджет ретраев `RETRY_BUDGET_SECONDS` | OpenAI-конверт |
@@ -240,11 +287,11 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000   # шлюз: /v1/*, /admin/*,
 
 | Компонент | Статус |
 |---|---|
-| `app/` (шлюз: `main`, `config`, `proxies`, `proxydb`, `keys`, `keydb`, `reqlog`, `pg`, `opencode`) | **реализовано** |
+| `app/` (шлюз: `main`, `config`, `proxies`, `proxydb`, `affinity`, `affinitydb`, `keys`, `keydb`, `reqlog`, `pg`, `opencode`) | **реализовано** |
 | `admin-service/` (`config`, `sessions`, `adminui`, `main`) | **реализовано** |
 | `proxy6-service/` | **реализовано** (px6.net → `descr=OPENROUTE`) |
 | edge / compose / Dockerfile / requirements / .env.example | **готово** |
-| `tests/` (`test_gateway`, `test_proxies`, `test_keys`, `test_reqlog`, `test_adminui`, `test_opencode`) | **реализовано** |
+| `tests/` (`test_gateway`, `test_proxies`, `test_affinity`, `test_affinitydb`, `test_keys`, `test_reqlog`, `test_adminui`, `test_opencode`) | **реализовано** |
 | `DESIGN.md` | замороженный контракт |
 
 ## Тесты
@@ -255,8 +302,9 @@ pytest tests
 ```
 
 `tests/test_opencode.py` — чистые юнит-тесты интеграции с opencode.ai (не
-требуют сети/БД). Остальные наборы (`test_gateway`, `test_proxies`, `test_keys`,
-`test_reqlog`, `test_adminui`) работают герметично: upstream и админка
-подменяются, а живой PostgreSQL для хранилищ шлюза поднимается из
-`docker-compose.test.yml` (`127.0.0.1:55433`), DSN переопределяется
-`OPENROUTE_TEST_DSN`.
+требуют сети/БД); `tests/test_affinity.py` — unit-тесты привязок, score и
+эвакуации (без БД). Остальные наборы (`test_gateway`, `test_proxies`,
+`test_affinitydb`, `test_keys`, `test_reqlog`, `test_adminui`) работают
+герметично: upstream и админка подменяются, а живой PostgreSQL для хранилищ
+шлюза (включая `session_affinity`) поднимается из `docker-compose.test.yml`
+(`127.0.0.1:55433`), DSN переопределяется `OPENROUTE_TEST_DSN`.

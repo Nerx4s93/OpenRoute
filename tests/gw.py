@@ -15,6 +15,7 @@ for tests of that surface.
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 
 import httpx
@@ -28,6 +29,8 @@ for _p in (str(PROJECT_ROOT), str(TESTS_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from app.affinity import AffinityManager  # noqa: E402
+from app.affinitydb import AffinityDB  # noqa: E402
 from app.config import Settings  # noqa: E402
 from app.keydb import KeyDB  # noqa: E402
 from app.keys import KeyStore, hash_key  # noqa: E402
@@ -160,7 +163,7 @@ class Gateway:
 
     def __init__(self, monkeypatch, pg_dsn, *, keys=None,
                  proxies=("http://proxy-a.invalid:8080", "http://proxy-b.invalid:8080"),
-                 settings_over=None):
+                 settings_over=None, affinity_rows=None):
         settings_over = dict(settings_over or {})
         self.settings = build_settings(pg_dsn, **settings_over)
         entries = keys if keys is not None else [
@@ -187,6 +190,18 @@ class Gateway:
         self.manager.apply_proxies([(p, True) for p in proxies])
         assert len(self.manager.proxies) == len(proxies), "proxies did not load"
 
+        # Affinity is built here (before the lifespan) so tests can seed
+        # bindings and drive a deterministic wall clock. main.affinity /
+        # main.affinitydb are pre-set; the lifespan reuses them.
+        self.wall_clock = {"value": None}  # None -> real time.time()
+        self.affinitydb = AffinityDB(self.settings.postgres_dsn)
+        if affinity_rows:
+            self.affinitydb.upsert_many(list(affinity_rows))
+        self.affinity = AffinityManager(
+            self.settings, self.manager, db=self.affinitydb,
+            now_wall=self.wall_now,
+        )
+
         self.keystore = KeyStore()
         self.keystore.load(key_rows)
         self.reqlog = RequestLog(self.settings.postgres_dsn)
@@ -196,6 +211,8 @@ class Gateway:
         monkeypatch.setattr(main, "manager", self.manager)
         monkeypatch.setattr(main, "keystore", self.keystore)
         monkeypatch.setattr(main, "reqlog", self.reqlog)
+        monkeypatch.setattr(main, "affinity", self.affinity)
+        monkeypatch.setattr(main, "affinitydb", self.affinitydb)
         monkeypatch.setattr(main, "refresh_loop", _quiet_refresh_loop)
         monkeypatch.setattr(main, "asyncio", _AsyncioShim(self.sleeps))
         # Reset the model catalogue cache between gateways.
@@ -218,6 +235,21 @@ class Gateway:
     def proxy(self, url):
         return next(p for p in self.manager.proxies if p.url == url)
 
+    # --- wall clock control (affinity quota/ban/window tests) ---
+
+    def wall_now(self) -> float:
+        value = self.wall_clock.get("value")
+        return time.time() if value is None else value
+
+    def set_wall(self, value: float) -> None:
+        self.wall_clock["value"] = value
+
+    def advance_wall(self, seconds: float) -> None:
+        self.wall_clock["value"] = self.wall_now() + seconds
+
+    def freeze_wall(self, value: float | None = None) -> None:
+        self.wall_clock["value"] = time.time() if value is None else value
+
     def script_upstream(self, router):
         """ensure_client -> every upstream client goes through ScriptedTransport(router)."""
         transport = ScriptedTransport(router)
@@ -233,6 +265,10 @@ class Gateway:
 
         self._mp.setattr(self.manager, "ensure_client", ensure_client)
         return transport
+
+    def flush_affinity(self):
+        """Run the coalescing affinity writer to completion in the gateway loop."""
+        self._gw_lifespan_client.portal.call(self.affinity.flush)
 
     def close(self):
         self.internal.__exit__(None, None, None)

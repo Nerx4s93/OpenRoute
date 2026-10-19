@@ -211,6 +211,66 @@ def test_free_tier_rejection():
         {"error": {"type": "FreeTierError"}}).encode()) == "FreeTierError"
 
 
+# --- daily quota / abusive-ban classifiers --------------------------------
+
+
+def test_error_type_and_is_free_usage_limit_strict():
+    body = {"type": "error", "error": {"type": "FreeUsageLimitError", "message": "x"}}
+    assert opencode.error_type(json.dumps(body)) == "FreeUsageLimitError"
+    assert opencode.error_type(json.dumps(body).encode()) == "FreeUsageLimitError"
+    assert opencode.is_free_usage_limit(json.dumps(body)) is True
+    assert opencode.is_free_usage_limit(json.dumps(body).encode()) is True
+
+    for other in (
+        {"error": {"type": "RateLimitError"}},
+        {"error": {"type": "FreeTierError"}},
+        {"error": {"type": "freeusagelimiterror"}},  # case-sensitive type
+        {"error": "FreeUsageLimitError"},             # wrong shape
+        {"type": "FreeUsageLimitError"},              # not nested under error
+    ):
+        raw = json.dumps(other)
+        assert opencode.is_free_usage_limit(raw) is False
+
+
+def test_error_type_never_raises():
+    for value in (None, b"", b"not json", b"[]", b"null", "\udcff", 42, b'{"error": null}'):
+        assert opencode.error_type(value) is None
+        assert opencode.is_free_usage_limit(value) is False
+        assert opencode.is_abusive_ban(value) is False
+
+
+def test_is_abusive_ban_case_insensitive_text_search():
+    assert opencode.is_abusive_ban(b"Forbidden: Abusive Traffic detected")
+    assert opencode.is_abusive_ban(b'{"error":{"message":"ABUSIVE TRAFFIC"}}')
+    assert opencode.is_abusive_ban("We saw abusive traffic from this IP")
+    assert not opencode.is_abusive_ban(b"FreeTierError")
+    assert not opencode.is_abusive_ban(None)
+
+
+def test_seconds_to_utc_midnight_exact_formula():
+    import math
+
+    for now in (0.0, 1_700_000_000.123, 86_399.5, 86_400.0, 123_456_789.987):
+        now_ms = int(now * 1000)
+        expected = math.ceil((86_400_000 - (now_ms % 86_400_000)) / 1000)
+        assert opencode.seconds_to_utc_midnight(now) == expected
+
+
+def test_seconds_to_utc_midnight_midnight_means_next_midnight():
+    # 2026-10-19 00:00:00 UTC
+    midnight = 1_761_177_600.0
+    assert opencode.seconds_to_utc_midnight(midnight) == 86_400.0
+    # One hour before midnight -> one hour (in whole seconds, rounded up).
+    assert opencode.seconds_to_utc_midnight(midnight - 3600.0) == 3600.0
+    # 23:59:59.500 -> 1 s (ceil); timezone is irrelevant (UTC epoch only).
+    assert opencode.seconds_to_utc_midnight(midnight - 0.5) == 1.0
+
+
+def test_seconds_to_utc_midnight_does_not_depend_on_local_timezone():
+    now = 1_761_177_600.0 + 3.0
+    assert opencode.seconds_to_utc_midnight(now) == 86_400.0 - 3.0
+
+
 def test_extract_model():
     assert opencode.extract_model(b'{"model":"x"}') == "x"
     assert opencode.extract_model(b'{"model":5}') is None

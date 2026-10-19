@@ -607,3 +607,166 @@ def test_mask_proxy_short_and_empty():
     assert mask_proxy("http://h:1") == "h:1"
     assert mask_proxy("") == "***"
     assert mask_proxy(None) == "***"
+
+
+# --- egress groups (one exit IP, many purchased ports) ---------------------
+
+
+def test_egress_groups_merge_ports_of_one_ip_and_normalize_hosts():
+    m = mgr(proxies=[
+        "http://u:p@217.29.62.211:10077",
+        "http://u:p@217.29.62.211:10078",
+        "http://Proxy-B.INVALID:8080",
+    ])
+    groups = m.egress_groups()
+    assert [g.host for g in groups] == ["217.29.62.211", "proxy-b.invalid"]
+    assert len(groups[0].proxies) == 2
+    assert m.group_of("http://217.29.62.211:10078") is groups[0]
+    assert m.group_of("http://other:1") is None
+
+
+def test_egress_group_ipv6_uses_64_prefix():
+    m = mgr(proxies=[
+        "http://[2001:db8:0:1::1]:8080",
+        "http://[2001:db8:0:1::2]:8080",
+        "http://[2001:db8:0:2::1]:8080",
+    ])
+    groups = m.egress_groups()
+    assert len(groups) == 2
+    assert len(groups[0].proxies) == 2
+    assert m.group_of("http://[2001:db8:0:1::2]:8080") is groups[0]
+
+
+def test_next_proxy_never_returns_parked_group_url():
+    m = mgr(proxies=["http://a:1", "http://b:1"])
+    a, b = m.egress_groups()
+    m.mark_quota_exhausted(a, time.time() + 3600)
+    for _ in range(10):
+        assert m.next_proxy().url == "http://b:1"
+
+    m.mark_banned(b, time.time() + 10)
+    with pytest.raises(NoReadyProxyError) as ei:
+        m.next_proxy()
+    assert ei.value.kind == "saturated"
+    assert ei.value.retry_after == pytest.approx(10.0, abs=2.0)
+
+    a.quota_until = time.time() - 1
+    assert m.next_proxy().url == "http://a:1"
+
+
+def test_mark_success_never_clears_group_parking():
+    m = mgr(proxies=["http://a:1", "http://b:1"])
+    a = m.egress_groups()[0]
+    m.mark_quota_exhausted(a, time.time() + 100)
+    m.mark_banned(a, time.time() + 200)
+    p = a.proxies[0]
+    m.mark_success(p)
+    assert a.quota_until > time.time() and a.banned_until > time.time()
+    assert m.next_proxy().url == "http://b:1"  # a stays parked
+
+
+def test_apply_proxies_preserves_parking_and_groups_on_refresh():
+    m = mgr(proxies=["http://10.0.0.1:1", "http://10.0.0.2:2"])
+    g1, g2 = m.egress_groups()
+    until = time.time() + 500
+    m.mark_quota_exhausted(g1, until)
+    m.mark_banned(g2, until)
+
+    # Refresh (same rows + a new purchased port on the same IP).
+    m.apply_proxies([
+        ("http://10.0.0.1:1", True),
+        ("http://10.0.0.1:3", True),
+        ("http://10.0.0.2:2", True),
+    ])
+    groups = m.egress_groups()
+    assert len(groups) == 2
+    assert len(groups[0].proxies) == 2
+    assert groups[0].quota_until == until
+    assert groups[1].banned_until == until
+
+    # Removing the only URL of a group removes the group; siblings survive.
+    m.remove_proxy("http://10.0.0.1:1")
+    assert [g.host for g in m.egress_groups()] == ["10.0.0.1", "10.0.0.2"]
+    assert len(m.egress_groups()[0].proxies) == 1
+    m.remove_proxy("http://10.0.0.1:3")
+    assert [g.host for g in m.egress_groups()] == ["10.0.0.2"]
+
+
+def test_earliest_ready_seconds_includes_parked_group_even_if_excluded():
+    m = mgr(proxies=["http://a:1", "http://b:1"])
+    a, b = m.egress_groups()
+    m.mark_quota_exhausted(a, time.time() + 120)
+    b.proxies[0].cooldown_until = time.monotonic() + 5
+    excluded = {p.url for p in m.proxies}
+    # b is excluded and therefore not a wait candidate; parked a still is.
+    assert m.earliest_ready_seconds(excluded) == pytest.approx(120.0, abs=2.0)
+    with pytest.raises(NoReadyProxyError) as ei:
+        m.next_proxy(exclude=excluded)
+    assert ei.value.kind == "saturated"
+    assert ei.value.retry_after == pytest.approx(120.0, abs=2.0)
+
+
+def test_no_ready_kind_empty_excluded_saturated():
+    empty = mgr()
+    with pytest.raises(NoReadyProxyError) as ei:
+        empty.next_proxy()
+    assert (ei.value.kind, ei.value.retry_after) == ("empty", None)
+
+    m = mgr(proxies=["http://a:1", "http://b:1"])
+    with pytest.raises(NoReadyProxyError) as ei:
+        m.next_proxy(exclude={p.url for p in m.proxies})
+    assert (ei.value.kind, ei.value.retry_after) == ("excluded", None)
+
+    for p in m.proxies:
+        p.cooldown_until = time.monotonic() + 30
+    with pytest.raises(NoReadyProxyError) as ei:
+        m.next_proxy()
+    assert ei.value.kind == "saturated"
+    assert ei.value.retry_after == pytest.approx(30.0, abs=2.0)
+
+
+def test_next_proxy_in_group_round_robin_and_exclude():
+    m = mgr(proxies=["http://10.0.0.1:1", "http://10.0.0.1:2", "http://10.0.0.2:3"])
+    g = m.egress_groups()[0]
+    assert [m.next_proxy_in_group(g).url for _ in range(4)] == [
+        "http://10.0.0.1:1", "http://10.0.0.1:2",
+        "http://10.0.0.1:1", "http://10.0.0.1:2",
+    ]
+    assert m.next_proxy_in_group(g, exclude={"http://10.0.0.1:1"}).url == \
+        "http://10.0.0.1:2"
+    with pytest.raises(NoReadyProxyError):
+        m.next_proxy_in_group(g, exclude={"http://10.0.0.1:1", "http://10.0.0.1:2"})
+
+
+@pytest.mark.asyncio
+async def test_refresh_skips_probing_parked_groups():
+    m = mgr(proxies=["http://a:1", "http://b:1"])
+    a = m.egress_groups()[0]
+    m.mark_quota_exhausted(a, time.time() + 3600)
+    probed: list[str] = []
+
+    async def record_probe(url):
+        probed.append(url)
+        return True
+
+    import types
+    m._probe_proxy = types.MethodType(lambda self, url: record_probe(url), m)
+    await _fake_fetch(m, {"proxies": [{"host": "a", "port": 1},
+                                     {"host": "b", "port": 1}]})
+    assert await m.refresh_proxies() is True
+    assert probed == ["http://b:1"]
+    assert a.quota_until > time.time()
+    await m.aclose()
+
+
+def test_status_adds_group_info_without_breaking_proxy_order():
+    m = mgr(proxies=["http://10.0.0.1:1", "http://10.0.0.1:2", "http://10.0.0.2:3"])
+    st = m.status()
+    assert [row["proxy"] for row in st["proxies"]] == [
+        "10.0.0.1:1", "10.0.0.1:2", "10.0.0.2:3"]
+    assert st["egress_groups_total"] == 2
+    assert st["egress_groups_ready"] == 2
+    assert st["egress_groups_quota_parked"] == 0
+    assert st["egress_groups_banned"] == 0
+    assert [g["ip"] for g in st["egress_groups"]] == ["10.0.0.1", "10.0.0.2"]
+    assert st["egress_groups"][0]["proxy_count"] == 2

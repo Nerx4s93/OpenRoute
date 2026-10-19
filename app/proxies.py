@@ -26,6 +26,7 @@ which does not count against the chat quota).
 from __future__ import annotations
 
 import asyncio
+import ipaddress
 import logging
 import re
 import time
@@ -99,18 +100,31 @@ class NoReadyProxyError(RuntimeError):
     """No proxy is ready (see ``ProxyManager.next_proxy``).
 
     CONTRACT (main.py): ``retry_after`` — seconds until the earliest proxy
-    becomes ready (end of cooldown OR a slot in the RPM window), so the
-    gateway can answer 429/503 with ``Retry-After``; ``None`` means waiting is
-    pointless (pool permanently empty / all candidates already excluded by the
-    current request's retry loop).
+    becomes ready (end of cooldown OR a slot in the RPM window OR the end of a
+    group's ``quota_until``/``banned_until`` parking), so the gateway can answer
+    429/503 with ``Retry-After``; ``None`` means waiting is pointless.
+
+    ``kind`` (additive, keeps the old constructor/``retry_after`` contract):
+
+    - ``"empty"`` — the pool has no usable proxies at all (503),
+    - ``"excluded"`` — every usable proxy was already tried by this request
+      (502),
+    - ``"saturated"`` — proxies exist but are cooling/RPM-capped/parked; wait
+      ``retry_after`` seconds (429).
     """
 
-    def __init__(self, retry_after: Optional[float] = None) -> None:
+    def __init__(self, retry_after: Optional[float] = None,
+                 kind: str = "empty") -> None:
         self.retry_after = retry_after
+        self.kind = kind
         if retry_after is None:
-            super().__init__("no ready proxy (pool empty or all candidates excluded)")
+            if kind == "excluded":
+                msg = "no ready proxy (all candidates already excluded)"
+            else:
+                msg = "no ready proxy (pool empty or all disabled)"
         else:
-            super().__init__(f"no ready proxy (retry_after={retry_after:.1f}s)")
+            msg = f"no ready proxy ({kind}, retry_after={retry_after:.1f}s)"
+        super().__init__(msg)
 
 
 @dataclass
@@ -139,6 +153,64 @@ class Proxy:
         return not self.manually_disabled
 
 
+def canonical_exit_host(proxy_or_url: object) -> str:
+    """Canonical egress-group key for a proxy URL / :class:`Proxy`.
+
+    Upstream quota and abusive bans are keyed by **exit IP**, not by the
+    purchased ``host:port``: two ports on one IP are one quota bucket. The key
+    is therefore the URL host, lowercased; IP literals are normalised with
+    :mod:`ipaddress` and IPv6 is truncated to ``/64`` (matching the upstream).
+    Empty/unparseable input yields ``""``.
+    """
+    raw = getattr(proxy_or_url, "url", proxy_or_url)
+    text = str(raw or "").strip()
+    if not text:
+        return ""
+    host: str | None = None
+    try:
+        host = httpx.URL(text).host
+    except Exception:
+        host = None
+    if not host:
+        # Best effort for malformed/partial URLs: strip userinfo and port.
+        tail = text.split("@")[-1]
+        if tail.startswith("["):
+            host = tail[1:].split("]", 1)[0]
+        else:
+            host = tail.rsplit(":", 1)[0]
+    host = (host or "").strip().strip("[]").lower()
+    if not host:
+        return ""
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return host
+    if ip.version == 6:
+        return str(ipaddress.ip_network((ip, 64), strict=False))
+    return str(ip)
+
+
+@dataclass
+class EgressGroup:
+    """One exit IP (egress): every purchased proxy URL that shares it.
+
+    ``quota_until`` / ``banned_until`` are ``time.time()`` (wall-clock) epochs:
+    a daily upstream quota reset is tied to the UTC calendar and the values are
+    shown to operators. Per-URL breaker state (``Proxy.cooldown_until``,
+    ``_rpm``) stays on the ``time.monotonic()`` clock.
+    """
+
+    host: str
+    proxies: list[Proxy] = field(default_factory=list, repr=False)
+    quota_until: float = 0.0
+    banned_until: float = 0.0
+    _rr: int = field(default=0, repr=False)
+
+    def parked_until(self) -> float:
+        """Current parking epoch (``max(quota, ban)``; 0 = not parked)."""
+        return max(self.quota_until, self.banned_until)
+
+
 class ProxyManager:
     """Round-robin proxy pool with circuit breaker and 429 parking.
 
@@ -154,6 +226,9 @@ class ProxyManager:
     def __init__(self, settings: Settings) -> None:
         self._s = settings
         self.proxies: list[Proxy] = []
+        self._groups: list[EgressGroup] = []
+        self._group_by_host: dict[str, EgressGroup] = {}
+        self._group_by_url: dict[str, EgressGroup] = {}
         self.last_fetch_status: Optional[str] = None
         self.db = None  # optional ProxyDB (duck-typed); bound via bind_db()
         self._lock = asyncio.Lock()
@@ -186,6 +261,61 @@ class ProxyManager:
                 self._close_client_soon(client, f"apply_proxies drop {mask_proxy(gone.url)}")
         self.proxies = new
         self._rr = self._rr % len(new) if new else 0
+        self._rebuild_groups()
+
+    def _rebuild_groups(self) -> None:
+        """Rebuild egress groups from ``self.proxies``, preserving parking.
+
+        A refresh must not lose a ``quota_until``/``banned_until`` set between
+        two fetches: the state is carried over by canonical host, not by URL
+        object. First-appearance order follows the stable ``self.proxies``
+        order. Runtime ``Proxy`` objects (and therefore cooldown/RPM state) are
+        already preserved by :meth:`apply_proxies`.
+        """
+        previous = {g.host: g for g in self._groups}
+        groups: list[EgressGroup] = []
+        by_host: dict[str, EgressGroup] = {}
+        by_url: dict[str, EgressGroup] = {}
+        for proxy in self.proxies:
+            host = canonical_exit_host(proxy)
+            group = by_host.get(host)
+            if group is None:
+                old = previous.get(host)
+                group = EgressGroup(
+                    host=host,
+                    quota_until=old.quota_until if old else 0.0,
+                    banned_until=old.banned_until if old else 0.0,
+                    _rr=old._rr if old else 0,
+                )
+                by_host[host] = group
+                groups.append(group)
+            group.proxies.append(proxy)
+            by_url[proxy.url] = group
+        for group in groups:
+            group._rr = group._rr % len(group.proxies) if group.proxies else 0
+        self._groups = groups
+        self._group_by_host = by_host
+        self._group_by_url = by_url
+
+    def egress_groups(self) -> list[EgressGroup]:
+        """Egress groups in stable (first-appearance) order."""
+        return list(self._groups)
+
+    def group_by_host(self, host: str) -> Optional[EgressGroup]:
+        """Group by canonical host key (see :func:`canonical_exit_host`)."""
+        return self._group_by_host.get((host or "").lower())
+
+    def group_of(self, proxy_or_url: object) -> Optional[EgressGroup]:
+        """Egress group of a :class:`Proxy` or URL; ``None`` if not in pool.
+
+        Falls back to the canonical host so a URL that was just removed still
+        resolves to its IP group when another purchased port on that IP remains.
+        """
+        raw = getattr(proxy_or_url, "url", proxy_or_url)
+        group = self._group_by_url.get(str(raw))
+        if group is not None:
+            return group
+        return self._group_by_host.get(canonical_exit_host(raw))
 
     def remove_proxy(self, proxy: str) -> bool:
         """Remove from the pool; client is closed in the background."""
@@ -197,6 +327,7 @@ class ProxyManager:
                     self._close_client_soon(client, f"remove_proxy {mask_proxy(proxy)}")
                 n = len(self.proxies)
                 self._rr = self._rr % n if n else 0
+                self._rebuild_groups()
                 return True
         return False
 
@@ -315,16 +446,30 @@ class ProxyManager:
             snapshot = list(self.proxies)
 
         # Probe live members concurrently (outside the lock — probes await).
-        probe_urls = [p.url for p in snapshot if p.enabled]
+        # A parked group (daily quota / abusive ban) is not probed at all: a
+        # successful probe must never lift parking, and hitting the upstream
+        # from a quota-exhausted IP is pointless.
+        now_wall = time.time()
+        parked_urls = {
+            p.url
+            for g in self.egress_groups()
+            if g.parked_until() > now_wall
+            for p in g.proxies
+        }
+        probe_urls = [p.url for p in snapshot if p.enabled and p.url not in parked_urls]
         verdicts = await asyncio.gather(*(self._probe_proxy(u) for u in probe_urls))
         alive = {u for u, ok in zip(probe_urls, verdicts) if ok}
 
         # Apply verdicts under the lock, re-checking state after each await.
         async with self._lock:
             now = time.monotonic()
+            now_wall = time.time()
             for p in self.proxies:
                 if not p.enabled:
                     continue
+                group = self.group_of(p)
+                if group is not None and group.parked_until() > now_wall:
+                    continue  # never clear quota/banned parking via a probe
                 if p.url in alive:
                     self.mark_success(p)  # proxy came back -> lift cooldown early
                 else:
@@ -336,6 +481,8 @@ class ProxyManager:
                 1 for p in self.proxies
                 if p.enabled and not p.disabled and p.cooldown_until <= now
                 and not self._rpm_capped(p, now)
+                and (self.group_of(p) is None
+                     or self.group_of(p).parked_until() <= now_wall)
             )
             self.last_fetch_status = (
                 f"ok at {time.strftime('%Y-%m-%d %H:%M:%S')}: "
@@ -453,51 +600,189 @@ class ProxyManager:
 
     # --- balancing ---
 
+    @staticmethod
+    def _eligible(p: Proxy) -> bool:
+        """In rotation by configuration (pool membership / manual flags)."""
+        return p.enabled and not p.disabled and not p.manually_disabled
+
+    def _proxy_ready(self, p: Proxy, now_mono: float) -> bool:
+        """Enabled and not cooling / RPM-capped (group parking checked by caller)."""
+        return (
+            self._eligible(p)
+            and p.cooldown_until <= now_mono
+            and not self._rpm_capped(p, now_mono)
+        )
+
+    def _group_parked(self, group: EgressGroup, now_wall: float) -> bool:
+        return group.parked_until() > now_wall
+
+    def group_is_ready(self, group: EgressGroup, *,
+                       now_mono: Optional[float] = None,
+                       now_wall: Optional[float] = None) -> bool:
+        """True when the group is not parked and has at least one ready URL."""
+        now_mono = time.monotonic() if now_mono is None else now_mono
+        now_wall = time.time() if now_wall is None else now_wall
+        if self._group_parked(group, now_wall):
+            return False
+        return any(self._proxy_ready(p, now_mono) for p in group.proxies)
+
+    def mark_quota_exhausted(self, group: EgressGroup, until: float) -> None:
+        """Park the WHOLE egress group (daily FreeUsageLimit) until an epoch.
+
+        Only forward movement: a shorter value never shortens existing parking.
+        ``mark_success``/health probes never clear it (only expiry does).
+        """
+        group.quota_until = max(group.quota_until, float(until))
+
+    def mark_banned(self, group: EgressGroup, until: float) -> None:
+        """Ban the whole egress group (abusive traffic) until a wall-clock epoch."""
+        group.banned_until = max(group.banned_until, float(until))
+
+    def _ready_urls(self, group: EgressGroup, exclude: set[str],
+                    now_mono: float) -> list[Proxy]:
+        return [
+            p for p in group.proxies
+            if p.url not in exclude and self._proxy_ready(p, now_mono)
+        ]
+
     def next_proxy(self, exclude: Optional[set[str]] = None) -> Proxy:
         """Uniform round-robin over ready proxies; never returns ``None``.
 
         Ready = enabled (in pool, not manually disabled), not disabled, not in
-        cooldown, not on the RPM cap, not in ``exclude``. The ``_rr`` index
-        lives over the STABLE ``self.proxies`` list (not over the recomputed
-        ready subset): each pick walks forward from ``_rr``, skipping non-ready
-        entries, and leaves ``_rr`` right after the chosen entry — so a proxy is
-        never picked twice in a row and never skipped when a neighbour cools
-        down.
+        cooldown, not on the RPM cap, not in ``exclude``, and its whole egress
+        group is not parked (``quota_until`` / ``banned_until`` in the future).
+        The ``_rr`` index lives over the STABLE ``self.proxies`` list (not over
+        the recomputed ready subset): each pick walks forward from ``_rr``,
+        skipping non-ready entries, and leaves ``_rr`` right after the chosen
+        entry — so a proxy is never picked twice in a row and never skipped
+        when a neighbour cools down.
 
-        CONTRACT: none ready -> ``NoReadyProxyError(retry_after)``:
-        ``retry_after`` = seconds until the earliest candidate frees up
-        (cooldown / RPM slot) or ``None`` when the pool is permanently empty /
-        all candidates are excluded by the request's retry loop.
+        CONTRACT: none ready -> ``NoReadyProxyError`` with ``kind`` =
+        ``"empty"`` / ``"excluded"`` / ``"saturated"`` and ``retry_after`` =
+        seconds until the earliest candidate frees up (cooldown / RPM slot /
+        group quota/ban reset) or ``None`` when waiting is pointless.
         """
         exclude = exclude or set()
         now = time.monotonic()
+        now_wall = time.time()
         n = len(self.proxies)
         if n == 0:
-            raise NoReadyProxyError(None)
+            raise NoReadyProxyError(None, "empty")
         for i in range(n):
             idx = (self._rr + i) % n
             p = self.proxies[idx]
-            if (
-                p.enabled and not p.disabled and not p.manually_disabled
-                and p.url not in exclude
-                and p.cooldown_until <= now and not self._rpm_capped(p, now)
-            ):
-                self._rr = (idx + 1) % n
-                return p
-        raise NoReadyProxyError(self._earliest_ready_seconds(exclude, now))
+            if not self._proxy_ready(p, now):
+                continue
+            group = self.group_of(p)
+            if group is not None and self._group_parked(group, now_wall):
+                continue
+            if p.url in exclude:
+                continue
+            self._rr = (idx + 1) % n
+            return p
+        raise self._no_ready(exclude, now, now_wall)
 
-    def _earliest_ready_seconds(self, exclude: set[str], now: float) -> Optional[float]:
+    def _no_ready(self, exclude: set[str], now_mono: float,
+                  now_wall: float) -> NoReadyProxyError:
+        """Classify an exhausted pool (see ``NoReadyProxyError.kind``)."""
+        eligible = [p for p in self.proxies if self._eligible(p)]
+        if not eligible:
+            return NoReadyProxyError(None, "empty")
+        not_excluded = [p for p in eligible if p.url not in exclude]
+        parked = any(
+            g.parked_until() > now_wall
+            and any(self._eligible(p) for p in g.proxies)
+            for g in self._groups
+        )
+        if not not_excluded and not parked:
+            return NoReadyProxyError(None, "excluded")
+        wait = self._earliest_ready_seconds(exclude, now_mono, now_wall)
+        if wait is None and not parked:
+            return NoReadyProxyError(None, "excluded")
+        return NoReadyProxyError(wait, "saturated")
+
+    def next_proxy_in_group(self, group: EgressGroup,
+                            exclude: Optional[set[str]] = None) -> Proxy:
+        """Round-robin over ready URLs of ONE egress group.
+
+        Unlike :meth:`next_proxy`, this never crosses group boundaries: affinity
+        uses it to keep a session on its exit IP. Raises ``NoReadyProxyError``
+        (``saturated``/``excluded``/``empty``) when the group itself is parked
+        or has no ready non-excluded URL.
+        """
+        exclude = exclude or set()
+        now = time.monotonic()
+        now_wall = time.time()
+        if not group.proxies:
+            raise NoReadyProxyError(None, "empty")
+        if self._group_parked(group, now_wall):
+            wait = max(group.parked_until() - now_wall, 0.0)
+            url_wait = self._group_url_wait(group, exclude, now)
+            raise NoReadyProxyError(max(wait, url_wait), "saturated")
+        n = len(group.proxies)
+        for i in range(n):
+            idx = (group._rr + i) % n
+            p = group.proxies[idx]
+            if p.url in exclude or not self._proxy_ready(p, now):
+                continue
+            group._rr = (idx + 1) % n
+            return p
+        if any(self._eligible(p) for p in group.proxies if p.url not in exclude):
+            raise NoReadyProxyError(
+                self._group_url_wait(group, exclude, now), "saturated")
+        raise NoReadyProxyError(None, "excluded")
+
+    def _group_url_wait(self, group: EgressGroup, exclude: set[str],
+                        now_mono: float) -> float:
+        """Seconds until some URL of ``group`` is ready (parking not included)."""
+        waits: list[float] = []
+        for p in group.proxies:
+            if not self._eligible(p) or p.url in exclude:
+                continue
+            waits.append(max(p.cooldown_until - now_mono,
+                             self._rpm_wait(p, now_mono), 0.0))
+        return min(waits) if waits else 0.0
+
+    def earliest_ready_seconds(self, exclude: Optional[set[str]] = None) -> Optional[float]:
+        """Public ``retry_after`` estimate (dual clock, includes parked groups).
+
+        ``None`` = nothing sensible to wait for (pool empty or every candidate
+        already excluded). Parked groups are included even when all their URLs
+        are in ``exclude``: the caller may be out of fresh URLs but the group's
+        quota/ban reset is still the earliest moment the request can proceed.
+        """
+        return self._earliest_ready_seconds(
+            exclude or set(), time.monotonic(), time.time())
+
+    def _earliest_ready_seconds(self, exclude: set[str], now: float,
+                                now_wall: Optional[float] = None) -> Optional[float]:
         """``retry_after``: seconds until the earliest candidate becomes ready.
 
-        Only enabled, non-disabled proxies NOT in ``exclude`` are considered:
-        candidates excluded by the retry loop will not "revive" by waiting.
-        ``None`` = nothing to wait for (no candidates at all).
+        Two clocks are mixed explicitly: cooldown/RPM use ``now`` (monotonic),
+        quota/ban use ``time.time()``. For a parked group the wait is
+        ``max(parking_reset, earliest URL cooldown/RPM)`` and its URLs are
+        considered even if they are in ``exclude`` (see
+        :meth:`earliest_ready_seconds`). ``None`` = no eligible candidate.
         """
+        if now_wall is None:
+            now_wall = time.time()
         best: Optional[float] = None
-        for p in self.proxies:
-            if not p.enabled or p.disabled or p.manually_disabled or p.url in exclude:
+        for group in self._groups:
+            if not any(self._eligible(p) for p in group.proxies):
                 continue
-            wait = max(p.cooldown_until - now, self._rpm_wait(p, now), 0.0)
+            parked_wait = max(group.parked_until() - now_wall, 0.0)
+            if parked_wait > 0:
+                url_wait = self._group_url_wait(group, set(), now)
+                wait = max(parked_wait, url_wait)
+            else:
+                waits = [
+                    max(p.cooldown_until - now, self._rpm_wait(p, now), 0.0)
+                    for p in group.proxies
+                    if p.url not in exclude and self._eligible(p)
+                ]
+                if not waits:
+                    continue
+                wait = min(waits)
             if best is None or wait < best:
                 best = wait
         return best
@@ -607,9 +892,19 @@ class ProxyManager:
         ``proxies_cooling`` — in cooldown; ``proxies_rpm_capped`` — hit the
         local rolling RPM cap (may overlap with cooling). Per-proxy:
         ``rpm_window`` — current RPM load, ``rpm_capped`` — whether capped.
+
+        Additive egress-group contract: ``egress_groups_total`` /
+        ``egress_groups_ready`` / ``egress_groups_quota_parked`` /
+        ``egress_groups_banned`` plus an ``egress_groups`` list with host-only
+        data (never credentials). The order and keys of ``proxies`` are
+        unchanged (admin templates zip it with ``manager.proxies``).
         """
         now = time.monotonic()
+        now_wall = time.time()
         enabled = [p for p in self.proxies if p.enabled and not p.disabled]
+        groups = self.egress_groups()
+        group_ready = [self.group_is_ready(g, now_mono=now, now_wall=now_wall)
+                       for g in groups]
         return {
             "provider": PROVIDER_NAME,
             "proxies_total": len(self.proxies),
@@ -618,6 +913,10 @@ class ProxyManager:
             "proxies_manually_disabled": sum(1 for p in self.proxies if p.manually_disabled),
             "proxies_cooling": sum(1 for p in enabled if p.cooldown_until > now),
             "proxies_rpm_capped": sum(1 for p in enabled if self._rpm_capped(p, now)),
+            "egress_groups_total": len(groups),
+            "egress_groups_ready": sum(1 for ok in group_ready if ok),
+            "egress_groups_quota_parked": sum(1 for g in groups if g.quota_until > now_wall),
+            "egress_groups_banned": sum(1 for g in groups if g.banned_until > now_wall),
             # Defensive: never expose userinfo/DSN credentials in the snapshot.
             "last_proxies_fetch": redact_url(self.last_fetch_status) if self.last_fetch_status else None,
             "proxies": [
@@ -638,6 +937,18 @@ class ProxyManager:
                     "last_error": p.last_error,
                 }
                 for p in self.proxies
+            ],
+            "egress_groups": [
+                {
+                    "ip": g.host,
+                    "host": g.host,
+                    "proxies": [mask_proxy(p.url) for p in g.proxies],
+                    "proxy_count": len(g.proxies),
+                    "quota_seconds_left": round(max(0.0, g.quota_until - now_wall), 1),
+                    "banned_seconds_left": round(max(0.0, g.banned_until - now_wall), 1),
+                    "ready": ready,
+                }
+                for g, ready in zip(groups, group_ready)
             ],
         }
 
