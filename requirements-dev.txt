@@ -1,0 +1,6 @@
+-r requirements.txt
+pytest==9.1.1
+pytest-asyncio==1.4.0
+# тесты импортируют admin-service, его сессии живут в redis-py (фейк-хранилище,
+# реального Redis в юнит-тестах нет)
+redis>=5.0.1,<7.0

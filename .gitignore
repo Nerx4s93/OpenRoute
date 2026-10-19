@@ -1,0 +1,11 @@
+# --- Секреты и локальное состояние (никогда не коммитить) ---
+.env
+admin-service/.env
+proxy6-service/.env
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.venv-win/

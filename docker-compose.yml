@@ -1,0 +1,229 @@
+# Проект зафиксирован, чтобы имена контейнеров/сети не зависели от имени каталога.
+name: openroute
+
+services:
+  # --- edge: ЕДИНСТВЕННАЯ точка входа (API Gateway-паттерн) ---
+  # Наружу (0.0.0.0:${OPENROUTE_EDGE_PORT:-53202}) торчит только nginx;
+  # openroute и admin-service прячутся в docker-сети, их порты хосту не
+  # публикуются. /internal/* наружу не маршрутизируется вообще.
+  # Хост-порт настраивается через OPENROUTE_EDGE_PORT (по умолчанию 53202;
+  # NVRoute занимает 53201) — оба стека работают одновременно.
+  edge:
+    build: ./edge
+    image: openroute-edge
+    ports:
+      - "${OPENROUTE_EDGE_PORT:-53202}:8000"
+    restart: unless-stopped
+    init: true
+    mem_limit: 64m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - SETUID
+      - SETGID
+      - NET_BIND_SERVICE
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - net
+    depends_on:
+      openroute:
+        condition: service_healthy
+      admin-service:
+        condition: service_started
+
+  # --- PostgreSQL: хранилище шлюза (лог запросов + proxies/keys).
+  # В приватной сети openroute-net; порт наружу НЕ публикуется (как у proxy6).
+  # Данные — в именованном томе pgdata (переживает пересоздание контейнера).
+  postgres:
+    image: postgres:17-alpine
+    container_name: openroute-postgres
+    environment:
+      POSTGRES_USER: openroute
+      POSTGRES_PASSWORD: openroute  # только внутри openroute-net; поменяйте при необходимости
+      POSTGRES_DB: openroute
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    restart: unless-stopped
+    init: true
+    mem_limit: 256m
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openroute -d openroute"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - net
+
+  # --- Redis: хранилище сессий admin-service. В приватной сети openroute-net;
+  # порт наружу НЕ публикуется. AOF (everysec) + том: сессии переживают
+  # рестарт. allkeys-lru: при нехватке памяти выгоняются старейшие ключи
+  # (только сессии), Redis не падает.
+  redis:
+    image: redis:7-alpine
+    container_name: openroute-redis
+    command:
+      - redis-server
+      - --appendonly
+      - "yes"
+      - --appendfsync
+      - everysec
+      - --maxmemory
+      - 64mb
+      - --maxmemory-policy
+      - allkeys-lru
+    volumes:
+      - redisdata:/data
+    restart: unless-stopped
+    init: true
+    mem_limit: 96m
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 5s
+    networks:
+      - net
+
+  # --- шлюз OpenRoute: data plane (/v1/*, /admin/status, /admin/logs, /health)
+  # + internal API (/internal/*, X-Internal-Token) для admin-service ---
+  openroute:
+    build: .
+    image: openroute
+    env_file:
+      - .env
+    environment:
+      # PostgreSQL — сосед по docker-сети (POSTGRES_DSN из .env предназначен
+      # для локального запуска без Docker, здесь перекрываем хост на postgres).
+      POSTGRES_DSN: postgresql://openroute:openroute@postgres:5432/openroute
+    restart: unless-stopped
+    # UPSTREAM_TIMEOUT=300: стримы дорабатывают до конца до SIGKILL
+    # (дефолт Docker — всего 10с); in-flight записи лога в PostgreSQL тоже
+    # успевают доехать (pool.close() в lifespan).
+    stop_grace_period: 320s
+    init: true
+    mem_limit: 512m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - net
+    # Порядок старта: сначала proxy6 (шлюз тянет из него список прокси) и
+    # postgres (хранилище лога/прокси/ключей). /health у proxy6 не ходит в
+    # апстрим, так что condition безопасен; если proxy6 всё же упал — шлюз
+    # ретраит фетч через PROXY_RETRY_SECONDS.
+    depends_on:
+      proxy6:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
+  # --- admin-service: control plane (сайт /login + /admin/ui* + сессии).
+  # Данными владеет шлюз; сюда ходит через его internal API с общим секретом.
+  # Имя сервиса = DNS-имя в сети (admin-service:8000); на него ссылается
+  # upstream в edge/nginx.conf — не переименовывать в одну сторону.
+  admin-service:
+    build: ./admin-service
+    image: openroute-admin
+    env_file:
+      - ./admin-service/.env
+    restart: unless-stopped
+    init: true
+    mem_limit: 128m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - net
+    depends_on:
+      openroute:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+
+  proxy6:
+    build: ./proxy6-service
+    image: openroute-proxy6
+    # container_name задаёт DNS-имя в сети: шлюз ходит по
+    # PROXIES_URL=http://openroute-proxy6:8000/proxies — не переименовывать.
+    # Имя уникально для всего docker-демона и не конфликтует с NVRoute
+    # (у того контейнер прокси-сервиса называется proxy6-service).
+    container_name: openroute-proxy6
+    env_file:
+      - ./proxy6-service/.env
+    # Хост-порт НЕ публикуем: /proxies отдаёт креды прокси в открытом виде.
+    # Debug: docker run --rm --network openroute-net curlimages/curl \
+    #   http://openroute-proxy6:8000/proxies
+    restart: unless-stopped
+    init: true
+    mem_limit: 128m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - net
+
+networks:
+  # Собственная (проектная, НЕ external) сеть OpenRoute: полностью изолирована
+  # от соседних стеков (в NVRoute — своя service-net), DNS-имена и имена
+  # контейнеров не пересекаются. Compose создаёт её сам — вручную создавать
+  # не нужно (и не нужно подключать к ней чужие контейнеры).
+  net:
+    name: openroute-net
+
+volumes:
+  # Данные PostgreSQL (именованный том — переживает пересоздание контейнера
+  # и `docker compose down`; удаляется только командой `down -v`).
+  pgdata:
+  # AOF Redis: сессии админки переживают рестарт контейнера Redis.
+  redisdata:

@@ -1,0 +1,25 @@
+# PostgreSQL для локального прогона тестов (pytest).
+# Порт публикуется ТОЛЬКО на 127.0.0.1:55433, чтобы не конфликтовать
+# ни с прод-инстансом из docker-compose.yml (порт не публикуется),
+# ни с NVRoute-тестами (55432), ни с локальным PostgreSQL (5432).
+#
+# Запуск: docker compose -f docker-compose.test.yml up -d
+# Остановка: docker compose -f docker-compose.test.yml down -v
+
+services:
+  postgres-test:
+    image: postgres:17-alpine
+    container_name: openroute-postgres-test
+    environment:
+      POSTGRES_USER: openroute
+      POSTGRES_PASSWORD: openroute
+      POSTGRES_DB: openroute_test
+    ports:
+      - "127.0.0.1:55433:5432"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U openroute -d openroute_test"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s

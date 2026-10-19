@@ -1,0 +1,23 @@
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+**/*.pyc
+.env
+.env.example
+.git
+.gitignore
+.pytest_cache
+.ruff_cache
+*.egg-info
+README.md
+DESIGN.md
+Dockerfile
+docker-compose.yml
+docker-compose.test.yml
+requirements-dev.txt
+tests
+# соседние микросервисы собираются из своих контекстов
+proxy6-service
+admin-service
+edge
