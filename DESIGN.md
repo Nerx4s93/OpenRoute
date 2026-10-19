@@ -19,6 +19,7 @@ one opencode.ai quota bucket (see §8).
 | `app/main.py` | FastAPI app (data plane + internal API). Auth deps, passthrough `/v1/{rest:path}`, retry loop, SSE passthrough, error handlers, lifespan, periodic refresh loop. | 2 |
 | `app/config.py` | `Settings` (pydantic-settings) + `get_settings()` (`lru_cache`). Field set is frozen (§6). | 2 |
 | `app/opencode.py` | **Shared, self-contained** opencode.ai integration: gate headers, `new_session_id`, system-message builder, body builder, `Retry-After` parser, SSE helpers. Pure/stdlib-only. | **1 (done)** |
+| `app/sessions.py` | `SessionRegistry`: conversation fingerprint -> upstream session id (sliding TTL + LRU). Single-process, the same assumption as `KeyStore`'s rate windows. | 2 |
 | `app/proxies.py` | `Proxy` + `ProxyManager`: round-robin, circuit breaker, 429 cooldown/parking, local RPM cap, health probes, upstream `httpx` clients. Mirrors `NVRoute/app/accounts.py`. | 2 |
 | `app/proxydb.py` | `ProxyDB`: PostgreSQL persistence of the pool (table `proxies`), replacing NVRoute's `acctdb.py`. | 2 |
 | `app/keys.py` | `KeyStore` + `KeyInfo`/`AuthError`/`RateLimitError`: client auth, model allow-list, RPM/TPM. Verbatim port of NVRoute. | 2 |
@@ -261,7 +262,14 @@ Upstream: `POST {OPENCODE_BASE_URL}/chat/completions`; models at
   `x-opencode-session-id` set to the same valid session id.
 - **Session id** — `new_session_id()` = `ses_` + 12 hex + 14 base62; the 12 hex
   are `~((unix_ms << 12) + counter)` masked to 48 bits. A same-shaped token
-  without the hex prefix ⇒ 403. Generate ONE id per upstream request.
+  without the hex prefix ⇒ 403. Resolve ONE id per **client** request, before
+  the retry loop (`main._resolve_session_id`), and reuse it for every upstream
+  attempt: the caller's valid `x-opencode-session` / `x-session-affinity` /
+  `x-session-id` (real OpenCode clients) → otherwise a conversation fingerprint
+  (`key_id` + `x-opencode-project` + first user message) in
+  `app.sessions.SessionRegistry` → otherwise a one-shot id. A fresh id per
+  attempt is forbidden: it turns every upstream session into a one-shot and is
+  a strong bot pattern.
 - **Body** — `prepare_body(raw, model)` parses the caller JSON (object or
   empty object), sets `model`, injects the gate into the system message via
   `inject_gate_into_messages` (replace the first `role == "system"` content, or
@@ -280,7 +288,7 @@ Upstream: `POST {OPENCODE_BASE_URL}/chat/completions`; models at
 
 The gateway MUST strip the client's `Authorization`/hop headers
 (`main.HOP_HEADERS`) and MUST NOT forward them; it always uses
-`build_gate_headers(new_session_id())`.
+`build_gate_headers(<resolved session id>)` (see above).
 
 **Response** (`main.proxy_v1`): opencode always answers SSE
 (`text/event-stream`, `data: {...}` lines, terminated by `data: [DONE]`).

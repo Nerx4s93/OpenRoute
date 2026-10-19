@@ -31,6 +31,52 @@ def test_session_id_alphabet_and_uniqueness():
         assert all(c in opencode._ALPHABET for c in sid[4 + 12:])
 
 
+def test_is_session_id_shape():
+    assert opencode.is_session_id(opencode.new_session_id())
+    for bad in ("", "abc123", "ses_" + "A" * 26, "ses_0123456789ab" + "!" * 14, None):
+        assert not opencode.is_session_id(bad)
+
+
+# --- conversation fingerprint ---------------------------------------------
+
+
+def test_conversation_fingerprint_is_stable_as_history_grows():
+    first = {"messages": [{"role": "user", "content": "hello"}]}
+    second = {"messages": [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "again"},
+    ]}
+    a = opencode.conversation_fingerprint(json.dumps(first), key_id="k", project="p")
+    b = opencode.conversation_fingerprint(json.dumps(second), key_id="k", project="p")
+    assert a is not None and a == b
+
+
+def test_conversation_fingerprint_scopes_by_key_and_project():
+    body = json.dumps({"messages": [{"role": "user", "content": "hello"}]})
+    base = opencode.conversation_fingerprint(body, key_id="k1", project="p1")
+    assert base != opencode.conversation_fingerprint(body, key_id="k2", project="p1")
+    assert base != opencode.conversation_fingerprint(body, key_id="k1", project="p2")
+
+
+def test_conversation_fingerprint_none_without_anchor():
+    assert opencode.conversation_fingerprint(
+        b'{"messages": []}', key_id="k", project=None
+    ) is None
+    assert opencode.conversation_fingerprint(
+        json.dumps({"messages": [{"role": "assistant", "content": "hi"}]}),
+        key_id="k", project=None,
+    ) is None
+
+
+def test_conversation_fingerprint_reads_content_parts():
+    body = json.dumps({"messages": [{"role": "user", "content": [
+        {"type": "text", "text": "hello"},
+        {"type": "text", "text": "world"},
+    ]}]})
+    assert opencode.conversation_fingerprint(body, key_id="k", project=None) is not None
+
+
 # --- headers ---------------------------------------------------------------
 
 

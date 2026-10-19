@@ -100,6 +100,7 @@ OpenRoute/
 ├── .env.example
 ├── app/                      # шлюз (data plane) — РЕАЛИЗОВАНО
 │   ├── opencode.py           # gate-заголовки, session id, body, Retry-After, SSE
+│   ├── sessions.py           # fingerprint диалога -> один upstream session id
 │   ├── config.py  proxies.py  proxydb.py  keys.py  keydb.py  reqlog.py  pg.py
 │   └── main.py               # FastAPI: passthrough /v1/*, ретраи, internal API, lifespan
 ├── edge/                     # nginx: nginx.conf, proxy_params_edge.conf, Dockerfile

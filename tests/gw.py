@@ -201,6 +201,8 @@ class Gateway:
         # Reset the model catalogue cache between gateways.
         monkeypatch.setattr(main, "_models_cache", None)
         monkeypatch.setattr(main, "_models_cache_ts", 0.0)
+        # Reset the conversation -> upstream session id registry between gateways.
+        monkeypatch.setattr(main, "session_registry", main.sessions.SessionRegistry())
 
         # A dedicated client to run the gateway lifespan (not used for requests).
         self._gw_lifespan_client = TestClient(main.app)

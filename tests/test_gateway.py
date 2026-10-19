@@ -158,6 +158,84 @@ def test_gate_injection_preserves_caller_system(make_gateway):
     assert up["messages"][1] == {"role": "user", "content": "salut"}
 
 
+# --- upstream session identity ---
+
+
+def test_gate_forwards_caller_session_id(make_gateway):
+    gw = make_gateway()
+    tr = gw.script_upstream(lambda req: sse_response())
+    sid = "ses_0123456789ab" + "A" * 14
+
+    r = gw.client.post("/v1/chat/completions", json=body(),
+                       headers={**AUTH, "x-opencode-session": sid})
+    assert r.status_code == 200
+    sent = tr.requests[0]
+    for name in main.opencode.SESSION_HEADER_NAMES:
+        assert sent.headers[name] == sid
+
+
+def test_gate_reuses_session_across_turns(make_gateway):
+    gw = make_gateway()
+    tr = gw.script_upstream(lambda req: sse_response())
+
+    first = body(messages=[{"role": "user", "content": "hello"}])
+    second = body(messages=[
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"},
+        {"role": "user", "content": "again"},
+    ])
+    assert gw.client.post("/v1/chat/completions", json=first,
+                          headers=AUTH).status_code == 200
+    assert gw.client.post("/v1/chat/completions", json=second,
+                          headers=AUTH).status_code == 200
+    assert tr.requests[0].headers["x-opencode-session"] == \
+        tr.requests[1].headers["x-opencode-session"]
+
+
+def test_gate_new_conversation_gets_new_session(make_gateway):
+    gw = make_gateway()
+    tr = gw.script_upstream(lambda req: sse_response())
+    gw.client.post(
+        "/v1/chat/completions",
+        json=body(messages=[{"role": "user", "content": "a"}]), headers=AUTH,
+    )
+    gw.client.post(
+        "/v1/chat/completions",
+        json=body(messages=[{"role": "user", "content": "b"}]), headers=AUTH,
+    )
+    assert tr.requests[0].headers["x-opencode-session"] != \
+        tr.requests[1].headers["x-opencode-session"]
+
+
+def test_gate_retry_reuses_session(make_gateway):
+    gw = make_gateway()
+    calls = {"n": 0}
+
+    def router(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return httpx.Response(500, json={"error": "internal"})
+        return sse_response()
+
+    tr = gw.script_upstream(router)
+    assert gw.client.post("/v1/chat/completions", json=body(),
+                          headers=AUTH).status_code == 200
+    assert len(tr.requests) == 2
+    assert tr.requests[0].headers["x-opencode-session"] == \
+        tr.requests[1].headers["x-opencode-session"]
+
+
+def test_gate_replaces_invalid_caller_session_id(make_gateway):
+    gw = make_gateway()
+    tr = gw.script_upstream(lambda req: sse_response())
+    r = gw.client.post("/v1/chat/completions", json=body(),
+                       headers={**AUTH, "x-opencode-session": "abc123"})
+    assert r.status_code == 200
+    sent = tr.requests[0].headers["x-opencode-session"]
+    assert sent != "abc123"
+    assert main.opencode.is_session_id(sent)
+
+
 def test_default_model_when_caller_omits_it(make_gateway):
     gw = make_gateway()
     tr = gw.script_upstream(lambda req: sse_response())

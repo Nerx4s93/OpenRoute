@@ -35,7 +35,9 @@ first 4 groups (/64). Therefore one proxy exit address == one quota bucket
 
 from __future__ import annotations
 
+import hashlib
 import json
+import re
 import secrets
 import time
 from datetime import datetime, timezone
@@ -113,6 +115,62 @@ def new_session_id(counter: int = 1) -> str:
     masked = (~((ts << 12) + counter)) & ((1 << 48) - 1)
     suffix = "".join(secrets.choice(_ALPHABET) for _ in range(14))
     return "ses_" + masked.to_bytes(6, "big").hex() + suffix
+
+
+#: Exact wire shape of an opencode SessionID (identifier.ts: 12 lowercase hex
+#: derived from the creation timestamp + 14 random base62).
+SESSION_ID_RE = re.compile(r"^ses_[0-9a-f]{12}[0-9A-Za-z]{14}$")
+
+
+def is_session_id(value: str | None) -> bool:
+    """True when ``value`` has the exact opencode SessionID wire shape."""
+    return isinstance(value, str) and SESSION_ID_RE.fullmatch(value) is not None
+
+
+def conversation_fingerprint(
+    raw_body: bytes | str | None, *, key_id: str, project: str | None
+) -> str | None:
+    """Stable per-conversation key for clients that send no session header.
+
+    OpenAI-compatible clients resend the full history on every turn, so the
+    first user message is an immutable prefix of one conversation: it survives
+    follow-up turns and regenerate requests. Returns ``None`` when the body has
+    no user message text — there is nothing to anchor on (one-shot session).
+    """
+    data = _loads_object(raw_body)
+    if data is None:
+        return None
+    messages = data.get("messages")
+    if not isinstance(messages, list):
+        return None
+    anchor: str | None = None
+    for msg in messages:
+        if isinstance(msg, Mapping) and msg.get("role") == "user":
+            anchor = _message_text(msg.get("content"))
+            break
+    if not anchor:
+        return None
+    digest = hashlib.sha256()
+    digest.update(key_id.encode("utf-8", "replace"))
+    digest.update(b"\x00")
+    digest.update((project or "").encode("utf-8", "replace"))
+    digest.update(b"\x00")
+    digest.update(anchor.encode("utf-8", "replace"))
+    return digest.hexdigest()
+
+
+def _message_text(content: Any) -> str | None:
+    """Text of a chat message: a plain string or an OpenAI content-parts list."""
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts = [
+            part["text"]
+            for part in content
+            if isinstance(part, Mapping) and isinstance(part.get("text"), str)
+        ]
+        return "\n".join(parts) if parts else None
+    return None
 
 
 # --- headers ---------------------------------------------------------------

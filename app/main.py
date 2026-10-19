@@ -7,7 +7,8 @@ inference. The differences from ``NVRoute/app/main.py``:
 
 - the upstream is opencode.ai: the gate headers + gated system message come
   from :mod:`app.opencode`; the client's ``Authorization`` is NOT forwarded —
-  ``opencode.build_gate_headers(new_session_id())`` is always used,
+  the gate always carries ``Bearer public`` + a session id (the caller's own
+  affinity when it sends one, otherwise one id per conversation),
 - the pool is proxies (no tokens): ``ProxyManager`` instead of
   ``AccountManager``; ``LogEntry.account`` carries the masked proxy,
 - the gate **forces upstream streaming**: upstream always answers SSE. If the
@@ -22,7 +23,9 @@ Request flow for ``ANY /v1/{rest:path}``:
 1. auth via ``KeyStore`` (``require_auth`` / ``require_admin``),
 2. anti-DoS body limit (``MAX_BODY_BYTES``, 413 without reading when possible),
 3. model extraction + allow-list (403), then RPM/TPM gates (429),
-4. retry loop over ``ProxyManager.next_proxy(exclude=tried)``:
+4. session id resolution ONCE for the whole request: caller affinity ->
+   conversation fingerprint -> one-shot (:func:`_resolve_session_id`),
+5. retry loop over ``ProxyManager.next_proxy(exclude=tried)``:
    * build the upstream request with gate headers/body (:mod:`app.opencode`),
    * on ``httpx.HTTPError`` -> ``mark_failure`` + backoff + next proxy,
    * on 429 -> ``mark_failure(retry_after=opencode.parse_retry_after(resp))``
@@ -32,7 +35,7 @@ Request flow for ``ANY /v1/{rest:path}``:
      every proxy answers the same, so retrying would only burn the pool,
    * on 5xx / other 401 / 403 -> ``mark_failure`` + next proxy,
    * other statuses (2xx/4xx) are the client's answer,
-5. stream via ``StreamingResponse`` (SSE, no buffering) or convert, or return
+6. stream via ``StreamingResponse`` (SSE, no buffering) or convert, or return
    the body for non-chat endpoints.
 
 Retry budget: ``RETRY_BUDGET_SECONDS`` -> 504 when exhausted. Each proxy is
@@ -57,7 +60,7 @@ from fastapi.responses import JSONResponse, RedirectResponse, Response, Streamin
 from starlette.background import BackgroundTask
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
-from . import opencode
+from . import opencode, sessions
 from .config import PROVIDER_NAME, get_settings
 from .keydb import KeyDB
 from .keys import AuthError, KeyInfo, KeyStore, RateLimitError, hash_key
@@ -72,6 +75,8 @@ settings = get_settings()
 manager = ProxyManager(settings)
 keystore = KeyStore()
 reqlog = RequestLog(settings.postgres_dsn)
+# Conversation fingerprint -> upstream session id (a caller's affinity wins).
+session_registry = sessions.SessionRegistry()
 # PostgreSQL stores (proxies/keys tables in the same DB) are created in the
 # lifespan — tests patch settings per-gateway, so the DSN is taken at startup,
 # not at module import.
@@ -234,13 +239,13 @@ def _wants_stream(rest: str, body: bytes) -> bool:
     return False
 
 
-def _upstream_headers(request: Request) -> dict:
+def _upstream_headers(request: Request, session_id: str) -> dict:
     """Client headers minus hop headers, overlaid with the opencode gate set.
 
     The client's ``Authorization`` is never forwarded; the gate headers always
-    win (they carry ``Authorization: Bearer public`` + the session id).
+    win (they carry ``Authorization: Bearer public`` + ``session_id``).
     """
-    gate = opencode.build_gate_headers(opencode.new_session_id())
+    gate = opencode.build_gate_headers(session_id)
     gate_names = {name.lower() for name in gate}
     # Drop the caller's copies of any gate header (case-insensitively) so the
     # gate value replaces it instead of colliding: a plain dict with both
@@ -252,6 +257,32 @@ def _upstream_headers(request: Request) -> dict:
     }
     headers.update(gate)
     return headers
+
+
+def _resolve_session_id(request: Request, key: KeyInfo, body: bytes) -> str:
+    """Pick the upstream session id ONCE per client request.
+
+    1. A real OpenCode client owns its session id: reuse the affinity value it
+       already sends (the same value the upstream uses for provider stickiness).
+    2. Other OpenAI clients carry no session at all: reuse one id per
+       conversation fingerprint until the registry TTL expires.
+    3. Nothing to anchor on: a one-shot id (OpenCode's title generator does the
+       same for its own one-shot calls).
+    """
+    for name in opencode.SESSION_HEADER_NAMES:
+        value = request.headers.get(name)
+        if opencode.is_session_id(value):
+            return value
+
+    fingerprint = opencode.conversation_fingerprint(
+        body,
+        key_id=key.key_id,
+        project=request.headers.get("x-opencode-project"),
+    )
+    if fingerprint is not None:
+        return session_registry.resolve(fingerprint)
+
+    return opencode.new_session_id()
 
 
 def _resp_headers(upstream: httpx.Response) -> dict:
@@ -534,6 +565,7 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
         keystore.check_tpm(key)
         params = list(request.query_params.multi_items())
         stream = _wants_stream(rest, body)
+        session_id = _resolve_session_id(request, key, body)
 
         deadline = time.monotonic() + settings.retry_budget_seconds  # overall budget
         tried: set[str] = set()  # proxy URLs already tried in this request
@@ -564,7 +596,7 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
             client = manager.ensure_client(proxy)
             upstream_req = client.build_request(
                 request.method, f"/{rest}", params=params,
-                headers=_upstream_headers(request), content=upstream_body,
+                headers=_upstream_headers(request, session_id), content=upstream_body,
             )
             try:
                 # the local RPM slot is burned only on a REAL attempt
