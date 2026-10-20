@@ -551,8 +551,7 @@ def _header(active: str, csrf: str) -> str:
         + nav(_PANEL, "Прокси", "proxies")
         + nav(f"{_PANEL}/keys", "Ключи", "keys")
         + "</nav>"
-        + '<div class="sidebar-bottom"><div class="side-status"><span class="live-dot"></span>'
-        'Автообновление каждые 5 сек</div>'
+        + '<div class="sidebar-bottom">'
         + logout
         + '</div>'
         + "</header>"
@@ -610,8 +609,8 @@ def render_proxies_page(*, status: dict, usage: dict, usage_by_proxy: dict,
                                   recent=recent, csrf=csrf)
     body = f"""<div class="hero page-enter">
   <div class="hero-content"><div class="eyebrow">Система / обзор</div>
-    <h1>Пул прокси</h1><p>Состояние маршрутов, расход токенов и последние запросы в одном месте.</p>
-  </div><div class="hero-aside"><span class="live-dot"></span> Мониторинг активен</div>
+    <h1>Пул прокси</h1>
+  </div>
 </div>
 <div class="cards page-enter" id="cards">{fr["cards"]}</div>
 
@@ -664,8 +663,8 @@ def render_keys_page(*, keys: list[dict], usage: dict, csrf: str, msg: str = "")
     fr = render_keys_fragments(keys=keys, usage=usage, csrf=csrf)
     body = f"""<div class="hero page-enter">
   <div class="hero-content"><div class="eyebrow">Доступ / управление</div>
-    <h1>Клиентские ключи</h1><p>Выдавайте доступ, задавайте лимиты и отслеживайте использование ключей.</p>
-  </div><div class="hero-aside"><span class="live-dot"></span> Доступ под контролем</div>
+    <h1>Клиентские ключи</h1>
+  </div>
 </div>
 <section class="section page-enter" aria-labelledby="add-title">
 <div class="section-head"><div class="section-title"><span class="section-icon" aria-hidden="true">＋</span>
@@ -685,7 +684,6 @@ def render_keys_page(*, keys: list[dict], usage: dict, csrf: str, msg: str = "")
   <div class="field wide"><label for="models">Доступные модели</label>
     <input id="models" type="text" name="models" placeholder="Через запятую; пусто — все модели" autocomplete="off"></div>
   <div class="form-footer"><label class="check-field"><input type="checkbox" name="admin" value="1"> Администратор</label>
-    <span class="form-hint">Сохраняется только SHA-256 ключа</span>
     <button type="submit">＋ &nbsp; Добавить ключ</button></div>
 </form></div></section>
 
