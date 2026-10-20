@@ -36,14 +36,24 @@ SCHEMA: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_request_log_ts ON request_log (ts)",
     "CREATE INDEX IF NOT EXISTS idx_request_log_key ON request_log (key_id)",
     # Proxy pool (proxydb.py) — replaces NVRoute's ``accounts`` table.
+    # quota_until/banned_until persist the runtime parking state so a gateway
+    # restart does not forget that an upstream quota was already exhausted.
     """
     CREATE TABLE IF NOT EXISTS proxies (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         proxy TEXT NOT NULL UNIQUE,
         enabled BOOLEAN NOT NULL DEFAULT TRUE,
-        added_at DOUBLE PRECISION NOT NULL
+        added_at DOUBLE PRECISION NOT NULL,
+        quota_until DOUBLE PRECISION NOT NULL DEFAULT 0,
+        banned_until DOUBLE PRECISION NOT NULL DEFAULT 0
     )
     """,
+    # Existing installations have the old four-column table: add the parking
+    # columns in place. IF NOT EXISTS makes the migration idempotent.
+    "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS quota_until"
+    " DOUBLE PRECISION NOT NULL DEFAULT 0",
+    "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS banned_until"
+    " DOUBLE PRECISION NOT NULL DEFAULT 0",
     # Sticky session -> exit proxy binding (affinitydb.py). ``ON DELETE SET
     # NULL`` unbinds a session when its proxy is removed; ``created_at`` is
     # never changed by a move (only ``proxy``/``last_used_at`` are updated).

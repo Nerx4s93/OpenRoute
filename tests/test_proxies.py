@@ -466,6 +466,53 @@ def test_redact_url_strips_userinfo_and_secret():
 
 
 @pytest.mark.asyncio
+async def test_parking_persists_across_manager_restart(pg_dsn):
+    from gateway.proxydb import ProxyDB
+
+    quota_until = time.time() + 3600
+    banned_until = time.time() + 7200
+    db = ProxyDB(pg_dsn)
+    assert db.upsert_many(["http://h1:1"]) == 1
+
+    m = ProxyManager(build_settings(pg_dsn))
+    m.bind_db(db)
+    m.apply_proxies(db.all())
+    group = m.egress_groups()[0]
+    m.mark_quota_exhausted(group, quota_until)
+    m.mark_banned(group, banned_until)
+    await m.aclose()
+    db.close()
+
+    # A fresh manager (gateway restart) must recover the parking from the DB.
+    db2 = ProxyDB(pg_dsn)
+    m2 = ProxyManager(build_settings(pg_dsn))
+    m2.bind_db(db2)
+    m2.apply_proxies(db2.all())
+    m2.load_parking(db2.parking_all())
+    restored = m2.egress_groups()[0]
+    assert restored.quota_until == pytest.approx(quota_until)
+    assert restored.banned_until == pytest.approx(banned_until)
+    status = m2.status()
+    assert status["egress_groups_quota_parked"] == 1
+    assert status["egress_groups_banned"] == 1
+    assert status["proxies"][0]["quota_seconds_left"] > 3500
+    db2.close()
+    await m2.aclose()
+
+
+def test_load_parking_merges_duplicate_keys_by_max():
+    m = mgr(proxies=["http://u1:p@h:1", "http://u2:p@h:1"])
+    assert len(m.egress_groups()) == 1
+    m.load_parking([
+        ("http://u1:p@h:1", 100.0, 0.0),
+        ("http://u2:p@h:1", 50.0, 200.0),
+    ])
+    group = m.egress_groups()[0]
+    assert group.quota_until == 100.0
+    assert group.banned_until == 200.0
+
+
+@pytest.mark.asyncio
 async def test_refresh_upsert_preserves_manual_disable(pg_dsn):
     from gateway.proxydb import ProxyDB
 

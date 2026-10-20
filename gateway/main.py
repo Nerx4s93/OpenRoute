@@ -143,6 +143,11 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     manager.bind_db(proxydb)
     rows = proxydb.all()
     manager.apply_proxies(rows)
+    try:
+        parking = proxydb.parking_all()
+        manager.load_parking(parking)
+    except Exception:
+        logger.exception("Failed to load proxy parking; starting unparked")
     logger.info("Loaded %d proxies from PostgreSQL (%d enabled)",
                 len(rows), sum(1 for _, en in rows if en))
     if not rows:

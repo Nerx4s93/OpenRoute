@@ -5,11 +5,17 @@ created on first use (DDL lives in ``pg.py``), idempotent ``close()`` that
 waits for in-flight operations.
 
 Semantics (frozen): this table is the persistent record of pool
-membership and each proxy's manual ``enabled`` flag. Membership is seeded
+membership, each proxy's manual ``enabled`` flag, and upstream
+quota/abuse parking (``quota_until`` / ``banned_until``). Membership is seeded
 exclusively by ``refresh_proxies`` — there is no manual-add path. The refresh
 only ever UPSERTS fetched proxies (insert new rows with ``enabled = TRUE``;
 never flips an existing row's flag; never deletes). Manual admin actions
 (``set_enabled`` / ``remove``) mutate the same table.
+
+Parking values are wall-clock epochs (``time.time()``). They are written by
+``ProxyManager.mark_quota_exhausted`` / ``mark_banned`` and loaded at startup,
+so a gateway restart does not lose the “quota exhausted” state shown in the
+admin panel. Expired values are harmless and are overwritten by the next mark.
 """
 
 from __future__ import annotations
@@ -22,10 +28,11 @@ from .pg import ensure_schema, make_pool
 
 
 class ProxyDB:
-    """``proxies(id, proxy UNIQUE, enabled, added_at)``.
+    """``proxies(id, proxy UNIQUE, enabled, added_at, quota_until, banned_until)``.
 
     ``enabled = FALSE`` — disabled by hand from the admin UI (persists across
-    restarts, unlike the runtime circuit breaker); ``id`` is insertion order
+    restarts, unlike the runtime circuit breaker); ``quota_until`` /
+    ``banned_until`` persist upstream parking; ``id`` is insertion order
     (analogue of sqlite rowid) and defines ``all()`` ordering. Lifecycle:
     after ``close()`` the store never "resurrects"; ``close()`` is idempotent.
     """
@@ -63,6 +70,38 @@ class ProxyDB:
                 "SELECT proxy, enabled FROM proxies ORDER BY id"
             ).fetchall()
         return [(p, bool(e)) for p, e in rows]
+
+    def parking_all(self) -> list[tuple[str, float, float]]:
+        """``[(proxy, quota_until, banned_until)]`` in insertion order.
+
+        Values are wall-clock epochs. The manager merges rows that share the
+        same canonical quota key (max wins), so duplicated proxy endpoints do
+        not lose the longest parking.
+        """
+        self._ensure()
+        with self._pool.connection() as conn:
+            rows = conn.execute(
+                "SELECT proxy, quota_until, banned_until FROM proxies ORDER BY id"
+            ).fetchall()
+        return [
+            (p, float(q or 0.0), float(b or 0.0))
+            for p, q, b in rows
+        ]
+
+    def save_parking(self, proxies: Iterable[str], quota_until: float,
+                     banned_until: float) -> int:
+        """Persist parking for every URL of one quota bucket; returns rows hit."""
+        self._ensure()
+        urls = list(dict.fromkeys(p for p in proxies if p))
+        if not urls:
+            return 0
+        with self._pool.connection() as conn:
+            cur = conn.execute(
+                "UPDATE proxies SET quota_until = %s, banned_until = %s"
+                " WHERE proxy = ANY(%s)",
+                (float(quota_until), float(banned_until), urls),
+            )
+            return cur.rowcount
 
     def upsert_many(self, proxies: Iterable[str]) -> int:
         """Insert every not-yet-known proxy with ``enabled = TRUE``; keep the

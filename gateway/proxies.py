@@ -263,6 +263,28 @@ class ProxyManager:
         self._rr = self._rr % len(new) if new else 0
         self._rebuild_groups()
 
+    def load_parking(self, rows: list[tuple[str, float, float]]) -> None:
+        """Restore persisted ``(proxy, quota_until, banned_until)`` rows.
+
+        Called once at startup after :meth:`apply_proxies`. Rows are grouped by
+        the canonical quota key and the maximum value wins, matching the
+        runtime invariant that parking may only move forward.
+        """
+        by_key: dict[str, tuple[float, float]] = {}
+        for proxy, quota_until, banned_until in rows:
+            key = canonical_quota_key(proxy)
+            if not key:
+                continue
+            old_q, old_b = by_key.get(key, (0.0, 0.0))
+            by_key[key] = (
+                max(old_q, float(quota_until or 0.0)),
+                max(old_b, float(banned_until or 0.0)),
+            )
+        for group in self._groups:
+            quota_until, banned_until = by_key.get(group.host, (0.0, 0.0))
+            group.quota_until = max(group.quota_until, quota_until)
+            group.banned_until = max(group.banned_until, banned_until)
+
     def _rebuild_groups(self) -> None:
         """Rebuild quota buckets from ``self.proxies``, preserving parking.
 
@@ -626,17 +648,37 @@ class ProxyManager:
             return False
         return any(self._proxy_ready(p, now_mono) for p in group.proxies)
 
+    def _persist_parking(self, group: EgressGroup) -> None:
+        """Write parking to ``ProxyDB`` when bound; never break the request path."""
+        db = self.db
+        save = getattr(db, "save_parking", None) if db is not None else None
+        if save is None:
+            return
+        try:
+            save(
+                [p.url for p in group.proxies],
+                group.quota_until,
+                group.banned_until,
+            )
+        except Exception as exc:
+            logger.warning("ProxyDB parking write failed for %s: %s",
+                           group.host, exc)
+
     def mark_quota_exhausted(self, group: EgressGroup, until: float) -> None:
         """Park this proxy's quota bucket (daily FreeUsageLimit) until an epoch.
 
         Only forward movement: a shorter value never shortens existing parking.
-        ``mark_success``/health probes never clear it (only expiry does).
+        ``mark_success``/health probes never clear it (only expiry does). The
+        value is persisted immediately so a gateway restart keeps ``лимит`` in
+        the admin panel.
         """
         group.quota_until = max(group.quota_until, float(until))
+        self._persist_parking(group)
 
     def mark_banned(self, group: EgressGroup, until: float) -> None:
         """Ban this proxy's quota bucket (abusive traffic) until a wall-clock epoch."""
         group.banned_until = max(group.banned_until, float(until))
+        self._persist_parking(group)
 
     def _ready_urls(self, group: EgressGroup, exclude: set[str],
                     now_mono: float) -> list[Proxy]:
