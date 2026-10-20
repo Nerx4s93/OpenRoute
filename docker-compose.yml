@@ -4,7 +4,7 @@ name: openroute
 services:
   # --- edge: ЕДИНСТВЕННАЯ точка входа (API Gateway-паттерн) ---
   # Наружу (0.0.0.0:${OPENROUTE_EDGE_PORT:-53202}) торчит только nginx;
-  # gateway и web-admin прячутся в docker-сети, их порты хосту не
+  # gateway, web-admin и web-admin-ui прячутся в docker-сети, их порты хосту не
   # публикуются. /internal/* наружу не маршрутизируется вообще.
   # Хост-порт настраивается через OPENROUTE_EDGE_PORT (по умолчанию 53202;
   # NVRoute занимает 53201) — оба стека работают одновременно.
@@ -43,6 +43,8 @@ services:
         condition: service_healthy
       web-admin:
         condition: service_started
+      web-admin-ui:
+        condition: service_healthy
 
   # --- PostgreSQL: хранилище шлюза (лог запросов + proxies/keys).
   # В приватной сети openroute-net; порт наружу НЕ публикуется (как у px6).
@@ -144,7 +146,7 @@ services:
       postgres:
         condition: service_healthy
 
-  # --- web-admin: control plane (сайт /login + /admin/ui* + сессии).
+  # --- web-admin: control plane (JSON API /api/admin/* + сессии в Redis).
   # Данными владеет шлюз; сюда ходит через его internal API с общим секретом.
   # Имя сервиса = DNS-имя в сети (web-admin:8000); на него ссылается
   # upstream в edge/nginx.conf — не переименовывать в одну сторону.
@@ -178,6 +180,34 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+
+  # --- web-admin-ui: React SPA (статика nginx), отдельный контейнер.
+  # Секретов не получает: браузер ходит за данными в web-admin через edge.
+  # Имя сервиса = DNS-имя (web-admin-ui:8080) для upstream в edge/nginx.conf.
+  web-admin-ui:
+    build: ./web-admin-ui
+    image: openroute-web-admin-ui
+    restart: unless-stopped
+    init: true
+    mem_limit: 64m
+    security_opt:
+      - no-new-privileges:true
+    # nginx-unprivileged слушает 8080 и работает от uid 101; capabilities не нужны.
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 5s
+    networks:
+      - net
 
   px6:
     build: ./px6-service

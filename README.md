@@ -66,8 +66,10 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
                      публичный порт; хост-порт задаёт OPENROUTE_EDGE_PORT)
                         ├─ /v1/*, /admin/status, /admin/logs, /health, /docs,
                         │    /openapi.json ─────────────────────────► [gateway] (data plane)
-                        └─ /, /login, /admin/ui* ──────────────────► [web-admin] (control plane)
+                        ├─ /login, /admin/ui*, /assets/* ──────────► [web-admin-ui] (React SPA)
+                        └─ /api/admin/* ───────────────────────────► [web-admin] (JSON API)
                                                                          │
+   (web-admin-ui — только статика; браузер сам ходит в /api/admin/* через edge)
    [gateway] ──► [openroute-px6] ──► px6.net       (список прокси, descr=OPENROUTE)
    [gateway] ──► [PostgreSQL]                       (request_log + proxies + keys + session_affinity)
    [gateway] ──► opencode.ai                        (free-tier инференс через прокси)
@@ -80,13 +82,18 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
 - **`gateway/`** — шлюз (data plane): `/v1/*`, пул прокси, клиентские
   ключи, лог запросов в PostgreSQL, internal API для админки. Своих хостовых
   портов не публикует.
-- **`web-admin/`** — сайт-админка (control plane): `/login`, `/admin/ui*`,
-  сессии в Redis, CSRF; своими данными не владеет — ходит в шлюз по internal API.
+- **`web-admin/`** — backend админки (control plane): JSON API
+  `/api/admin/*`, сессии в Redis, CSRF, SSE; своими данными не владеет —
+  ходит в шлюз по internal API.
+- **`web-admin-ui/`** — React SPA (React + TypeScript + Vite + React Router +
+  TanStack Query) в отдельном контейнере nginx. Секретов не получает; все
+  данные — через `/api/admin/*`.
 - **`px6-service/`** — микросервис списка прокси: обёртка над API px6.net с
   TTL-кэшем, фильтр `descr == "OPENROUTE"`.
 - **`postgres`** — PostgreSQL 17: хранилище шлюза (`request_log`, `proxies`,
   `keys`, `session_affinity`). Том `pgdata`; порт наружу не публикуется.
 - **`redis`** — Redis 7: сессии админки (том `redisdata`), порт наружу не публикуется.
+
 
 ---
 
@@ -110,7 +117,8 @@ OpenRoute/
 │   └── main.py               # FastAPI: passthrough /v1/*, ретраи, internal API, lifespan
 ├── edge/                     # nginx: nginx.conf, proxy_params_edge.conf, Dockerfile
 ├── px6-service/              # РЕАЛИЗОВАНО: px6.net → descr=OPENROUTE
-├── web-admin/                # РЕАЛИЗОВАНО: config, sessions, adminui, main
+├── web-admin/                # РЕАЛИЗОВАНО: JSON API (config, sessions, auth, gateway, schemas, main)
+├── web-admin-ui/             # РЕАЛИЗОВАНО: React SPA (Vite, React Router, TanStack Query)
 └── tests/                    # pytest: шлюз, прокси, ключи, лог, админка, opencode
 ```
 
@@ -205,12 +213,20 @@ OpenRoute/
 | Метод | Путь | Куда (edge) | Описание |
 |-------|------|-------------|----------|
 | ANY | `/v1/*` | gateway | Passthrough к opencode.ai (`chat/completions`, `models`, ...); стриминг поддержан |
-| GET | `/` | web-admin | Редирект на `/login` |
-| GET/POST | `/login` | web-admin | Вход в админку (только пароль) |
+| GET | `/` | edge | Редирект 307 на `/login` |
+| GET | `/login` | web-admin-ui | SPA-страница входа (React Router) |
+| GET | `/admin/ui`, `/admin/ui/keys` | web-admin-ui | SPA-страницы «Прокси» и «Ключи» |
+| GET | `/assets/*` | web-admin-ui | Хэшированные статические файлы SPA |
+| GET | `/api/admin/session` | web-admin | Текущая сессия + CSRF-токен (200 и без входа) |
+| POST | `/api/admin/login` | web-admin | Вход по паролю; HttpOnly cookie сессии |
+| POST | `/api/admin/logout` | web-admin | Выход (CSRF; сессия удаляется в Redis) |
+| GET | `/api/admin/proxies?period=` | web-admin | JSON-снапшот пула: статусы, расходы, последние запросы |
+| GET | `/api/admin/keys?period=` | web-admin | JSON-снапшот ключей и статистики |
+| GET | `/api/admin/{proxies,keys}/events?period=` | web-admin | SSE с JSON-снапшотами (fallback — polling) |
+| POST | `/api/admin/proxies/set` | web-admin | Включить/отключить прокси по `proxy_id` (CSRF) |
+| POST | `/api/admin/keys/{add,set,delete}` | web-admin | Добавить/отозвать/удалить ключ (CSRF) |
 | GET | `/admin/status` | gateway | Состояние пула: прокси, egress-группы, session affinity, счётчики, usage по ключам |
 | GET | `/admin/logs?limit=N` | gateway | Последние запросы из лога (1..500, по умолчанию 100) |
-| GET | `/admin/ui` | web-admin | Веб-админка: страница «Прокси» |
-| GET | `/admin/ui/keys` | web-admin | Веб-админка: страница «Ключи» |
 | GET | `/health` | gateway | Liveness + счётчики пула, egress-групп и привязанных сессий |
 | GET | `/docs`, `/openapi.json` | gateway | Swagger UI / схема |
 | ANY | `/internal/*` | — (нет наружу) | Internal API шлюза; доступен только web-admin по `X-Internal-Token` |
@@ -255,8 +271,9 @@ docker compose down                          # остановка всего
 ```
 
 Наружу смотрит **только edge** на http://127.0.0.1:53202 (хост-порт задаёт
-`OPENROUTE_EDGE_PORT`): и API (`/v1`), и админка (`/`, `/login`, `/admin/ui`).
-Сервисы (gateway, web-admin, px6, postgres, redis) хостовых
+`OPENROUTE_EDGE_PORT`): и API (`/v1`), и админка (`/`, `/login`, `/admin/ui`,
+`/api/admin/*`).
+Сервисы (gateway, web-admin, web-admin-ui, px6, postgres, redis) хостовых
 портов не публикуют. Данные — в томах `pgdata`/`redisdata` (удаляются только
 `docker compose down -v`). `docker compose stop` ждёт до 320 с
 (`stop_grace_period`), чтобы стримы доработали до конца.
@@ -265,7 +282,7 @@ docker compose down                          # остановка всего
 > стека NVRoute: у него собственная docker-сеть `openroute-net` (не общая
 > `service-net`), уникальные имена контейнеров (`openroute-px6`,
 > `openroute-postgres`, `openroute-redis`; остальные — автоимена
-> `openroute-gateway-*` и `openroute-web-admin-*`)
+> `openroute-gateway-*`, `openroute-web-admin-*` и `openroute-web-admin-ui-*`)
 > и собственный хост-порт edge `OPENROUTE_EDGE_PORT` (по умолчанию 53202;
 > NVRoute занимает 53201). Оба стека поднимаются одновременно и не
 > конфликтуют.
@@ -280,8 +297,9 @@ uvicorn gateway.main:app --host 127.0.0.1 --port 8000   # шлюз: /v1/*, /admi
 
 Нужен доступный PostgreSQL (по умолчанию
 `POSTGRES_DSN=postgresql://openroute:openroute@localhost:5432/openroute`); схема
-создаётся сама при первом обращении. Без Docker edge нет — админка запускается
-отдельно (см. `web-admin/`).
+создаётся сама при первом обращении. Без Docker edge нет: backend админки
+запускается отдельно (`web-admin/`), а SPA — через `npm run dev` в
+`web-admin-ui/` (Vite проксирует `/api` на `127.0.0.1:8000`).
 
 ---
 
@@ -290,22 +308,31 @@ uvicorn gateway.main:app --host 127.0.0.1 --port 8000   # шлюз: /v1/*, /admi
 | Компонент | Статус |
 |---|---|
 | `gateway/` (шлюз: `main`, `config`, `proxies`, `proxydb`, `affinity`, `affinitydb`, `keys`, `keydb`, `reqlog`, `pg`, `opencode`) | **реализовано** |
-| `web-admin/` (`config`, `sessions`, `adminui`, `main`) | **реализовано** |
+| `web-admin/` (JSON API: `config`, `sessions`, `auth`, `gateway`, `schemas`, `main`) | **реализовано** |
+| `web-admin-ui/` (React SPA: Vite, React Router, TanStack Query, SSE) | **реализовано** |
 | `px6-service/` | **реализовано** (px6.net → `descr=OPENROUTE`) |
 | edge / compose / Dockerfile / requirements / .env.example | **готово** |
-| `tests/` (`test_gateway`, `test_proxies`, `test_affinity`, `test_affinitydb`, `test_keys`, `test_reqlog`, `test_adminui`, `test_opencode`) | **реализовано** |
+| `tests/` (`test_gateway`, `test_proxies`, `test_affinity`, `test_affinitydb`, `test_keys`, `test_reqlog`, `test_admin_api`, `test_opencode`) | **реализовано** |
 
 ## Тесты
 
 ```bash
 pip install -r requirements-dev.txt
 pytest tests
+
+cd web-admin-ui
+npm ci
+npm test
+npm run typecheck
 ```
 
 `tests/test_opencode.py` — чистые юнит-тесты интеграции с opencode.ai (не
 требуют сети/БД); `tests/test_affinity.py` — unit-тесты привязок, score и
-эвакуации (без БД). Остальные наборы (`test_gateway`, `test_proxies`,
-`test_affinitydb`, `test_keys`, `test_reqlog`, `test_adminui`) работают
-герметично: upstream и админка подменяются, а живой PostgreSQL для хранилищ
-шлюза (включая `session_affinity`) поднимается из `docker-compose.test.yml`
-(`127.0.0.1:55433`), DSN переопределяется `OPENROUTE_TEST_DSN`.
+эвакуации (без БД); `tests/test_admin_api.py` — герметичные тесты JSON API
+админки (fake gateway + in-memory sessions, без Redis/PostgreSQL). Остальные
+наборы (`test_gateway`, `test_proxies`, `test_affinitydb`, `test_keys`,
+`test_reqlog`) работают герметично: upstream и админка подменяются, а живой
+PostgreSQL для хранилищ шлюза (включая `session_affinity`) поднимается из
+`docker-compose.test.yml` (`127.0.0.1:55433`), DSN переопределяется
+`OPENROUTE_TEST_DSN`. Фронтенд-тесты (`web-admin-ui`) — Vitest + Testing Library,
+без сети и без backend.

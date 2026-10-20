@@ -1,41 +1,32 @@
-"""web-admin — OpenRoute web admin as a separate microservice (control plane).
+"""web-admin — OpenRoute admin JSON API (control plane).
 
-Session/login/CSRF plumbing mirrors ``NVRoute/admin-service/app/main.py``; the
-page-rendering and mutation routes delegate to ``adminui.py`` and drive the
-gateway's frozen internal API:
+The React SPA (separate ``web-admin-ui`` container) talks to this service via
+``/api/admin/*``. Session/login/CSRF handling mirrors the previous server-side
+panel, but pages are no longer rendered here: every response is JSON or SSE.
 
-    GET  /internal/proxies-data        -> snapshot for the "Proxies" page
-    GET  /internal/keys-data           -> snapshot for the "Keys" page
-    POST /internal/proxies/set         {"proxy": str, "enabled": bool}
-    POST /internal/keys/add            {"key", "key_id", "name", "admin", "rpm", "tpm", "models"}
-    POST /internal/keys/set            {"key_hash": str, "enabled": bool}
-    POST /internal/keys/delete         {"key_hash": str}
-
-This service never touches the gateway's PostgreSQL directly; it only calls the
-gateway's internal API with ``X-Internal-Token``. It is exposed only via edge
-(nginx).
+The service never touches the gateway's PostgreSQL directly; it only calls the
+gateway's internal API with ``X-Internal-Token`` (see ``gateway.py``).
 """
 
 from __future__ import annotations
 
 import asyncio
-import hmac
 import json
 import logging
 import math
-import secrets
 import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
-from urllib.parse import parse_qsl, quote
 
-import httpx
-from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import (
-    HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse,
-)
+from fastapi import Depends, FastAPI, HTTPException, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse, StreamingResponse
+from pydantic import BaseModel, ValidationError
 
+from . import auth
 from .config import get_settings
+from .gateway import GatewayClient
+from .schemas import KeyAddBody, KeyDeleteBody, KeySetBody, LoginBody, ProxySetBody
 from .sessions import RedisSessionStore, SessionUnavailable
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -44,12 +35,10 @@ logger = logging.getLogger("openroute-web-admin")
 settings = get_settings()
 
 _sessions = RedisSessionStore(settings.redis_url)
+gateway = GatewayClient(settings)
 
-_PANEL = "/admin/ui"
-_LOGIN_URL = "/login"
-_SESSION_COOKIE = "openroute_session"
-_LOGIN_FAILS_MAX = 10
-_LOGIN_FAILS_WINDOW = 60.0
+_PANEL_API = "/api/admin"
+_SESSION_COOKIE = auth.SESSION_COOKIE
 _PERIODS = {"day", "week", "month", "all"}
 _SSE_TICK_SECONDS = 1.0
 _SSE_HEARTBEAT_SECONDS = 15.0
@@ -58,129 +47,112 @@ _login_fails: dict[str, list[float]] = {}
 
 
 def _normalize_period(period: str) -> str:
-    """Whitelist the spending window; unknown values mean all time."""
     value = (period or "all").strip().lower()
     return value if value in _PERIODS else "all"
 
 
-_internal_client = httpx.AsyncClient(
-    base_url=settings.gateway_internal_url,
-    headers={"X-Internal-Token": settings.internal_api_token},
-    timeout=settings.internal_timeout_seconds,
-)
+def _ensure_enabled() -> None:
+    if not settings.admin_password:
+        raise HTTPException(404, "Админка выключена (задайте ADMIN_PASSWORD)")
 
 
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
     await _sessions.aclose()
-    await _internal_client.aclose()
+    await gateway.aclose()
 
 
 app = FastAPI(
-    title="OpenRoute Admin",
-    description="Веб-админка OpenRoute (control plane); данные — через internal API шлюза.",
-    version="0.1.0",
+    title="OpenRoute Admin API",
+    description="JSON API админки OpenRoute; данные — через internal API шлюза.",
+    version="0.2.0",
     lifespan=_lifespan,
 )
 
 
-# --- internal API client ---------------------------------------------------
+@app.middleware("http")
+async def _api_no_store(request: Request, call_next):
+    """Admin API responses (including SSE) must never be cached."""
+    response = await call_next(request)
+    if request.url.path.startswith(_PANEL_API):
+        response.headers.setdefault("Cache-Control", "no-store")
+        response.headers.setdefault("X-Content-Type-Options", "nosniff")
+    return response
 
 
-def _gateway_error(r: httpx.Response) -> HTTPException:
-    """Map a gateway error response to an ``HTTPException`` with a clean message.
+# --- request parsing -------------------------------------------------------
 
-    The gateway answers ALL HTTP errors (including internal 403/404/5xx) with
-    the OpenAI envelope ``{"error": {"message", "type", "code"}}``, so prefer
-    ``payload["error"]["message"]``; fall back to FastAPI's
-    ``{"detail": ...}``, then a bare ``{"message": ...}``, then the raw body.
-    The raw JSON envelope is never surfaced to the operator.
-    """
-    detail: str | None = None
+
+async def _json_body(request: Request, model: type[BaseModel]) -> BaseModel:
+    """Read a small JSON object and validate it with a Pydantic model."""
+    raw = await request.body()
+    if len(raw) > 64 * 1024:
+        raise HTTPException(413, "Тело запроса слишком большое")
+    if not raw:
+        data: object = {}
+    else:
+        try:
+            data = json.loads(raw)
+        except ValueError as exc:
+            raise HTTPException(400, "Некорректный JSON") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(400, "JSON должен быть объектом")
     try:
-        payload = r.json()
-    except ValueError:
-        payload = None
-    if isinstance(payload, dict):
-        err = payload.get("error")
-        if isinstance(err, dict) and isinstance(err.get("message"), str):
-            detail = err["message"]
-        elif isinstance(payload.get("detail"), str):
-            detail = payload["detail"]
-        elif isinstance(payload.get("message"), str):
-            detail = payload["message"]
-    if not detail:
-        detail = r.text[:200]
-    return HTTPException(r.status_code, detail)
+        return model.model_validate(data)
+    except ValidationError as exc:
+        messages = exc.errors()
+        message = str(messages[0].get("msg", "Некорректные данные")) if messages else "Некорректные данные"
+        if message.startswith("Value error, "):
+            message = message[len("Value error, "):]
+        raise HTTPException(400, message) from exc
 
 
-async def _api_get(path: str) -> dict:
-    """GET /internal/* -> dict; unreachable gateway -> 502."""
-    try:
-        r = await _internal_client.get(path)
-    except httpx.HTTPError as exc:
-        logger.error("gateway internal API unreachable: %s", exc)
-        raise HTTPException(502, "Gateway internal API unreachable") from exc
-    if r.status_code >= 400:
-        raise _gateway_error(r)
-    return r.json()
+# --- auth dependency -------------------------------------------------------
 
 
-async def _api_post(path: str, payload: dict) -> dict:
-    try:
-        r = await _internal_client.post(path, json=payload)
-    except httpx.HTTPError as exc:
-        logger.error("gateway internal API unreachable: %s", exc)
-        raise HTTPException(502, "Gateway internal API unreachable") from exc
-    if r.status_code >= 400:
-        raise _gateway_error(r)
-    return r.json()
+async def require_panel(request: Request) -> dict:
+    """Require an enabled panel and a live server-side session."""
+    _ensure_enabled()
+    session = await auth.session_from_request(request, settings, _sessions)
+    if session is None:
+        raise HTTPException(401, "Требуется вход в панель")
+    return session
 
 
 # --- live updates (SSE) ----------------------------------------------------
 
 
-async def _panel_fragments(page: str, period: str, csrf: str) -> dict:
-    """Fetch one admin snapshot from the gateway and render its HTML fragments."""
+async def _panel_snapshot(page: str, period: str) -> dict:
     if page == "keys":
-        from .adminui import render_keys_fragments
-        return render_keys_fragments(
-            **await _api_get(f"/internal/keys-data?period={quote(period)}"),
-            csrf=csrf, period=period,
-        )
-    from .adminui import render_proxies_fragments
-    return render_proxies_fragments(
-        **await _api_get(f"/internal/proxies-data?period={quote(period)}"),
-        csrf=csrf, period=period,
-    )
+        return await gateway.keys_snapshot(period)
+    return await gateway.proxies_snapshot(period)
 
 
-def _fragments_fingerprint(fragments: dict) -> str:
-    """Compare only real data, not the clock label ``srv-now``."""
+def _snapshot_fingerprint(snapshot: dict) -> str:
+    """Compare only real data, not the clock label ``server_time``."""
     return json.dumps(
-        {k: v for k, v in fragments.items() if k != "srv-now"},
-        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+        {key: value for key, value in snapshot.items() if key != "server_time"},
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
     )
 
 
-def _sse_data(fragments: dict) -> str:
-    # JSON escapes newlines inside the ready-made HTML fragments, so one
-    # ``data:`` line is always one complete SSE event.
-    payload = json.dumps(fragments, ensure_ascii=False, separators=(",", ":"))
+def _sse_data(snapshot: dict) -> str:
+    payload = json.dumps(snapshot, ensure_ascii=False, separators=(",", ":"))
     return f"data: {payload}\n\n"
 
 
 async def _sse_events(request: Request, page: str, period: str,
                       session: dict) -> AsyncIterator[str]:
-    """Push ``{element_id: innerHTML}`` snapshots until the tab disconnects.
+    """Push JSON snapshots until the browser disconnects.
 
-    The gateway is sampled once per second (cheap admin queries) and an event
-    is emitted only when something visible changed. A heartbeat keeps nginx and
-    intermediate proxies from closing an idle stream. Expired/deleted sessions
-    stop the stream within ``_SSE_AUTH_CHECK_SECONDS``.
+    The gateway is sampled once per second; an event is emitted only when
+    something visible changed. A heartbeat keeps nginx and intermediate
+    proxies from closing an idle stream. Expired/deleted sessions stop the
+    stream within ``_SSE_AUTH_CHECK_SECONDS``.
     """
-    csrf = session["csrf"]
     sid = session.get("sid", "")
     last_key: str | None = None
     last_sent = time.monotonic()
@@ -199,12 +171,12 @@ async def _sse_events(request: Request, page: str, period: str,
             except Exception:
                 logger.exception("SSE session check failed")
                 return
-            if current is None or time.time() > current.get("expires", 0):
+            if current is None or time.time() > float(current.get("expires", 0)):
                 return
             last_auth_check = now
 
         try:
-            fragments = await _panel_fragments(page, period, csrf)
+            snapshot = await _panel_snapshot(page, period)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -213,12 +185,12 @@ async def _sse_events(request: Request, page: str, period: str,
                 error_logged = True
         else:
             error_logged = False
-            key = _fragments_fingerprint(fragments)
+            key = _snapshot_fingerprint(snapshot)
             now = time.monotonic()
             if key != last_key:
                 last_key = key
                 last_sent = now
-                yield _sse_data(fragments)
+                yield _sse_data(snapshot)
 
         now = time.monotonic()
         if now - last_sent >= _SSE_HEARTBEAT_SECONDS:
@@ -243,258 +215,147 @@ def _sse_response(request: Request, page: str, period: str,
     )
 
 
-# --- sessions / auth (ported from NVRoute) ---------------------------------
-
-
-async def _new_session() -> dict:
-    sid = secrets.token_urlsafe(32)
-    session = {"csrf": secrets.token_urlsafe(24), "expires": time.time() + settings.admin_session_ttl_seconds}
-    await _sessions.put(sid, session, settings.admin_session_ttl_seconds)
-    return {"sid": sid, **session}
-
-
-async def _session_from_request(request: Request) -> dict | None:
-    sid = request.cookies.get(_SESSION_COOKIE, "")
-    if not sid:
-        return None
-    session = await _sessions.get(sid)
-    if session is None:
-        return None
-    if time.time() > session["expires"]:
-        await _sessions.delete(sid)
-        return None
-    return {"sid": sid, **session}
-
-
-def _client_ip(request: Request) -> str:
-    return request.client.host if request.client else "unknown"
-
-
-def _login_throttled(ip: str) -> float:
-    fails = [t for t in _login_fails.get(ip, []) if time.time() - t < _LOGIN_FAILS_WINDOW]
-    _login_fails[ip] = fails
-    if len(fails) >= _LOGIN_FAILS_MAX:
-        return _LOGIN_FAILS_WINDOW - (time.time() - fails[0])
-    return 0.0
-
-
-def _check_password(pw: str) -> bool:
-    return hmac.compare_digest(pw.encode("utf-8"), settings.admin_password.encode("utf-8"))
-
-
-def _set_session_cookie(resp: Response, sid: str, request: Request) -> None:
-    resp.set_cookie(
-        _SESSION_COOKIE, sid,
-        max_age=settings.admin_session_ttl_seconds,
-        httponly=True, samesite="strict",
-        secure=request.url.scheme == "https", path="/",
-    )
-
-
-async def require_panel(request: Request) -> dict:
-    """All /admin/ui pages/actions require a live session (else redirect).
-
-    Disabled panel (no ADMIN_PASSWORD) -> 404.
-    """
-    if not settings.admin_password:
-        raise HTTPException(404, "Admin UI disabled (set ADMIN_PASSWORD)")
-    session = await _session_from_request(request)
-    if session is None:
-        raise HTTPException(303, "Login required", headers={"Location": _LOGIN_URL})
-    return session
-
-
-async def _read_form(request: Request) -> dict[str, str]:
-    body = await request.body()
-    if len(body) > 64 * 1024:
-        raise HTTPException(413, "Form body too large")
-    return dict(parse_qsl(body.decode("utf-8", "replace"), keep_blank_values=True))
-
-
-def _check_csrf(form: dict[str, str], session: dict) -> None:
-    if not hmac.compare_digest(form.get("_csrf", ""), session["csrf"]):
-        raise HTTPException(403, "Invalid CSRF token")
-
-
-def _panel_redirect(msg: str, page: str = "", period: str = "all") -> RedirectResponse:
-    base = f"{_PANEL}/keys" if page == "keys" else _PANEL
-    period = _normalize_period(period)
-    query = f"msg={quote(msg)}"
-    if period != "all":
-        query += f"&period={quote(period)}"
-    return RedirectResponse(f"{base}?{query}", status_code=303)
-
-
-@app.exception_handler(HTTPException)
-async def _redirect_as_redirect(request: Request, exc: HTTPException):
-    hdrs = exc.headers or {}
-    loc = hdrs.get("Location") or hdrs.get("location")
-    if loc and exc.status_code in (301, 302, 303, 307, 308):
-        return RedirectResponse(loc, status_code=exc.status_code)
-    return JSONResponse({"detail": exc.detail}, status_code=exc.status_code, headers=exc.headers)
+# --- exception handlers ----------------------------------------------------
 
 
 @app.exception_handler(SessionUnavailable)
 async def _storage_unavailable(request: Request, exc: SessionUnavailable) -> JSONResponse:
     logger.error("session storage (Redis) unavailable: %s", exc)
-    return JSONResponse({"detail": "Session storage unavailable"}, status_code=503)
+    return JSONResponse({"detail": "Хранилище сессий недоступно"}, status_code=503)
 
 
-# --- routes: root / login / logout -----------------------------------------
+@app.exception_handler(RequestValidationError)
+async def _validation_error(request: Request, exc: RequestValidationError) -> JSONResponse:
+    errors = exc.errors()
+    message = "Некорректные параметры запроса"
+    if errors:
+        message = str(errors[0].get("msg", message))
+        if message.startswith("Value error, "):
+            message = message[len("Value error, "):]
+    return JSONResponse({"detail": message}, status_code=422)
+
+
+# --- routes: service / session --------------------------------------------
 
 
 @app.get("/", include_in_schema=False)
-async def index() -> RedirectResponse:
-    return RedirectResponse(_LOGIN_URL, status_code=307)
-
-
-@app.get(_LOGIN_URL, include_in_schema=False)
-async def login_page(request: Request) -> Response:
-    if not settings.admin_password:
-        raise HTTPException(404, "Admin UI disabled (set ADMIN_PASSWORD)")
-    if await _session_from_request(request) is not None:
-        return RedirectResponse(_PANEL, status_code=303)
-    from .adminui import render_login_page
-    return HTMLResponse(render_login_page())
-
-
-@app.post(_LOGIN_URL, include_in_schema=False)
-async def login_submit(request: Request) -> Response:
-    if not settings.admin_password:
-        raise HTTPException(404, "Admin UI disabled (set ADMIN_PASSWORD)")
-    ip = _client_ip(request)
-    left = _login_throttled(ip) if ip in _login_fails else 0.0
-    if left > 0:
-        raise HTTPException(429, "Too many failed login attempts; try again later",
-                            headers={"Retry-After": str(max(1, math.ceil(left)))})
-    form = await _read_form(request)
-    if not _check_password(form.get("password", "")):
-        _login_fails.setdefault(ip, []).append(time.time())
-        from .adminui import render_login_page
-        return HTMLResponse(render_login_page("Неверный пароль"), status_code=401)
-    _login_fails.pop(ip, None)
-    session = await _new_session()
-    resp = RedirectResponse(_PANEL, status_code=303)
-    _set_session_cookie(resp, session["sid"], request)
-    return resp
-
-
-@app.post(f"{_PANEL}/logout", include_in_schema=False)
-async def admin_ui_logout(request: Request, session: dict = Depends(require_panel)) -> Response:
-    form = await _read_form(request)
-    _check_csrf(form, session)
-    await _sessions.delete(session["sid"])
-    resp = RedirectResponse(_LOGIN_URL, status_code=303)
-    resp.delete_cookie(_SESSION_COOKIE, path="/")
-    return resp
-
-
-# --- routes: pages + data (delegating to the adminui renderers) -------------
-
-
-@app.get(_PANEL, include_in_schema=False)
-async def admin_ui(msg: str = "", period: str = "all",
-                   session: dict = Depends(require_panel)) -> HTMLResponse:
-    """Page "Proxies" (default): data snapshot rendered by ``render_proxies_page``."""
-    from .adminui import render_proxies_page
-    period = _normalize_period(period)
-    return HTMLResponse(render_proxies_page(
-        **await _api_get(f"/internal/proxies-data?period={quote(period)}"),
-        csrf=session["csrf"], msg=msg, period=period,
-    ))
-
-
-@app.get(f"{_PANEL}/keys", include_in_schema=False)
-async def admin_ui_keys(msg: str = "", period: str = "all",
-                        session: dict = Depends(require_panel)) -> HTMLResponse:
-    """Page "Keys": data snapshot rendered by ``render_keys_page``."""
-    from .adminui import render_keys_page
-    period = _normalize_period(period)
-    return HTMLResponse(render_keys_page(
-        **await _api_get(f"/internal/keys-data?period={quote(period)}"),
-        csrf=session["csrf"], msg=msg, period=period,
-    ))
-
-
-@app.get(f"{_PANEL}/data", include_in_schema=False)
-async def admin_ui_data(period: str = "all", session: dict = Depends(require_panel)) -> dict:
-    """HTML fragments for the "Proxies" page (fallback for EventSource)."""
-    period = _normalize_period(period)
-    return await _panel_fragments("proxies", period, session["csrf"])
-
-
-@app.get(f"{_PANEL}/keys/data", include_in_schema=False)
-async def admin_ui_keys_data(period: str = "all", session: dict = Depends(require_panel)) -> dict:
-    """HTML fragments for the "Keys" page (fallback for EventSource)."""
-    period = _normalize_period(period)
-    return await _panel_fragments("keys", period, session["csrf"])
-
-
-@app.get(f"{_PANEL}/events", include_in_schema=False)
-async def admin_ui_events(request: Request, period: str = "all",
-                          session: dict = Depends(require_panel)) -> StreamingResponse:
-    """SSE stream of live fragments for the "Proxies" page."""
-    period = _normalize_period(period)
-    return _sse_response(request, "proxies", period, session)
-
-
-@app.get(f"{_PANEL}/keys/events", include_in_schema=False)
-async def admin_ui_keys_events(request: Request, period: str = "all",
-                               session: dict = Depends(require_panel)) -> StreamingResponse:
-    """SSE stream of live fragments for the "Keys" page."""
-    period = _normalize_period(period)
-    return _sse_response(request, "keys", period, session)
-
-
-# --- routes: mutations (form -> gateway internal API -> redirect) -----------
-
-
-@app.post(f"{_PANEL}/proxies/set", include_in_schema=False)
-async def admin_ui_set_proxy(request: Request, session: dict = Depends(require_panel)) -> RedirectResponse:
-    form = await _read_form(request)
-    _check_csrf(form, session)
-    res = await _api_post("/internal/proxies/set", {
-        "proxy": form.get("proxy", ""),
-        "enabled": form.get("enabled") == "1",
-    })
-    return _panel_redirect(res.get("message", "Готово"), period=form.get("period", "all"))
-
-
-@app.post(f"{_PANEL}/keys/add", include_in_schema=False)
-async def admin_ui_add_key(request: Request, session: dict = Depends(require_panel)) -> RedirectResponse:
-    form = await _read_form(request)
-    _check_csrf(form, session)
-    res = await _api_post("/internal/keys/add", {
-        "key": form.get("key", ""), "key_id": form.get("key_id", ""),
-        "name": form.get("name", ""), "admin": form.get("admin") == "1",
-        "rpm": form.get("rpm") or None, "tpm": form.get("tpm") or None,
-        "models": form.get("models", ""),
-    })
-    return _panel_redirect(res.get("message", "Готово"), "keys",
-                           period=form.get("period", "all"))
-
-
-@app.post(f"{_PANEL}/keys/set", include_in_schema=False)
-async def admin_ui_set_key(request: Request, session: dict = Depends(require_panel)) -> RedirectResponse:
-    form = await _read_form(request)
-    _check_csrf(form, session)
-    res = await _api_post("/internal/keys/set", {
-        "key_hash": form.get("key_hash", ""),
-        "enabled": form.get("enabled") == "1",
-    })
-    return _panel_redirect(res.get("message", "Готово"), "keys",
-                           period=form.get("period", "all"))
-
-
-@app.post(f"{_PANEL}/keys/delete", include_in_schema=False)
-async def admin_ui_delete_key(request: Request, session: dict = Depends(require_panel)) -> RedirectResponse:
-    form = await _read_form(request)
-    _check_csrf(form, session)
-    res = await _api_post("/internal/keys/delete", {"key_hash": form.get("key_hash", "")})
-    return _panel_redirect(res.get("message", "Ключ удалён"), "keys",
-                           period=form.get("period", "all"))
+async def index() -> dict:
+    return {"service": "openroute-web-admin", "status": "ok"}
 
 
 @app.get("/health", include_in_schema=False)
 async def health() -> dict:
     return {"status": "ok", "sessions": await _sessions.count()}
+
+
+@app.get(f"{_PANEL_API}/session")
+async def api_session(request: Request) -> dict:
+    """Current browser session + CSRF token (200 even when not signed in)."""
+    _ensure_enabled()
+    session = await auth.session_from_request(request, settings, _sessions)
+    if session is None:
+        return {"authenticated": False}
+    return {
+        "authenticated": True,
+        "csrf": session["csrf"],
+        "expires_at": session["expires"],
+    }
+
+
+@app.post(f"{_PANEL_API}/login")
+async def api_login(request: Request) -> Response:
+    _ensure_enabled()
+    ip = auth.client_ip(request)
+    fails = _login_fails.setdefault(ip, [])
+    retry_after = auth.login_retry_after(fails)
+    if retry_after > 0:
+        raise HTTPException(
+            429,
+            "Слишком много неудачных попыток входа; попробуйте позже",
+            headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
+        )
+
+    body = await _json_body(request, LoginBody)
+    assert isinstance(body, LoginBody)
+    if not auth.check_password(body.password, settings):
+        fails.append(time.time())
+        raise HTTPException(401, "Неверный пароль")
+
+    _login_fails.pop(ip, None)
+    session = await auth.new_session(settings, _sessions)
+    response = JSONResponse({
+        "authenticated": True,
+        "csrf": session["csrf"],
+        "expires_at": session["expires"],
+    })
+    auth.set_session_cookie(response, session["sid"], request, settings)
+    return response
+
+
+@app.post(f"{_PANEL_API}/logout", status_code=204)
+async def api_logout(request: Request, session: dict = Depends(require_panel)) -> Response:
+    auth.check_csrf(request, session)
+    await _sessions.delete(session["sid"])
+    response = Response(status_code=204)
+    auth.clear_session_cookie(response, request, settings)
+    return response
+
+
+# --- routes: proxies -------------------------------------------------------
+
+
+@app.get(f"{_PANEL_API}/proxies")
+async def api_proxies(period: str = "all", session: dict = Depends(require_panel)) -> dict:
+    return await gateway.proxies_snapshot(_normalize_period(period))
+
+
+@app.post(f"{_PANEL_API}/proxies/set")
+async def api_proxy_set(request: Request, session: dict = Depends(require_panel)) -> dict:
+    auth.check_csrf(request, session)
+    body = await _json_body(request, ProxySetBody)
+    assert isinstance(body, ProxySetBody)
+    return await gateway.set_proxy(body.proxy_id, body.enabled)
+
+
+@app.get(f"{_PANEL_API}/proxies/events")
+async def api_proxy_events(request: Request, period: str = "all",
+                           session: dict = Depends(require_panel)) -> StreamingResponse:
+    return _sse_response(request, "proxies", _normalize_period(period), session)
+
+
+# --- routes: keys ----------------------------------------------------------
+
+
+@app.get(f"{_PANEL_API}/keys")
+async def api_keys(period: str = "all", session: dict = Depends(require_panel)) -> dict:
+    return await gateway.keys_snapshot(_normalize_period(period))
+
+
+@app.post(f"{_PANEL_API}/keys/add")
+async def api_key_add(request: Request, session: dict = Depends(require_panel)) -> dict:
+    auth.check_csrf(request, session)
+    body = await _json_body(request, KeyAddBody)
+    assert isinstance(body, KeyAddBody)
+    return await gateway.add_key(body)
+
+
+@app.post(f"{_PANEL_API}/keys/set")
+async def api_key_set(request: Request, session: dict = Depends(require_panel)) -> dict:
+    auth.check_csrf(request, session)
+    body = await _json_body(request, KeySetBody)
+    assert isinstance(body, KeySetBody)
+    return await gateway.set_key(body.key_hash, body.enabled)
+
+
+@app.post(f"{_PANEL_API}/keys/delete")
+async def api_key_delete(request: Request, session: dict = Depends(require_panel)) -> dict:
+    auth.check_csrf(request, session)
+    body = await _json_body(request, KeyDeleteBody)
+    assert isinstance(body, KeyDeleteBody)
+    return await gateway.delete_key(body.key_hash)
+
+
+@app.get(f"{_PANEL_API}/keys/events")
+async def api_key_events(request: Request, period: str = "all",
+                         session: dict = Depends(require_panel)) -> StreamingResponse:
+    return _sse_response(request, "keys", _normalize_period(period), session)

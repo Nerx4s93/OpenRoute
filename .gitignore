@@ -9,3 +9,11 @@ __pycache__/
 .venv/
 .pytest_cache/
 .venv-win/
+
+# --- Node / Vite (web-admin-ui) ---
+web-admin-ui/node_modules/
+web-admin-ui/dist/
+web-admin-ui/.vite/
+web-admin-ui/coverage/
+web-admin-ui/.env*
+*.tsbuildinfo

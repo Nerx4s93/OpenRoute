@@ -1,0 +1,50 @@
+const numberFormatter = new Intl.NumberFormat("ru-RU");
+
+export function formatNumber(value: number): string {
+  return numberFormatter.format(value);
+}
+
+export function formatLimit(value: number | null | undefined): string {
+  return value === null || value === undefined ? "—" : formatNumber(value);
+}
+
+export function formatDuration(seconds: number): string {
+  const total = Math.max(0, Math.trunc(seconds));
+  if (total < 60) return "<1м";
+  const hours = Math.floor(total / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (hours) return `${hours}ч ${String(minutes).padStart(2, "0")}м`;
+  return `${minutes}м`;
+}
+
+export function formatTimestamp(ts: number): string {
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(new Date(ts * 1000));
+}
+
+export function formatServerTime(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return "—";
+  return new Intl.DateTimeFormat("ru-RU", {
+    day: "2-digit",
+    month: "2-digit",
+    year: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).format(date);
+}
+
+export function formatModels(models: string[] | null | undefined): string {
+  return models && models.length ? models.join(", ") : "—";
+}
+
+export function requestTokens(prompt?: number | null, completion?: number | null): number {
+  return (prompt ?? 0) + (completion ?? 0);
+}

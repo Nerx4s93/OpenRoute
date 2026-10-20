@@ -1,3 +1,4 @@
+# Backend only. The React SPA is built and served by ../web-admin-ui.
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \

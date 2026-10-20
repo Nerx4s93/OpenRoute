@@ -1,0 +1,123 @@
+export type Period = "day" | "week" | "month" | "all";
+
+export const PERIODS: ReadonlyArray<{ value: Period; label: string; title: string }> = [
+  { value: "day", label: "День", title: "Последние 24 часа" },
+  { value: "week", label: "Неделя", title: "Последние 7 дней" },
+  { value: "month", label: "Месяц", title: "Последние 30 дней" },
+  { value: "all", label: "Всё время", title: "За всё время" },
+];
+
+export const PERIOD_CAPTIONS: Record<Period, string | null> = {
+  day: "за день",
+  week: "за неделю",
+  month: "за месяц",
+  all: null,
+};
+
+export const PERIOD_SECTIONS: Record<Period, string> = {
+  day: "За день",
+  week: "За неделю",
+  month: "За месяц",
+  all: "За всё время",
+};
+
+export function isPeriod(value: string | null): value is Period {
+  return value === "day" || value === "week" || value === "month" || value === "all";
+}
+
+export interface Usage {
+  requests: number;
+  errors: number;
+  tokens: number;
+}
+
+export interface ProxyRow {
+  id: string | null;
+  display: string;
+  enabled: boolean;
+  manual: boolean;
+  disabled: boolean;
+  banned: boolean;
+  quota_seconds_left: number;
+  banned_seconds_left: number;
+  cooldown_seconds_left: number;
+  rpm_capped: boolean;
+  last_error: string | null;
+  usage: Usage;
+}
+
+export interface RecentRequest {
+  ts: number;
+  key_id: string;
+  method?: string;
+  path: string;
+  model?: string | null;
+  status: number;
+  latency_ms: number;
+  stream?: boolean;
+  account?: string | null;
+  prompt_tokens?: number | null;
+  completion_tokens?: number | null;
+  error?: string | null;
+}
+
+export interface ProxiesSnapshot {
+  server_time: string;
+  summary: {
+    requests: number;
+    errors: number;
+    tokens: number;
+    proxies_ready: number;
+    proxies_total: number;
+  };
+  proxies: ProxyRow[];
+  recent: RecentRequest[];
+}
+
+export interface KeyRow {
+  key_hash: string;
+  key_id: string;
+  name: string;
+  admin: boolean;
+  rpm: number | null;
+  tpm: number | null;
+  models: string[] | null;
+  enabled: boolean;
+}
+
+export type KeyState = "active" | "revoked" | "deleted";
+
+export interface KeyStat {
+  key_id: string;
+  state: KeyState;
+  requests: number;
+  errors: number;
+  tokens: number;
+}
+
+export interface KeysSnapshot {
+  server_time: string;
+  keys: KeyRow[];
+  stats: KeyStat[];
+}
+
+export interface SessionInfo {
+  authenticated: boolean;
+  csrf?: string;
+  expires_at?: number;
+}
+
+export interface ApiMessage {
+  ok: boolean;
+  message: string;
+}
+
+export interface KeyAddPayload {
+  key: string;
+  key_id?: string;
+  name?: string;
+  admin?: boolean;
+  rpm?: number | null;
+  tpm?: number | null;
+  models?: string[] | null;
+}

@@ -1,30 +1,96 @@
 # web-admin
 
-Веб-админка OpenRoute (control plane) как отдельный микросервис. Вход — только
-по паролю (`ADMIN_PASSWORD`), серверные сессии в Redis, CSRF, страницы
-«Прокси» и «Ключи». **Своими данными сервис не владеет**: он ходит в internal
-API шлюза (`/internal/*`) с общим секретом `X-Internal-Token`.
+Backend админки OpenRoute (control plane). Отдаёт **только JSON/SSE** по
+`/api/admin/*`; React-интерфейс живёт в отдельном контейнере
+[`web-admin-ui/`](../web-admin-ui/README.md) и получает статику через `edge`.
+Своими данными сервис не владеет: прокси, ключи и статистика читаются и
+меняются через internal API шлюза (`/internal/*`, `X-Internal-Token`).
 
-> **Статус: реализовано.** Сессии, `/login`, CSRF, проксирование мутаций в
-> internal API и рендеринг страниц (`app/adminui.py`).
+> **Статус: реализовано.** Парольный вход, серверные сессии в Redis, CSRF,
+> снапшоты прокси/ключей, мутации и SSE-обновления.
 
 ## Маршруты
 
-| Метод | Путь                    | Описание                                          |
-|-------|-------------------------|---------------------------------------------------|
-| GET   | `/`                     | редирект на `/login`                              |
-| GET/POST | `/login`             | вход по паролю `ADMIN_PASSWORD`                   |
-| POST  | `/admin/ui/logout`      | выход (POST + CSRF, сессия удаляется на сервере)  |
-| GET   | `/admin/ui`             | страница «Прокси»                                 |
-| GET   | `/admin/ui/keys`        | страница «Ключи»                                  |
-| GET   | `/admin/ui/data`        | HTML-фрагменты «Прокси» для автообновления        |
-| GET   | `/admin/ui/keys/data`   | HTML-фрагменты «Ключи» для автообновления         |
-| POST  | `/admin/ui/proxies/{set,delete}` | мутации пула → `/internal/proxies/*`  |
-| POST  | `/admin/ui/keys/{add,set,delete}`    | мутации ключей → `/internal/keys/*`   |
-| GET   | `/health`               | liveness + число живых сессий в Redis             |
+| Метод | Путь | Описание |
+|-------|------|----------|
+| GET | `/` | служебный JSON (`{"service":"openroute-web-admin"}`) |
+| GET | `/health` | liveness + число живых сессий в Redis |
+| GET | `/api/admin/session` | текущая сессия + CSRF-токен (200 и без входа) |
+| POST | `/api/admin/login` | вход по `ADMIN_PASSWORD`; ставит HttpOnly cookie |
+| POST | `/api/admin/logout` | выход (CSRF; сессия удаляется на сервере) |
+| GET | `/api/admin/proxies?period=` | снапшот пула: статусы, расходы, последние запросы |
+| GET | `/api/admin/proxies/events?period=` | SSE с JSON-снапшотами прокси |
+| POST | `/api/admin/proxies/set` | включить/отключить прокси по `proxy_id` (CSRF) |
+| GET | `/api/admin/keys?period=` | ключи + статистика по `key_id` |
+| GET | `/api/admin/keys/events?period=` | SSE с JSON-снапшотами ключей |
+| POST | `/api/admin/keys/add` | добавить ключ (CSRF) |
+| POST | `/api/admin/keys/set` | включить/отозвать ключ (CSRF) |
+| POST | `/api/admin/keys/delete` | удалить ключ (CSRF) |
+
+`period` — `day`, `week`, `month` или `all` (неизвестное значение → `all`).
+
+### Формат данных
+
+- Прокси: `{server_time, summary, proxies[], recent[]}`. У каждой строки есть
+  `display` (`host:port`), `usage`, состояние (`enabled`, `manual`, `disabled`,
+  `banned`, таймеры) и `id` — HMAC от полного URL. **Полный URL с логином и
+  паролем никогда не попадает в браузер**; backend хранит его только в памяти
+  процесса и резолвит `proxy_id` при мутации.
+- Ключи: `{server_time, keys[], stats[]}`. `keys` — активные записи
+  (`key_hash`, `key_id`, лимиты, модели), `stats` — usage из журнала запросов,
+  включая `state: "deleted"` для удалённых ключей.
+- Ошибки — `{"detail": "..."}`; ошибки internal API шлюза разворачиваются из
+  OpenAI-конверта в понятный `detail`.
+- SSE отправляет `data: <json-снапшот>` и heartbeat-комментарии; при обрыве
+  фронтенд переходит на polling.
+
+### Безопасность
+
+- Cookie `openroute_session`: `HttpOnly`, `SameSite=Strict`, `Secure` при
+  HTTPS (по `X-Forwarded-Proto` от edge), `Path=/`.
+- Сессии — только в Redis; cookie не содержит подписанных claims.
+- Каждая мутация требует `X-CSRF-Token` из `/api/admin/session`.
+- Логин ограничен 10 неудачными попытками в минуту на IP
+  (`X-Real-IP` от edge), с `Retry-After`.
+- `proxy_id` — HMAC-SHA256 от полного URL с `INTERNAL_API_TOKEN`; перебор
+  идентификаторов не раскрывает креды.
+- Панель выключена (404), если `ADMIN_PASSWORD` пуст.
 
 ## Конфигурация
 
-См. `.env.example`: `ADMIN_PASSWORD`, `ADMIN_SESSION_TTL_SECONDS`,
-`REDIS_URL`, `GATEWAY_INTERNAL_URL` (в docker-сети `http://gateway:8000`),
-`INTERNAL_API_TOKEN` (тот же, что у шлюза), `INTERNAL_TIMEOUT_SECONDS`.
+См. `.env.example`:
+
+| Переменная | Назначение |
+|------------|------------|
+| `ADMIN_PASSWORD` | пароль входа; пусто — админка выключена |
+| `ADMIN_SESSION_TTL_SECONDS` | TTL сессии (по умолчанию 43200) |
+| `REDIS_URL` | хранилище сессий (`redis://redis:6379/0`) |
+| `GATEWAY_INTERNAL_URL` | `http://gateway:8000` в docker-сети |
+| `INTERNAL_API_TOKEN` | тот же секрет, что у шлюза |
+| `INTERNAL_TIMEOUT_SECONDS` | таймаут internal API (30 с) |
+
+## Локальный запуск
+
+```bash
+cd web-admin
+pip install -r requirements.txt
+uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+Для фронтенда в соседнем терминале:
+
+```bash
+cd web-admin-ui
+npm ci
+npm run dev    # http://127.0.0.1:5173, /api проксируется на :8000
+```
+
+## Тесты
+
+```bash
+pip install -r ../requirements-dev.txt
+pytest ../tests/test_admin_api.py -q
+```
+
+Тесты герметичны: поднимают in-process fake gateway и in-memory session store,
+не требуют Redis/PostgreSQL/сети.

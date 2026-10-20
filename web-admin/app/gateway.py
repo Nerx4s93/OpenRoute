@@ -1,0 +1,396 @@
+"""Client for the gateway's internal API and admin snapshot normalization.
+
+The web-admin service never touches PostgreSQL directly: it talks to
+``gateway`` over ``/internal/*`` with ``X-Internal-Token``. This module owns the
+HTTP client, unwraps the gateway's OpenAI-style error envelope, and converts raw
+gateway responses into small, browser-friendly JSON snapshots.
+
+Proxy credentials never reach the browser: rows are exposed with a masked
+``display`` (``host:port``) and an opaque ``id`` = HMAC(full proxy URL). The
+full URL is kept only in this process and resolved when an operator toggles a
+row.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import logging
+import re
+from datetime import datetime, timezone
+from urllib.parse import quote
+
+import httpx
+from fastapi import HTTPException
+
+from .config import Settings
+from .schemas import KeyAddBody
+
+logger = logging.getLogger("openroute-web-admin.gateway")
+
+# Credentials embedded in an URL (``scheme://user:pass@host``) must never be
+# echoed back in error text or recent-request rows.
+_CREDENTIALS_IN_URL = re.compile(r"([a-zA-Z][a-zA-Z0-9+.-]*://)[^/\s@]+@")
+
+
+def _strip_credentials(value: object) -> str:
+    return _CREDENTIALS_IN_URL.sub(r"\1***@", str(value or ""))
+
+
+def _localize(message: str) -> str:
+    """Translate the gateway's short English messages to the panel's Russian."""
+    if not message:
+        return message
+    exact = {
+        "Proxy enabled": "Прокси включён",
+        "Proxy disabled": "Прокси отключён",
+        "Proxy not found": "Прокси не найден",
+        "Key enabled": "Ключ включён",
+        "Key revoked (401)": "Ключ отозван",
+        "Key deleted": "Ключ удалён",
+        "Key not found": "Ключ не найден",
+        "Such a key already exists": "Такой ключ уже есть",
+        "No key given": "Ключ не указан",
+        "Key too long (max 200 chars)": "Ключ слишком длинный (макс. 200 символов)",
+    }
+    if message in exact:
+        return exact[message]
+    match = re.fullmatch(r"Key (.+) added", message)
+    if match:
+        return f"Ключ {match.group(1)} добавлен"
+    for field in ("RPM", "TPM"):
+        prefix = f"Invalid {field}: "
+        if message.startswith(prefix):
+            return f"Некорректный {field}: {message[len(prefix):]}"
+        if message == f"{field} cannot be negative":
+            return f"{field} не может быть отрицательным"
+    return message
+
+
+def _gateway_error(response: httpx.Response) -> HTTPException:
+    """Map a gateway error response to an ``HTTPException`` with a clean detail.
+
+    The gateway answers ALL HTTP errors (including internal 403/404/5xx) with
+    the OpenAI envelope ``{"error": {"message", "type", "code"}}``; prefer
+    ``payload["error"]["message"]``; fall back to FastAPI's ``{"detail": ...}``,
+    then a bare ``{"message": ...}``, then the raw body.
+    """
+    detail: str | None = None
+    try:
+        payload = response.json()
+    except ValueError:
+        payload = None
+    if isinstance(payload, dict):
+        error = payload.get("error")
+        if isinstance(error, dict) and isinstance(error.get("message"), str):
+            detail = error["message"]
+        elif isinstance(payload.get("detail"), str):
+            detail = payload["detail"]
+        elif isinstance(payload.get("message"), str):
+            detail = payload["message"]
+    if not detail:
+        detail = response.text[:200]
+    return HTTPException(response.status_code, _localize(_strip_credentials(detail)))
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _masked_display(value: object) -> str:
+    """Return ``host:port`` even if the source unexpectedly contains a URL."""
+    text = str(value or "").strip()
+    if "://" in text:
+        text = text.split("://", 1)[1]
+    if "@" in text:
+        text = text.rsplit("@", 1)[1]
+    return text
+
+
+def _sanitize_recent(raw: object) -> list[dict]:
+    """Keep recent-request rows but strip anything that could hold credentials."""
+    if not isinstance(raw, list):
+        return []
+    rows: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        row = dict(item)
+        row["account"] = _masked_display(row.get("account")) or None
+        for key in ("real_proxy", "real_url", "url"):
+            row.pop(key, None)
+        for key, value in list(row.items()):
+            if isinstance(value, str):
+                row[key] = _strip_credentials(value)
+        rows.append(row)
+    return rows
+
+
+def _as_int(value: object, default: int = 0) -> int:
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _as_optional_int(value: object) -> int | None:
+    if value is None or value == "":
+        return None
+    try:
+        return int(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return None
+
+
+def _as_float(value: object, default: float = 0.0) -> float:
+    try:
+        return float(value)  # type: ignore[arg-type]
+    except (TypeError, ValueError):
+        return default
+
+
+def _proxy_state_fields(row: dict) -> dict:
+    """Keep only the status fields the panel actually renders."""
+    return {
+        "enabled": bool(row.get("enabled", True)),
+        "manual": bool(row.get("manual", False)),
+        "disabled": bool(row.get("disabled", False)),
+        "banned": bool(row.get("banned") or row.get("permanently_banned")),
+        "quota_seconds_left": _as_float(row.get("quota_seconds_left")),
+        "banned_seconds_left": _as_float(row.get("banned_seconds_left")),
+        "cooldown_seconds_left": _as_float(row.get("cooldown_seconds_left")),
+        "rpm_capped": bool(row.get("rpm_capped", False)),
+        "last_error": _strip_credentials(row.get("last_error")) or None,
+    }
+
+
+class GatewayClient:
+    """Async client for ``/internal/*`` plus snapshot normalization."""
+
+    def __init__(self, settings: Settings, client: httpx.AsyncClient | None = None) -> None:
+        self.settings = settings
+        self.client = client or httpx.AsyncClient(
+            base_url=settings.gateway_internal_url,
+            headers={"X-Internal-Token": settings.internal_api_token},
+            timeout=settings.internal_timeout_seconds,
+        )
+        # proxy_id -> full URL (credentials stay in server memory only)
+        self._proxy_urls: dict[str, str] = {}
+
+    async def aclose(self) -> None:
+        await self.client.aclose()
+
+    # --- low-level calls ---------------------------------------------------
+
+    async def _get(self, path: str) -> dict:
+        try:
+            response = await self.client.get(path)
+        except httpx.HTTPError as exc:
+            logger.error("gateway internal API unreachable: %s", exc)
+            raise HTTPException(502, "Внутренний API шлюза недоступен") from exc
+        if response.status_code >= 400:
+            raise _gateway_error(response)
+        try:
+            payload = response.json()
+        except ValueError as exc:
+            raise HTTPException(502, "Шлюз вернул некорректный JSON") from exc
+        if not isinstance(payload, dict):
+            raise HTTPException(502, "Шлюз вернул неожиданный ответ")
+        return payload
+
+    async def _post(self, path: str, payload: dict) -> dict:
+        try:
+            response = await self.client.post(path, json=payload)
+        except httpx.HTTPError as exc:
+            logger.error("gateway internal API unreachable: %s", exc)
+            raise HTTPException(502, "Внутренний API шлюза недоступен") from exc
+        if response.status_code >= 400:
+            raise _gateway_error(response)
+        try:
+            data = response.json()
+        except ValueError as exc:
+            raise HTTPException(502, "Шлюз вернул некорректный JSON") from exc
+        if not isinstance(data, dict):
+            raise HTTPException(502, "Шлюз вернул неожиданный ответ")
+        return data
+
+    # --- proxy tokens ------------------------------------------------------
+
+    def proxy_token(self, url: str) -> str:
+        secret = self.settings.internal_api_token.encode("utf-8")
+        return hmac.new(secret, url.encode("utf-8"), hashlib.sha256).hexdigest()
+
+    def _remember_proxies(self, rows: list[dict]) -> None:
+        self._proxy_urls.clear()
+        for row in rows:
+            real = str(row.get("real_proxy") or row.get("real_url") or "")
+            if real:
+                self._proxy_urls[self.proxy_token(real)] = real
+
+    async def _resolve_proxy_url(self, proxy_id: str) -> str | None:
+        if proxy_id in self._proxy_urls:
+            return self._proxy_urls[proxy_id]
+        # The browser may have loaded a snapshot before this process started.
+        await self.proxies_snapshot("all")
+        return self._proxy_urls.get(proxy_id)
+
+    # --- snapshots ---------------------------------------------------------
+
+    async def proxies_snapshot(self, period: str = "all") -> dict:
+        data = await self._get(f"/internal/proxies-data?period={quote(period)}")
+        status = data.get("status")
+        if not isinstance(status, dict):
+            status = {}
+        usage_by_proxy = data.get("usage_by_proxy")
+        if not isinstance(usage_by_proxy, dict):
+            usage_by_proxy = {}
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            usage = {}
+        total = usage.get("total")
+        if not isinstance(total, dict):
+            total = {}
+
+        raw_rows = status.get("proxies")
+        if not isinstance(raw_rows, list):
+            raw_rows = []
+        self._remember_proxies([row for row in raw_rows if isinstance(row, dict)])
+
+        rows: list[dict] = []
+        for raw in raw_rows:
+            if not isinstance(raw, dict):
+                continue
+            display = _masked_display(raw.get("proxy") or raw.get("url"))
+            per_proxy = usage_by_proxy.get(display) or {}
+            real = str(raw.get("real_proxy") or raw.get("real_url") or "")
+            row = {
+                "id": self.proxy_token(real) if real else None,
+                "display": display,
+                **_proxy_state_fields(raw),
+                "usage": {
+                    "requests": _as_int(per_proxy.get("requests", raw.get("requests", 0))),
+                    "errors": _as_int(per_proxy.get("errors", raw.get("errors", 0))),
+                    "tokens": _as_int(per_proxy.get("tokens", 0)),
+                },
+            }
+            rows.append(row)
+
+        return {
+            "server_time": _now_iso(),
+            "summary": {
+                "requests": _as_int(total.get("requests")),
+                "errors": _as_int(total.get("errors")),
+                "tokens": _as_int(total.get("tokens")),
+                "proxies_ready": _as_int(status.get("proxies_ready")),
+                "proxies_total": _as_int(status.get("proxies_total"), len(rows)),
+            },
+            "proxies": rows,
+            "recent": _sanitize_recent(data.get("recent")),
+        }
+
+    async def keys_snapshot(self, period: str = "all") -> dict:
+        data = await self._get(f"/internal/keys-data?period={quote(period)}")
+        raw_keys = data.get("keys")
+        if not isinstance(raw_keys, list):
+            raw_keys = []
+        usage = data.get("usage")
+        if not isinstance(usage, dict):
+            usage = {}
+
+        keys: list[dict] = []
+        by_id: dict[str, dict] = {}
+        for raw in raw_keys:
+            if not isinstance(raw, dict):
+                continue
+            key_id = str(raw.get("key_id", ""))
+            raw_models = raw.get("models")
+            if isinstance(raw_models, str):
+                models: list[str] | None = [
+                    part.strip() for part in raw_models.split(",") if part.strip()
+                ] or None
+            elif isinstance(raw_models, list):
+                models = [str(part).strip() for part in raw_models if str(part).strip()] or None
+            else:
+                models = None
+            row = {
+                "key_hash": str(raw.get("key_hash", "")),
+                "key_id": key_id,
+                "name": str(raw.get("name", "")),
+                "admin": bool(raw.get("admin", False)),
+                "rpm": _as_optional_int(raw.get("rpm")),
+                "tpm": _as_optional_int(raw.get("tpm")),
+                "models": models,
+                "enabled": bool(raw.get("enabled", True)),
+            }
+            keys.append(row)
+            by_id[key_id] = row
+
+        stats: list[dict] = []
+        for key_id, raw in usage.items():
+            if key_id == "total" or not isinstance(raw, dict):
+                continue
+            live = by_id.get(key_id)
+            if live is None:
+                state = "deleted"
+            elif live["enabled"]:
+                state = "active"
+            else:
+                state = "revoked"
+            stats.append({
+                "key_id": key_id,
+                "state": state,
+                "requests": _as_int(raw.get("requests")),
+                "errors": _as_int(raw.get("errors")),
+                "tokens": _as_int(raw.get("tokens")),
+            })
+        stats.sort(key=lambda item: (-item["requests"], item["key_id"]))
+
+        return {"server_time": _now_iso(), "keys": keys, "stats": stats}
+
+    # --- mutations ---------------------------------------------------------
+
+    async def set_proxy(self, proxy_id: str, enabled: bool) -> dict:
+        url = await self._resolve_proxy_url(proxy_id)
+        if url is None:
+            raise HTTPException(404, "Прокси не найден")
+        data = await self._post("/internal/proxies/set", {"proxy": url, "enabled": enabled})
+        message = _localize(str(data.get("message") or ""))
+        return {
+            "ok": True,
+            "message": message or ("Прокси включён" if enabled else "Прокси отключён"),
+        }
+
+    @staticmethod
+    def _key_payload(body: KeyAddBody) -> dict:
+        models = body.models
+        if isinstance(models, str):
+            models = [part.strip() for part in models.split(",") if part.strip()] or None
+        elif isinstance(models, list):
+            models = [str(part).strip() for part in models if str(part).strip()] or None
+        else:
+            models = None
+        return {
+            "key": body.key,
+            "key_id": body.key_id.strip(),
+            "name": body.name.strip(),
+            "admin": body.admin,
+            "rpm": body.rpm,
+            "tpm": body.tpm,
+            "models": models,
+        }
+
+    async def add_key(self, body: KeyAddBody) -> dict:
+        data = await self._post("/internal/keys/add", self._key_payload(body))
+        if not data.get("ok", True):
+            raise HTTPException(400, _localize(str(data.get("message") or "Не удалось добавить ключ")))
+        return {"ok": True, "message": _localize(str(data.get("message") or "Ключ добавлен"))}
+
+    async def set_key(self, key_hash: str, enabled: bool) -> dict:
+        data = await self._post("/internal/keys/set", {"key_hash": key_hash, "enabled": enabled})
+        message = _localize(str(data.get("message") or ""))
+        return {"ok": True, "message": message or ("Ключ включён" if enabled else "Ключ отозван")}
+
+    async def delete_key(self, key_hash: str) -> dict:
+        data = await self._post("/internal/keys/delete", {"key_hash": key_hash})
+        message = _localize(str(data.get("message") or ""))
+        return {"ok": True, "message": message or "Ключ удалён"}
