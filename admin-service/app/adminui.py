@@ -361,6 +361,10 @@ def _proxy_rows(proxies: list[dict], usage: dict, csrf: str) -> str:
         if state == "cooldown":
             label = f"cooldown {float(s.get('cooldown_seconds_left') or 0):.0f}s"
         u = usage.get(_proxy_display(s), {}) or {}
+        # Requests/errors come from the persistent request log (all-time), not
+        # from the gateway's in-memory counters, which reset on restart.
+        requests = u.get("requests", s.get("requests", 0))
+        errors = u.get("errors", s.get("errors", 0))
         dead_cls = ' class="dead"' if state in ("dead", "off") else ""
         real = _esc(_proxy_identity(s))
         toggle = (
@@ -384,8 +388,8 @@ def _proxy_rows(proxies: list[dict], usage: dict, csrf: str) -> str:
             f"<tr{dead_cls}>"
             f'<td class="mono">{_esc(_proxy_display(s))}</td>'
             f'<td><span class="badge {cls}">{label}</span></td>'
-            f"<td>{_num(s.get('requests', 0))}</td>"
-            f"<td>{_num(s.get('errors', 0))}</td>"
+            f"<td>{_num(requests)}</td>"
+            f"<td>{_num(errors)}</td>"
             f"<td>{_num(u.get('tokens', 0))}</td>"
             f'<td class="muted">{_esc(s.get("last_error") or "")}</td>'
             f'<td class="actions">{toggle}{delete}</td>'
@@ -616,7 +620,7 @@ def render_proxies_page(*, status: dict, usage: dict, usage_by_proxy: dict,
 
 <section class="section page-enter" aria-labelledby="pool-title">
 <div class="section-head"><div class="section-title"><span class="section-icon" aria-hidden="true">◎</span>
-<h2 id="pool-title">Пул прокси</h2></div><span class="section-note">Управление маршрутами</span></div>
+<h2 id="pool-title">Пул прокси</h2></div></div>
 <div class="table-scroll"><table>
 <thead>
 <tr><th>Прокси</th><th>Статус</th><th>Запросы</th><th>Ошибки</th>

@@ -739,6 +739,18 @@ def test_ui_shows_totals_and_per_proxy_usage(panel):
     assert "110" in html  # tokens burned are visible on the page
 
 
+def test_proxy_counters_come_from_persistent_usage(panel):
+    """Per-proxy requests/errors come from the DB log, not in-memory counters
+    (the fake gateway's status always reports 0, simulating a restart)."""
+    login_ok(panel)
+    seed_proxy(panel, "http://u:p@persist:8080")
+    panel.state.usage_by_proxy["persist:8080"] = {
+        "requests": 42, "errors": 7, "tokens": 100,
+    }
+    rows = panel.client.get("/admin/ui/data").json()["proxies-rows"]
+    assert "<td>42</td>" in rows and "<td>7</td>" in rows
+
+
 def test_key_stats_include_deleted_key(panel):
     login_ok(panel)
     csrf = panel_csrf(panel)
