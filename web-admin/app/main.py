@@ -317,6 +317,13 @@ async def api_proxy_set(request: Request, session: dict = Depends(require_panel)
     return await gateway.set_proxy(body.proxy_id, body.enabled)
 
 
+@app.post(f"{_PANEL_API}/proxies/refresh")
+async def api_proxy_refresh(request: Request, session: dict = Depends(require_panel)) -> dict:
+    """Force-fetch the proxy list, bypassing the px6-service TTL cache."""
+    auth.check_csrf(request, session)
+    return await gateway.refresh_proxies()
+
+
 @app.get(f"{_PANEL_API}/proxies/events")
 async def api_proxy_events(request: Request, period: str = "all",
                            session: dict = Depends(require_panel)) -> StreamingResponse:

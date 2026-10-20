@@ -24,6 +24,14 @@ function useMutationToast<TVariables, TData>(
   });
 }
 
+export function useRefreshProxies() {
+  return useMutationToast<void, ApiMessage>(
+    () => api.refreshProxies(),
+    "proxies",
+    (data) => data.message,
+  );
+}
+
 export function useSetProxy() {
   return useMutationToast<{ proxyId: string; enabled: boolean }, ApiMessage>(
     ({ proxyId, enabled }) => api.setProxy(proxyId, enabled),

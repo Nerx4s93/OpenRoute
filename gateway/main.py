@@ -1070,6 +1070,24 @@ async def internal_keys_data(request: Request, period: str = "all") -> dict:
     return await _keys_panel_data(period)
 
 
+async def internal_proxies_refresh(request: Request) -> dict:
+    """POST ``/internal/proxies/refresh`` - force a cache-busting refresh.
+
+    The admin panel uses this when an operator asks for the current px6.net
+    list; ``?refresh=true`` tells px6-service to ignore its TTL cache. The
+    regular background loop keeps using the cached endpoint.
+    """
+    _require_internal(request)
+    try:
+        ok = await manager.refresh_proxies(bust_cache=True)
+    except Exception as exc:
+        logger.exception("Manual proxy refresh crashed")
+        raise HTTPException(502, "Proxy refresh failed") from exc
+    if not ok:
+        raise HTTPException(502, "Proxy refresh failed")
+    return {"ok": True, "message": "Proxies refreshed"}
+
+
 async def internal_proxies_set(request: Request) -> dict:
     """``{"proxy": str, "enabled": bool}`` — manual on/off of a proxy."""
     _require_internal(request)
@@ -1197,6 +1215,8 @@ def create_app() -> FastAPI:
                               methods=["GET"], include_in_schema=False)
     application.add_api_route(f"{_INTERNAL_PREFIX}/keys-data", internal_keys_data,
                               methods=["GET"], include_in_schema=False)
+    application.add_api_route(f"{_INTERNAL_PREFIX}/proxies/refresh", internal_proxies_refresh,
+                              methods=["POST"], include_in_schema=False)
     application.add_api_route(f"{_INTERNAL_PREFIX}/proxies/set", internal_proxies_set,
                               methods=["POST"], include_in_schema=False)
     application.add_api_route(f"{_INTERNAL_PREFIX}/keys/add", internal_keys_add,

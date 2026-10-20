@@ -55,7 +55,7 @@ header.top nav a.active { background: #83decf16; border-color: #88e5cf30; color:
 
 /* --- hero ---------------------------------------------------------------- */
 .hero { position: relative; overflow: hidden; margin: 30px 0 24px; min-height: 180px;
-  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 20px;
   padding: 35px clamp(24px, 3vw, 42px); border: 1px solid #36505a;
   border-radius: 19px; background: linear-gradient(110deg, #193938, #172b35 53%, #17212d); }
 .hero::before { content: ""; position: absolute; inset: 0; opacity: .65; pointer-events: none;
@@ -73,6 +73,13 @@ h1 { margin: 7px 0 5px; font-size: clamp(27px, 3vw, 38px); line-height: 1.16;
 .hero-aside { display: flex; align-items: center; gap: 9px; flex: none; padding: 10px 14px;
   background: #091b2280; border: 1px solid #aeefdc39; border-radius: 999px;
   color: #d6f6eb; font-size: 11px; font-weight: 650; white-space: nowrap; }
+.hero-refresh { position: relative; z-index: 1; flex: none; display: inline-flex;
+  align-items: center; gap: 8px; padding: 11px 16px; border: 1px solid #8de9d25c;
+  border-radius: 999px; background: #8de9d218; color: #d4fbef; font-size: 12px;
+  font-weight: 750; white-space: nowrap; }
+.hero-refresh > span { font-size: 15px; line-height: 1; }
+.hero-refresh:hover { background: #8de9d22c; border-color: #b6f5e3a0; transform: translateY(-1px); }
+.hero-refresh:disabled { opacity: .6; transform: none; }
 
 /* --- period control ------------------------------------------------------ */
 .period-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px;
@@ -296,6 +303,7 @@ form.add button:hover, .login-box button[type=submit]:hover {
   .crumb-root, .meta-label { display: none; }
   .hero { min-height: 160px; margin: 18px 0; padding: 25px 21px; }
   .hero-aside { display: none; }
+  .hero-refresh { width: 100%; justify-content: center; }
   .period-bar { align-items: flex-start; flex-direction: column; gap: 8px; }
   .period-tabs { width: 100%; overflow-x: auto; }
   .period-tabs button { flex: 1; padding: 6px 7px; text-align: center; }

@@ -122,6 +122,9 @@ export const api = {
       body: jsonBody({ proxy_id: proxyId, enabled }),
     }),
 
+  refreshProxies: () =>
+    apiRequest<ApiMessage>("/api/admin/proxies/refresh", { method: "POST" }),
+
   keys: (period: Period) =>
     apiRequest<KeysSnapshot>(`/api/admin/keys?period=${period}`),
 

@@ -21,6 +21,7 @@ Backend админки OpenRoute (control plane). Отдаёт **только JS
 | GET | `/api/admin/proxies?period=` | снапшот пула: статусы, расходы, последние запросы |
 | GET | `/api/admin/proxies/events?period=` | SSE с JSON-снапшотами прокси |
 | POST | `/api/admin/proxies/set` | включить/отключить прокси по `proxy_id` (CSRF) |
+| POST | `/api/admin/proxies/refresh` | принудительно обновить список из px6 со сбросом TTL-кэша (CSRF) |
 | GET | `/api/admin/keys?period=` | ключи + статистика по `key_id` |
 | GET | `/api/admin/keys/events?period=` | SSE с JSON-снапшотами ключей |
 | POST | `/api/admin/keys/add` | добавить ключ (CSRF) |

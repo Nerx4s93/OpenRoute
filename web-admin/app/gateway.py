@@ -45,6 +45,8 @@ def _localize(message: str) -> str:
         "Proxy enabled": "Прокси включён",
         "Proxy disabled": "Прокси отключён",
         "Proxy not found": "Прокси не найден",
+        "Proxies refreshed": "Список прокси обновлён",
+        "Proxy refresh failed": "Не удалось обновить список прокси",
         "Key enabled": "Ключ включён",
         "Key revoked (401)": "Ключ отозван",
         "Key deleted": "Ключ удалён",
@@ -348,6 +350,11 @@ class GatewayClient:
         return {"server_time": _now_iso(), "keys": keys, "stats": stats}
 
     # --- mutations ---------------------------------------------------------
+
+    async def refresh_proxies(self) -> dict:
+        data = await self._post("/internal/proxies/refresh", {})
+        message = _localize(str(data.get("message") or "Proxies refreshed"))
+        return {"ok": True, "message": message or "Список прокси обновлён"}
 
     async def set_proxy(self, proxy_id: str, enabled: bool) -> dict:
         url = await self._resolve_proxy_url(proxy_id)

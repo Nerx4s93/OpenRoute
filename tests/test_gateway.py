@@ -1058,6 +1058,40 @@ def test_edge_hides_internal(make_gateway):
     assert gw.internal.get("/internal/proxies-data").status_code == 403  # token missing
 
 
+def test_internal_proxies_refresh_forces_cache_bust(make_gateway, monkeypatch):
+    gw = make_gateway()
+    calls: list[bool] = []
+
+    async def fake_refresh(bust_cache: bool = False) -> bool:
+        calls.append(bust_cache)
+        return True
+
+    monkeypatch.setattr(gw.manager, "refresh_proxies", fake_refresh)
+    h = {"X-Internal-Token": "test-internal-token"}
+
+    assert gw.client.post("/internal/proxies/refresh").status_code == 404
+    assert gw.internal.post("/internal/proxies/refresh").status_code == 403
+    response = gw.internal.post("/internal/proxies/refresh", headers=h)
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "message": "Proxies refreshed"}
+    assert calls == [True]
+
+
+def test_internal_proxies_refresh_failure_is_openai_error(make_gateway, monkeypatch):
+    gw = make_gateway()
+
+    async def failing_refresh(bust_cache: bool = False) -> bool:
+        return False
+
+    monkeypatch.setattr(gw.manager, "refresh_proxies", failing_refresh)
+    response = gw.internal.post(
+        "/internal/proxies/refresh",
+        headers={"X-Internal-Token": "test-internal-token"},
+    )
+    assert response.status_code == 502
+    assert response.json()["error"]["message"] == "Proxy refresh failed"
+
+
 def test_internal_requires_token(make_gateway):
     gw = make_gateway()
     h = {"X-Internal-Token": "test-internal-token"}

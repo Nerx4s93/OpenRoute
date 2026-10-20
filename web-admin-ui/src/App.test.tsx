@@ -1,5 +1,6 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
@@ -113,6 +114,34 @@ describe("App", () => {
     ).toBeInTheDocument();
     expect(await screen.findByText("10.0.0.1:8080")).toBeInTheDocument();
     expect(screen.getByText("Прокси в ротации")).toBeInTheDocument();
+  });
+
+  it("refreshes the proxy list on demand", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/admin/session")) {
+        return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
+      }
+      if (url.includes("/api/admin/proxies/refresh")) {
+        return json({ ok: true, message: "Список прокси обновлён" });
+      }
+      if (url.includes("/api/admin/proxies")) return json(proxies);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderApp("/admin/ui");
+
+    const button = await screen.findByRole("button", { name: /Обновить список/ });
+    await user.click(button);
+
+    expect(await screen.findByText("Список прокси обновлён")).toBeInTheDocument();
+    const refreshCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/api/admin/proxies/refresh"),
+    );
+    expect(refreshCall).toBeTruthy();
+    expect((refreshCall?.[1] as RequestInit).method).toBe("POST");
   });
 
   it("renders the keys page for an authenticated session", async () => {

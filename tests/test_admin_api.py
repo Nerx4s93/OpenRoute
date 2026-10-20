@@ -82,6 +82,8 @@ class FakeState:
         self.banned: dict[str, float] = {}  # full URL -> seconds left
         self.permanent_bans: set[str] = set()  # full URL -> forever
         self.last_period = "all"  # last ?period= forwarded to the fake gateway
+        self.refreshes = 0  # calls to the forced proxy refresh
+        self.refresh_error = False  # make /internal/proxies/refresh fail
         self.keys: dict[str, dict] = {}  # key_hash -> row
         self.usage_by_proxy: dict[str, dict] = {}  # masked -> stats
         self.usage_by_key: dict[str, dict] = {}  # key_id -> stats
@@ -200,6 +202,14 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
             state.proxies[url] = enabled
             return {"ok": True, "message": "Proxy enabled" if enabled else "Proxy disabled"}
         raise HTTPException(404, "Proxy not found")
+
+    @app.post("/internal/proxies/refresh")
+    async def proxies_refresh(req: Request) -> dict:
+        require(req)
+        state.refreshes += 1
+        if state.refresh_error:
+            raise HTTPException(502, "Proxy refresh failed")
+        return {"ok": True, "message": "Proxies refreshed"}
 
     @app.get("/internal/keys-data")
     async def keys_data(req: Request) -> dict:
@@ -449,6 +459,7 @@ def test_protected_endpoints_require_session(panel):
         ("get", "/api/admin/keys"),
         ("get", "/api/admin/proxies/events"),
         ("post", "/api/admin/proxies/set"),
+        ("post", "/api/admin/proxies/refresh"),
         ("post", "/api/admin/keys/add"),
         ("post", "/api/admin/logout"),
     ):
@@ -557,6 +568,33 @@ def test_proxy_toggle_by_opaque_id(panel):
     assert response.status_code == 200
     assert response.json()["message"] == "Прокси включён"
     assert panel.state.proxies[url] is True
+
+
+def test_proxy_refresh_requires_csrf_and_calls_gateway(panel):
+    csrf = panel.login_ok()
+
+    forbidden = panel.client.post("/api/admin/proxies/refresh")
+    assert forbidden.status_code == 403
+    assert panel.state.refreshes == 0
+
+    response = panel.client.post(
+        "/api/admin/proxies/refresh", headers=auth_headers(csrf),
+    )
+    assert response.status_code == 200
+    assert response.json() == {"ok": True, "message": "Список прокси обновлён"}
+    assert panel.state.refreshes == 1
+    assert response.headers["cache-control"] == "no-store"
+
+
+def test_proxy_refresh_gateway_failure_is_localized(panel):
+    csrf = panel.login_ok()
+    panel.state.refresh_error = True
+    response = panel.client.post(
+        "/api/admin/proxies/refresh", headers=auth_headers(csrf),
+    )
+    assert response.status_code == 502
+    assert response.json() == {"detail": "Не удалось обновить список прокси"}
+    assert panel.state.refreshes == 1
 
 
 def test_proxy_toggle_requires_csrf(panel):

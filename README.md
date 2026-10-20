@@ -10,6 +10,9 @@ OpenAI-совместимый API-шлюз, который балансируе�
 - При старте и периодически шлюз забирает список прокси из `px6-service`,
   который фильтрует их по комментарию **`OPENROUTE`** (аналог `USE_IN_API` в
   NVRoute) через API [px6.net](https://px6.net).
+- В админке есть кнопка **«Обновить список»**: она заставляет gateway запросить
+  `px6-service` с `?refresh=true` (сброс TTL-кэша), сразу обновить пул и
+  перепроверить прокси.
 - **Sticky-сессии**: задача (`x-opencode-session`, либо fingerprint диалога)
   закрепляется за одним прокси-URL — все её реплики идут через один и тот же
   выходной адрес, а новые задачи балансируются по score (сессии/запросы/токены).
@@ -224,6 +227,7 @@ OpenRoute/
 | GET | `/api/admin/keys?period=` | web-admin | JSON-снапшот ключей и статистики |
 | GET | `/api/admin/{proxies,keys}/events?period=` | web-admin | SSE с JSON-снапшотами (fallback — polling) |
 | POST | `/api/admin/proxies/set` | web-admin | Включить/отключить прокси по `proxy_id` (CSRF) |
+| POST | `/api/admin/proxies/refresh` | web-admin | Принудительно обновить список из px6 со сбросом TTL-кэша (CSRF) |
 | POST | `/api/admin/keys/{add,set,delete}` | web-admin | Добавить/отозвать/удалить ключ (CSRF) |
 | GET | `/admin/status` | gateway | Состояние пула: прокси, egress-группы, session affinity, счётчики, usage по ключам |
 | GET | `/admin/logs?limit=N` | gateway | Последние запросы из лога (1..500, по умолчанию 100) |

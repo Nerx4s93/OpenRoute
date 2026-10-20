@@ -4,7 +4,7 @@ import { PeriodTabs } from "../components/PeriodTabs";
 import { Section } from "../components/Section";
 import { StatCard } from "../components/StatCard";
 import { StatusBadge } from "../components/StatusBadge";
-import { useSetProxy } from "../hooks/useAdminMutations";
+import { useRefreshProxies, useSetProxy } from "../hooks/useAdminMutations";
 import { useProxiesLive } from "../hooks/useLiveSnapshot";
 import { usePeriod } from "../hooks/usePeriod";
 import {
@@ -18,6 +18,7 @@ export function ProxiesPage() {
   const [period, setPeriod] = usePeriod();
   const query = useProxiesLive(period);
   const setProxy = useSetProxy();
+  const refreshProxies = useRefreshProxies();
   const snapshot = query.data;
   const caption = PERIOD_CAPTIONS[period];
   const requestsLabel = caption ? `Запросов ${caption}` : "Запросов всего";
@@ -31,6 +32,17 @@ export function ProxiesPage() {
           <div className="eyebrow">Система / обзор</div>
           <h1>Пул прокси</h1>
         </div>
+        <button
+          type="button"
+          className="hero-refresh"
+          disabled={refreshProxies.isPending}
+          title="Запросить свежий список из px6 и сбросить кэш"
+          aria-busy={refreshProxies.isPending}
+          onClick={() => refreshProxies.mutate()}
+        >
+          <span aria-hidden="true">↻</span>
+          {refreshProxies.isPending ? "Обновляю…" : "Обновить список"}
+        </button>
       </div>
 
       <PeriodTabs active={period} onChange={setPeriod} />

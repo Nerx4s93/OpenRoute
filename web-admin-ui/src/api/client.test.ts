@@ -46,6 +46,23 @@ describe("api client", () => {
     expect(init.body).toBe(JSON.stringify({ proxy_id: "proxy-id", enabled: false }));
   });
 
+  it("posts a forced proxy refresh with CSRF and no body", async () => {
+    const fetchMock = vi.fn().mockResolvedValue(
+      jsonResponse({ ok: true, message: "Proxies refreshed" }),
+    );
+    vi.stubGlobal("fetch", fetchMock);
+    setCsrfToken("csrf-1");
+
+    await api.refreshProxies();
+
+    const [path, init] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = new Headers(init.headers);
+    expect(path).toBe("/api/admin/proxies/refresh");
+    expect(init.method).toBe("POST");
+    expect(init.body).toBeUndefined();
+    expect(headers.get("X-CSRF-Token")).toBe("csrf-1");
+  });
+
   it("unwraps the gateway/openai error envelope", async () => {
     vi.stubGlobal(
       "fetch",

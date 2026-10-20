@@ -240,6 +240,9 @@ class ProxyManager:
         self.last_fetch_status: Optional[str] = None
         self.db = None  # optional ProxyDB (duck-typed); bound via bind_db()
         self._lock = asyncio.Lock()
+        # Serializes whole refreshes (fetch + probe + apply), so the periodic
+        # loop and a manual "refresh" request cannot overwrite each other.
+        self._refresh_lock = asyncio.Lock()
         self._fetcher = httpx.AsyncClient(timeout=15.0)
         self._rr = 0  # index into the STABLE self.proxies list
         self._closed = False
@@ -416,7 +419,18 @@ class ProxyManager:
         """host:port from a proxy URL (credentials stripped — for logs)."""
         return proxy_url.split("@")[-1]
 
-    async def refresh_proxies(self) -> bool:
+    async def refresh_proxies(self, bust_cache: bool = False) -> bool:
+        """Refresh the pool, optionally forcing the source to bypass its cache.
+
+        ``bust_cache=True`` adds ``?refresh=true`` to ``PROXIES_URL`` (the
+        px6-service contract) so a manual admin refresh sees the current
+        px6.net list instead of the service's TTL-cached copy. The periodic
+        loop keeps using the cached path.
+        """
+        async with self._refresh_lock:
+            return await self._refresh_proxies_locked(bust_cache)
+
+    async def _refresh_proxies_locked(self, bust_cache: bool) -> bool:
         """Fetch the proxy list, upsert/probe, rebuild the pool.
 
         Malformed individual items are skipped with a warning; duplicates are
@@ -424,7 +438,10 @@ class ProxyManager:
         caller retries soon). ``True`` = fetch succeeded.
         """
         try:
-            resp = await self._fetcher.get(self._s.proxies_url)
+            url = self._s.proxies_url
+            if bust_cache:
+                url = str(httpx.URL(url).copy_merge_params({"refresh": "true"}))
+            resp = await self._fetcher.get(url)
             resp.raise_for_status()
             data = resp.json()
             if isinstance(data, dict):

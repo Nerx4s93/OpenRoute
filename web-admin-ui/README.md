@@ -8,6 +8,8 @@ React + TypeScript SPA для админки OpenRoute. Отдельный ко�
 - React 19, React Router, TanStack Query, Vite
 - тёмный дизайн, страницы «Прокси» и «Ключи»
 - SSE-обновления (`/api/admin/{proxies,keys}/events`) с fallback-поллингом
+- кнопка «Обновить список» на странице «Прокси»: принудительный запрос к px6
+  со сбросом TTL-кэша через `POST /api/admin/proxies/refresh`
 - HttpOnly cookie + CSRF-заголовок; токен CSRF приходит из
   `GET /api/admin/session`
 

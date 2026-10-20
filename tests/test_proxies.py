@@ -416,6 +416,23 @@ async def test_refresh_proxies_skips_malformed_and_dedups(caplog):
 
 
 @pytest.mark.asyncio
+async def test_refresh_proxies_bust_cache_adds_refresh_param_only_when_asked():
+    import types
+
+    m = mgr()
+    await _fake_fetch(m, {"proxies": []})
+    m._probe_proxy = types.MethodType(_alive_probe, m)
+
+    assert await m.refresh_proxies(bust_cache=True) is True
+    assert m._fetcher.url == "http://127.0.0.1:1/proxies?refresh=true"
+
+    # The periodic loop keeps using the cached URL (no ?refresh=true).
+    assert await m.refresh_proxies() is True
+    assert m._fetcher.url == "http://127.0.0.1:1/proxies"
+    await m.aclose()
+
+
+@pytest.mark.asyncio
 async def test_refresh_proxies_bad_payload_is_fetch_failure():
     m = mgr()
     await _fake_fetch(m, "garbage")
