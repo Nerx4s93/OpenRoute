@@ -36,9 +36,8 @@ header.top nav a.nav-keys::before { border-radius: 50%; width: 14px; height: 14p
   box-shadow: 5px 4px 0 -3px currentColor; }
 header.top nav a:hover { background: #1a2934; color: var(--text); transform: translateX(2px); }
 header.top nav a.active { background: #83decf16; border-color: #88e5cf30; color: var(--mint); }
-.sidebar-bottom { margin-top: auto; padding: 18px 10px 0; border-top: 1px solid var(--line-soft); }
-.side-status { display: flex; align-items: center; gap: 9px; color: #a9b8bd; font-size: 12px; }
-.sidebar-bottom button { width: 100%; margin-top: 20px; text-align: left; padding: 9px 11px;
+.sidebar-bottom { margin-top: auto; padding: 10px 10px 0; border-top: 1px solid var(--line-soft); }
+.sidebar-bottom button { width: 100%; margin-top: 14px; text-align: left; padding: 9px 11px;
   display: flex; align-items: center; gap: 6px; }
 .live-dot { width: 7px; height: 7px; flex: none; border-radius: 50%;
   background: var(--mint); box-shadow: 0 0 0 4px #91e8ce19, 0 0 12px #91e8ce80;
@@ -276,7 +275,7 @@ form.add button:hover, .login-box button[type=submit]:hover {
   .sidebar { position: relative; height: auto; padding: 12px 20px; flex-direction: row;
     align-items: center; gap: 16px; border-right: 0; border-bottom: 1px solid var(--line-soft); }
   .brand { padding: 0; }
-  .brand-sub, .nav-label, .side-status { display: none; }
+  .brand-sub, .nav-label { display: none; }
   header.top nav { display: flex; margin-left: auto; }
   header.top nav a { min-height: 38px; }
   .sidebar-bottom { display: block; margin-top: 0; padding: 0; border-top: 0; }

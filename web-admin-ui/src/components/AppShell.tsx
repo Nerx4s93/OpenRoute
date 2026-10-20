@@ -60,10 +60,6 @@ function ShellLayout({ children }: { children: ReactNode }) {
           </NavLink>
         </nav>
         <div className="sidebar-bottom">
-          <div className="side-status">
-            <span className={`live-dot ${connected ? "" : "off"}`} aria-hidden="true" />
-            <span>{connected ? "Живые данные" : "Обновление по таймеру"}</span>
-          </div>
           <button type="button" onClick={onLogout} disabled={logout.isPending}>
             <span aria-hidden="true">↗</span>
             <span className="logout-label">
