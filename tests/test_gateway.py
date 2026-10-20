@@ -18,6 +18,7 @@ import pytest
 
 import gateway.main as main
 import gateway.proxies as prox
+from gateway.reqlog import LogEntry
 
 from gw import TrackingStream
 
@@ -1057,6 +1058,56 @@ def test_internal_requires_token(make_gateway):
     bad = gw.internal.get("/internal/proxies-data", headers={"X-Internal-Token": "nope"})
     assert bad.status_code == 403
     assert bad.json()["error"]["message"] == "Invalid internal token"
+
+
+def test_internal_period_filters_usage(make_gateway):
+    """?period=day/week/month selects a rolling request_log window; unknown
+    values behave like all time. The recent-requests feed stays unfiltered."""
+    gw = make_gateway()
+    now = time.time()
+
+    async def seed():
+        old = LogEntry(
+            ts=now - 10 * 24 * 60 * 60, key_id="old", method="POST",
+            path="chat/completions", model=FREE_MODEL, status=200, latency_ms=10.0,
+            stream=True, account="1.2.3.4:8080", prompt_tokens=100,
+            completion_tokens=0, error=None,
+        )
+        new = LogEntry(
+            ts=now - 60, key_id="default", method="POST", path="chat/completions",
+            model=FREE_MODEL, status=200, latency_ms=20.0, stream=True,
+            account="5.6.7.8:8080", prompt_tokens=7, completion_tokens=3,
+            error=None,
+        )
+        await gw.reqlog.log(old)
+        await gw.reqlog.log(new)
+
+    gw._gw_lifespan_client.portal.call(seed)
+    h = {"X-Internal-Token": "test-internal-token"}
+
+    all_data = gw.internal.get("/internal/proxies-data?period=all", headers=h).json()
+    assert all_data["usage"]["total"]["requests"] == 2
+    assert len(all_data["recent"]) == 2
+
+    day = gw.internal.get("/internal/proxies-data?period=day", headers=h).json()
+    assert day["usage"]["total"]["requests"] == 1
+    assert day["usage"]["total"]["tokens"] == 10
+    assert set(day["usage_by_proxy"]) == {"5.6.7.8:8080"}
+    # The activity log is not a spending aggregate: it still shows both rows.
+    assert len(day["recent"]) == 2
+
+    week = gw.internal.get("/internal/proxies-data?period=week", headers=h).json()
+    assert week["usage"]["total"]["requests"] == 1
+
+    month = gw.internal.get("/internal/proxies-data?period=month", headers=h).json()
+    assert month["usage"]["total"]["requests"] == 2
+
+    unknown = gw.internal.get("/internal/proxies-data?period=year", headers=h).json()
+    assert unknown["usage"]["total"]["requests"] == 2
+
+    keys_day = gw.internal.get("/internal/keys-data?period=day", headers=h).json()
+    assert keys_day["usage"]["total"]["requests"] == 1
+    assert "old" not in keys_day["usage"]
 
 
 def test_internal_disabled_when_token_empty(make_gateway):

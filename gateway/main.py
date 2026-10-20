@@ -1015,12 +1015,27 @@ def _json_limit(raw: object, field: str) -> tuple[int | None, str | None]:
     return v, None
 
 
-async def _proxies_panel_data() -> dict:
+_PANEL_PERIOD_SECONDS = {
+    "day": 24 * 60 * 60.0,
+    "week": 7 * 24 * 60 * 60.0,
+    "month": 30 * 24 * 60 * 60.0,
+}
+
+
+def _period_since(period: str) -> float | None:
+    """Rolling-window cutoff for the admin spending filter; ``None`` = all time."""
+    seconds = _PANEL_PERIOD_SECONDS.get((period or "").lower())
+    return None if seconds is None else time.time() - seconds
+
+
+async def _proxies_panel_data(period: str = "all") -> dict:
     """Snapshot for the "Proxies" page: awaits first (the pool may change from
     another tab's POST), then ``status()`` and the zip over ``manager.proxies``
-    — so the table and counters are consistent."""
-    per_proxy = await reqlog.summary_by_account_async()
-    usage = await reqlog.summary_async()
+    — so the table and counters are consistent. ``period`` filters the request
+    log aggregates (day/week/month = rolling 24h/7d/30d)."""
+    since = _period_since(period)
+    per_proxy = await reqlog.summary_by_account_async(since)
+    usage = await reqlog.summary_async(since)
     recent = await reqlog.recent_async(50)
     st = manager.status()
     rows = []
@@ -1032,24 +1047,24 @@ async def _proxies_panel_data() -> dict:
     return {"status": st, "usage": usage, "usage_by_proxy": per_proxy, "recent": recent}
 
 
-async def _keys_panel_data() -> dict:
+async def _keys_panel_data(period: str = "all") -> dict:
     """Snapshot for the "Keys" page: key config from keydb + per-key stats from
     the request log (including deleted keys — it is keyed by key_id)."""
-    usage = await reqlog.summary_async()
+    usage = await reqlog.summary_async(_period_since(period))
     keys_rows = await asyncio.to_thread(_require_keydb().all)
     return {"keys": keys_rows, "usage": usage}
 
 
-async def internal_proxies_data(request: Request) -> dict:
-    """GET ``/internal/proxies-data`` — snapshot for the admin panel."""
+async def internal_proxies_data(request: Request, period: str = "all") -> dict:
+    """GET ``/internal/proxies-data?period=...`` — snapshot for the admin panel."""
     _require_internal(request)
-    return await _proxies_panel_data()
+    return await _proxies_panel_data(period)
 
 
-async def internal_keys_data(request: Request) -> dict:
-    """GET ``/internal/keys-data`` — key table + per-key stats."""
+async def internal_keys_data(request: Request, period: str = "all") -> dict:
+    """GET ``/internal/keys-data?period=...`` — key table + per-key stats."""
     _require_internal(request)
-    return await _keys_panel_data()
+    return await _keys_panel_data(period)
 
 
 async def internal_proxies_set(request: Request) -> dict:

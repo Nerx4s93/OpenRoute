@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import importlib.util
+import json
 import re
 import sys
 from pathlib import Path
@@ -86,6 +87,7 @@ class FakeState:
         self.proxies: dict[str, bool] = {}  # full URL -> enabled (manual flag)
         self.quota: dict[str, float] = {}  # full URL -> seconds left
         self.banned: dict[str, float] = {}  # full URL -> seconds left
+        self.last_period = "all"  # last ?period= forwarded to the fake gateway
         self.keys: dict[str, dict] = {}  # key_hash -> row
         self.usage_by_proxy: dict[str, dict] = {}  # masked -> stats
         self.usage_by_key: dict[str, dict] = {}  # key_id -> stats
@@ -189,6 +191,7 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
     @app.get("/internal/proxies-data")
     async def proxies_data(req: Request) -> dict:
         require(req)
+        state.last_period = req.query_params.get("period", "all")
         return {
             "status": proxy_status(),
             "usage": {"total": _stats(state.usage_by_proxy)},
@@ -220,6 +223,7 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
     @app.get("/internal/keys-data")
     async def keys_data(req: Request) -> dict:
         require(req)
+        state.last_period = req.query_params.get("period", "all")
         usage = {"total": _stats(state.usage_by_key)}
         usage.update(state.usage_by_key)
         return {"keys": [dict(v) for v in state.keys.values()], "usage": usage}
@@ -435,7 +439,11 @@ def test_panel_disabled_without_password(make_panel):
 
 
 def test_panel_requires_session(panel):
-    for url in ("/admin/ui", "/admin/ui/keys", "/admin/ui/data", "/admin/ui/keys/data"):
+    for url in (
+        "/admin/ui", "/admin/ui/keys",
+        "/admin/ui/data", "/admin/ui/keys/data",
+        "/admin/ui/events", "/admin/ui/keys/events",
+    ):
         r = panel.client.get(url, follow_redirects=False)
         assert r.status_code == 303
         assert r.headers["location"] == "/login"
@@ -706,6 +714,103 @@ def test_keys_data_fragments(panel):
     assert d["srv-now"]
 
 
+class _FakeStreamRequest:
+    async def is_disconnected(self) -> bool:
+        return False
+
+
+@pytest.mark.asyncio
+async def test_sse_response_headers():
+    resp = admin_main._sse_response(
+        _FakeStreamRequest(), "proxies", "all", {"csrf": "token"},
+    )
+    assert resp.media_type == "text/event-stream"
+    assert resp.headers["cache-control"] == "no-cache"
+    assert resp.headers["x-accel-buffering"] == "no"
+    await resp.body_iterator.aclose()
+
+
+@pytest.mark.asyncio
+async def test_live_sse_emits_initial_and_changed_snapshot(monkeypatch):
+    calls = []
+    snapshots = [
+        {"srv-now": "1", "cards": "first"},
+        {"srv-now": "2", "cards": "second"},
+    ]
+
+    async def fake_fragments(page, period, csrf):
+        calls.append((page, period, csrf))
+        return snapshots[min(len(calls) - 1, 1)]
+
+    monkeypatch.setattr(admin_main, "_panel_fragments", fake_fragments)
+    monkeypatch.setattr(admin_main, "_SSE_TICK_SECONDS", 0)
+    gen = admin_main._sse_events(
+        _FakeStreamRequest(), "proxies", "week", {"csrf": "token"},
+    )
+    assert await anext(gen) == "retry: 3000\n\n"
+    first = await anext(gen)
+    assert json.loads(first.removeprefix("data: "))["cards"] == "first"
+    second = await anext(gen)
+    assert json.loads(second.removeprefix("data: "))["cards"] == "second"
+    assert calls[0] == ("proxies", "week", "token")
+    await gen.aclose()
+
+
+def test_period_selector_controls_cards_and_forwards_to_gateway(panel):
+    login_ok(panel)
+    r = panel.client.get("/admin/ui?period=week")
+    assert r.status_code == 200
+    assert "Период расходов" in r.text
+    assert 'href="/admin/ui?period=week" class="active"' in r.text
+    assert "Запросов за неделю" in r.text
+    assert 'href="/admin/ui/keys?period=week"' in r.text  # nav preserves it
+    assert panel.state.last_period == "week"
+
+    d = panel.client.get("/admin/ui/data?period=month").json()
+    assert panel.state.last_period == "month"
+    assert "Запросов за месяц" in d["cards"]
+    assert "Запросов всего" not in d["cards"]
+
+    # Unknown/empty values fall back to all time instead of erroring.
+    r = panel.client.get("/admin/ui?period=year")
+    assert r.status_code == 200
+    assert 'href="/admin/ui?period=all" class="active"' in r.text
+    assert panel.state.last_period == "all"
+
+
+def test_keys_page_period_forwards_to_stats(panel):
+    login_ok(panel)
+    r = panel.client.get("/admin/ui/keys?period=day")
+    assert r.status_code == 200
+    assert 'href="/admin/ui/keys?period=day" class="active"' in r.text
+    assert "За день" in r.text
+    assert panel.state.last_period == "day"
+
+    d = panel.client.get("/admin/ui/keys/data?period=month").json()
+    assert panel.state.last_period == "month"
+    assert set(d) == {"srv-now", "keys-rows", "key-stats-rows"}
+    assert 'name="period" value="month"' in d["keys-rows"]
+
+
+def test_period_survives_mutations(panel):
+    login_ok(panel)
+    csrf = panel_csrf(panel)
+    seed_proxy(panel, "http://u:p@h1:8080")
+
+    r = panel.client.post(
+        "/admin/ui/proxies/set", follow_redirects=False,
+        data={"_csrf": csrf, "proxy": "http://u:p@h1:8080", "enabled": "0",
+              "period": "week"},
+    )
+    assert r.status_code == 303
+    assert "period=week" in r.headers["location"]
+
+    html = panel.client.get("/admin/ui?period=week").text
+    assert 'name="period" value="week"' in html  # forms keep the window
+    keys_html = panel.client.get("/admin/ui/keys?period=week").text
+    assert 'name="period" value="week"' in keys_html
+
+
 def test_panel_data_reflects_changes_live(panel):
     login_ok(panel)
     csrf = panel_csrf(panel)
@@ -738,7 +843,10 @@ def test_panel_no_manual_refresh_button(panel):
     keys = panel.client.get("/admin/ui/keys").text
     for html in (acc, keys):
         assert "Обновить" not in html
-        assert "setInterval" in html
+        assert "new EventSource" in html
+        assert "}, 5000)" not in html
+    assert "/admin/ui/events" in acc and "/admin/ui/keys/events" not in acc
+    assert "/admin/ui/keys/events" in keys
     assert "/admin/ui/data" in acc and "/admin/ui/keys/data" not in acc
     assert "/admin/ui/keys/data" in keys
     assert acc.count("<tbody") == 2 and 'id="proxies-rows"' in acc and 'id="logs-rows"' in acc

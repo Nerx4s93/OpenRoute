@@ -132,9 +132,14 @@ class RequestLog:
         event loop is not blocked (for async admin endpoints)."""
         return await asyncio.to_thread(self.recent, limit)
 
-    def summary(self) -> dict:
-        """Aggregates by key_id over the whole DB plus a top-level ``"total"``.
-        Latency is the mean in ms."""
+    def summary(self, since: float | None = None) -> dict:
+        """Aggregates by key_id plus a top-level ``"total"``. Latency is the
+        mean in ms. ``since`` (epoch) limits the window to ``ts >= since``;
+        ``None`` means the whole log."""
+        where, params = "", ()
+        if since is not None:
+            where = " WHERE ts >= %s"
+            params = (float(since),)
         try:
             self._ensure_schema()
             with self._pool.connection() as conn:
@@ -142,7 +147,8 @@ class RequestLog:
                     "SELECT key_id, COUNT(*),"
                     " SUM(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END),"
                     " SUM(COALESCE(prompt_tokens,0) + COALESCE(completion_tokens,0)),"
-                    " AVG(latency_ms) FROM request_log GROUP BY key_id"
+                    " AVG(latency_ms) FROM request_log" + where + " GROUP BY key_id",
+                    params,
                 ).fetchall()
         except Exception:
             logger.exception("summary() failed")
@@ -169,14 +175,20 @@ class RequestLog:
         }
         return out
 
-    async def summary_async(self) -> dict:
+    async def summary_async(self, since: float | None = None) -> dict:
         """async wrapper: the blocking query goes to a thread (admin endpoints)."""
-        return await asyncio.to_thread(self.summary)
+        return await asyncio.to_thread(self.summary, since)
 
-    def summary_by_account(self) -> dict:
+    def summary_by_account(self, since: float | None = None) -> dict:
         """Aggregates by account (the ``account`` column = masked proxy):
         {account: {requests, errors, tokens}}. The web admin matches by
-        ``mask_proxy``."""
+        ``mask_proxy``. ``since`` (epoch) restricts the window."""
+        clauses = ["account IS NOT NULL"]
+        params: list[float] = []
+        if since is not None:
+            clauses.append("ts >= %s")
+            params.append(float(since))
+        where = " WHERE " + " AND ".join(clauses)
         try:
             self._ensure_schema()
             with self._pool.connection() as conn:
@@ -184,7 +196,8 @@ class RequestLog:
                     "SELECT account, COUNT(*),"
                     " SUM(CASE WHEN status >= 400 OR error IS NOT NULL THEN 1 ELSE 0 END),"
                     " SUM(COALESCE(prompt_tokens,0) + COALESCE(completion_tokens,0))"
-                    " FROM request_log WHERE account IS NOT NULL GROUP BY account"
+                    " FROM request_log" + where + " GROUP BY account",
+                    tuple(params),
                 ).fetchall()
         except Exception:
             logger.exception("summary_by_account() failed")
@@ -194,9 +207,9 @@ class RequestLog:
             for acc, reqs, errs, toks in rows
         }
 
-    async def summary_by_account_async(self) -> dict:
+    async def summary_by_account_async(self, since: float | None = None) -> dict:
         """async wrapper: the blocking query goes to a thread."""
-        return await asyncio.to_thread(self.summary_by_account)
+        return await asyncio.to_thread(self.summary_by_account, since)
 
     # --- shutdown ---
 

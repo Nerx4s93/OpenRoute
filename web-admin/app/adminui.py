@@ -130,6 +130,17 @@ h1 { margin: 7px 0 5px; font-size: clamp(27px, 3vw, 38px); line-height: 1.16;
   color: #d6f6eb; font-size: 11px; font-weight: 650; white-space: nowrap; }
 .msg { margin: 0 0 22px; padding: 12px 16px; border: 1px solid #8de9d244;
   background: #8de9d214; color: #b5f4e3; border-radius: 10px; animation: rise .35s ease both; }
+.period-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px;
+  flex-wrap: wrap; margin: 0 0 15px; }
+.period-title { color: #8294a0; font-size: 10px; font-weight: 800;
+  letter-spacing: .14em; text-transform: uppercase; }
+.period-tabs { display: inline-flex; align-items: center; gap: 2px; padding: 3px;
+  border: 1px solid var(--line); border-radius: 10px; background: var(--surface); }
+.period-tabs a { padding: 6px 12px; border-radius: 7px; color: #8ea0ab; font-size: 11px;
+  font-weight: 650; white-space: nowrap; transition: background .2s, color .2s; }
+.period-tabs a:hover { color: var(--text); background: #1b2a35; }
+.period-tabs a.active { color: var(--mint); background: #83decf16;
+  box-shadow: inset 0 0 0 1px #88e5cf30; }
 .cards { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 13px;
   margin: 0 0 28px; }
 .card { position: relative; overflow: hidden; min-height: 136px; padding: 20px 19px 16px;
@@ -279,6 +290,9 @@ form.add button:hover, .login-box button[type=submit]:hover {
   .crumb-root, .meta-label { display: none; }
   .hero { min-height: 160px; margin: 18px 0; padding: 25px 21px; }
   .hero-aside { display: none; }
+  .period-bar { align-items: flex-start; flex-direction: column; gap: 8px; }
+  .period-tabs { width: 100%; overflow-x: auto; }
+  .period-tabs a { flex: 1; padding: 6px 7px; text-align: center; }
   .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
   .card { min-height: 120px; padding: 15px; }
   .section-head { padding: 14px 16px; }
@@ -314,6 +328,27 @@ _STATE_LABELS = {
     "noproxy": ("нет в пуле", "b-warn"),
     "off": ("выключен", "b-off"),
     "dead": ("мёртв", "b-err"),
+}
+
+# Spending windows for the dashboard. Backend windows are rolling:
+# day = 24h, week = 7d, month = 30d, all = no cutoff.
+_PERIOD_OPTIONS = (
+    ("day", "День", "Последние 24 часа"),
+    ("week", "Неделя", "Последние 7 дней"),
+    ("month", "Месяц", "Последние 30 дней"),
+    ("all", "Всё время", "За всё время"),
+)
+_PERIOD_CAPTIONS = {
+    "day": "за день",
+    "week": "за неделю",
+    "month": "за месяц",
+    "all": None,
+}
+_PERIOD_SECTIONS = {
+    "day": "За день",
+    "week": "За неделю",
+    "month": "За месяц",
+    "all": "За всё время",
 }
 
 
@@ -374,7 +409,8 @@ def _duration_label(seconds: object) -> str:
     return f"{minutes}м"
 
 
-def _proxy_rows(proxies: list[dict], usage: dict, csrf: str) -> str:
+def _proxy_rows(proxies: list[dict], usage: dict, csrf: str,
+                period: str = "all") -> str:
     rows = []
     for s in proxies:
         state = _proxy_state(s)
@@ -395,6 +431,7 @@ def _proxy_rows(proxies: list[dict], usage: dict, csrf: str) -> str:
         toggle = (
             f'<form method="post" action="{_PANEL}/proxies/set">'
             f'<input type="hidden" name="_csrf" value="{_esc(csrf)}">'
+            f'<input type="hidden" name="period" value="{_esc(period)}">'
             f'<input type="hidden" name="proxy" value="{real}">'
             f'<input type="hidden" name="enabled" value="{0 if s.get("manual") is False else 1}">'
         )
@@ -406,6 +443,7 @@ def _proxy_rows(proxies: list[dict], usage: dict, csrf: str) -> str:
             f'<form method="post" action="{_PANEL}/proxies/delete" '
             f'onsubmit="return confirm(\'Удалить прокси {_esc(_proxy_display(s))}?\')">'
             f'<input type="hidden" name="_csrf" value="{_esc(csrf)}">'
+            f'<input type="hidden" name="period" value="{_esc(period)}">'
             f'<input type="hidden" name="proxy" value="{real}">'
             '<button class="danger" type="submit">Удалить</button></form>'
         )
@@ -423,7 +461,7 @@ def _proxy_rows(proxies: list[dict], usage: dict, csrf: str) -> str:
     return "\n".join(rows) or '<tr><td colspan="7" class="muted">Прокси нет</td></tr>'
 
 
-def _key_rows(keys: list[dict], csrf: str) -> str:
+def _key_rows(keys: list[dict], csrf: str, period: str = "all") -> str:
     rows = []
     for k in keys:
         on = k["enabled"]
@@ -433,6 +471,7 @@ def _key_rows(keys: list[dict], csrf: str) -> str:
         toggle = (
             f'<form method="post" action="{_PANEL}/keys/set">'
             f'<input type="hidden" name="_csrf" value="{_esc(csrf)}">'
+            f'<input type="hidden" name="period" value="{_esc(period)}">'
             f'<input type="hidden" name="key_hash" value="{real}">'
             f'<input type="hidden" name="enabled" value="{0 if on else 1}">'
         )
@@ -444,6 +483,7 @@ def _key_rows(keys: list[dict], csrf: str) -> str:
             f'<form method="post" action="{_PANEL}/keys/delete" '
             f'onsubmit="return confirm(\'Удалить ключ {_esc(k["key_id"])}?\')">'
             f'<input type="hidden" name="_csrf" value="{_esc(csrf)}">'
+            f'<input type="hidden" name="period" value="{_esc(period)}">'
             f'<input type="hidden" name="key_hash" value="{real}">'
             '<button class="danger" type="submit">Удалить</button></form>'
         )
@@ -516,17 +556,21 @@ def _log_rows(recent: list[dict]) -> str:
     return "\n".join(rows) or '<tr><td colspan="8" class="muted">Пусто</td></tr>'
 
 
-def _cards_html(status: dict, total: dict) -> str:
+def _cards_html(status: dict, total: dict, period: str = "all") -> str:
     ready = status.get("proxies_ready", status.get("proxies_enabled", 0))
     quota_parked = status.get("egress_groups_quota_parked", 0)
     groups = status.get("egress_groups_total", 0)
+    caption = _PERIOD_CAPTIONS.get(period)
+    requests_label = "Запросов всего" if not caption else f"Запросов {caption}"
+    tokens_label = "Токенов потрачено" if not caption else f"Токенов {caption}"
+    errors_label = "Ошибок" if not caption else f"Ошибок {caption}"
     return (
         f'<div class="card"><div class="glyph">↗</div><div class="num">{_num(total.get("requests", 0))}</div>'
-        f'<div class="lbl">Запросов всего</div></div>'
+        f'<div class="lbl">{requests_label}</div></div>'
         f'<div class="card"><div class="glyph">◈</div><div class="num">{_num(total.get("tokens", 0))}</div>'
-        f'<div class="lbl">Токенов потрачено</div></div>'
+        f'<div class="lbl">{tokens_label}</div></div>'
         f'<div class="card"><div class="glyph">!</div><div class="num">{_num(total.get("errors", 0))}</div>'
-        f'<div class="lbl">Ошибок</div></div>'
+        f'<div class="lbl">{errors_label}</div></div>'
         f'<div class="card"><div class="glyph">◎</div><div class="num">{ready}/{status.get("proxies_total", 0)}</div>'
         f'<div class="lbl">Прокси в ротации</div></div>'
         f'<div class="card"><div class="glyph">◷</div><div class="num">{status.get("proxies_cooling", 0)} / {status.get("proxies_manually_disabled", 0)}</div>'
@@ -536,27 +580,68 @@ def _cards_html(status: dict, total: dict) -> str:
     )
 
 
-# Auto-refresh without JS frameworks: every N seconds fetch the page's data
-# endpoint and swap the ready-made HTML fragments into containers by id.
-# A hidden tab does not poll; network errors are swallowed — the next tick
-# retries. Add-forms are NOT reloaded, so input is never lost.
+# Live updates without JS frameworks: keep an SSE stream open and swap the
+# ready-made HTML fragments into containers by id. If EventSource is missing,
+# fall back to the old JSON endpoint at a 1s interval. A hidden tab closes the
+# stream; returning to it opens a fresh one and receives a full snapshot.
+# Add-forms are NOT part of the fragments, so typed input is never lost.
 _SCRIPT = """<script>
 (function () {
-  var URL = "__DATA_URL__";
-  var busy = false;
-  function tick() {
-    if (busy) return;
-    busy = true;
-    fetch(URL, { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
-      if (!d) return;
-      for (var id in d) {
-        var el = document.getElementById(id);
-        if (el && el.innerHTML !== d[id]) el.innerHTML = d[id];
-      }
-    }).catch(function () {}).finally(function () { busy = false; });
+  var STREAM_URL = "__STREAM_URL__";
+  var DATA_URL = "__DATA_URL__";
+  var source = null;
+  var pollTimer = null;
+  var pollBusy = false;
+
+  function apply(d) {
+    if (!d) return;
+    for (var id in d) {
+      var el = document.getElementById(id);
+      if (el && el.innerHTML !== d[id]) el.innerHTML = d[id];
+    }
   }
-  setInterval(function () { if (!document.hidden) tick(); }, 5000);
-  document.addEventListener("visibilitychange", function () { if (!document.hidden) tick(); });
+
+  function tick() {
+    if (pollBusy) return;
+    pollBusy = true;
+    fetch(DATA_URL, { credentials: "same-origin" })
+      .then(function (r) { return r.ok ? r.json() : null; })
+      .then(apply)
+      .catch(function () {})
+      .finally(function () { pollBusy = false; });
+  }
+
+  function startPolling() {
+    if (pollTimer) return;
+    tick();
+    pollTimer = setInterval(function () { if (!document.hidden) tick(); }, 1000);
+  }
+
+  function stopPolling() {
+    if (pollTimer) { clearInterval(pollTimer); pollTimer = null; }
+  }
+
+  function connect() {
+    if (!("EventSource" in window)) { startPolling(); return; }
+    stopPolling();
+    if (source) source.close();
+    source = new EventSource(STREAM_URL);
+    source.onmessage = function (event) {
+      try { apply(JSON.parse(event.data)); } catch (e) {}
+    };
+    // EventSource reconnects automatically after network/5xx errors.
+  }
+
+  function disconnect() {
+    if (source) { source.close(); source = null; }
+    stopPolling();
+  }
+
+  connect();
+  document.addEventListener("visibilitychange", function () {
+    if (document.hidden) disconnect();
+    else connect();
+  });
 })();
 </script>"""
 
@@ -565,11 +650,26 @@ def _now() -> str:
     return datetime.now().strftime("%d.%m.%Y %H:%M:%S")
 
 
-def _header(active: str, csrf: str) -> str:
+def _period_control(active: str, base: str) -> str:
+    """Segmented control for the spending window (full page reload)."""
+    tabs = []
+    for key, label, title in _PERIOD_OPTIONS:
+        cls = ' class="active"' if key == active else ""
+        tabs.append(f'<a href="{base}?period={key}"{cls} title="{title}">{label}</a>')
+    return (
+        '<div class="period-bar page-enter">'
+        '<div class="period-title">Период расходов</div>'
+        f'<nav class="period-tabs" aria-label="Период расходов">{"".join(tabs)}</nav>'
+        "</div>"
+    )
+
+
+def _header(active: str, csrf: str, period: str = "all") -> str:
     """Shared sidebar, page breadcrumb, and CSRF-protected logout."""
     def nav(href: str, label: str, name: str) -> str:
+        target = f"{href}?period={period}" if period != "all" else href
         cls = ' class="active"' if name == active else ""
-        return f'<a href="{href}"{cls}>{label}</a>'
+        return f'<a href="{target}"{cls}>{label}</a>'
 
     logout = (
         f'<form method="post" action="{_PANEL}/logout">'
@@ -592,18 +692,19 @@ def _header(active: str, csrf: str) -> str:
     )
 
 
-def _shell(*, active: str, msg: str, data_url: str, fragments: dict, body: str,
-           csrf: str) -> str:
-    """Page shell: header with navigation, msg banner, body, refresh script."""
+def _shell(*, active: str, msg: str, data_url: str, stream_url: str,
+           fragments: dict, body: str, csrf: str, period: str = "all") -> str:
+    """Page shell: header with navigation, msg banner, body, live-update script."""
     banner = f'<div class="msg">{_esc(msg)}</div>' if msg else ""
-    script = _SCRIPT.replace("__DATA_URL__", data_url)
+    script = (_SCRIPT.replace("__DATA_URL__", data_url)
+                     .replace("__STREAM_URL__", stream_url))
     return f"""<!doctype html>
 <html lang="ru"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
 <meta name="theme-color" content="#090e15">
 <title>OpenRoute Admin</title><style>{_CSS}</style>
 </head><body><div class="wrap">
-{_header(active, csrf)}
+{_header(active, csrf, period)}
 <main class="main">
 <div class="topline"><div class="breadcrumb"><span class="crumb-root">Панель управления &nbsp;/&nbsp;</span>
 <strong>{"Прокси" if active == "proxies" else "Ключи"}</strong></div>
@@ -619,38 +720,41 @@ def _shell(*, active: str, msg: str, data_url: str, fragments: dict, body: str,
 
 
 def render_proxies_fragments(*, status: dict, usage: dict, usage_by_proxy: dict,
-                             recent: list[dict], csrf: str) -> dict:
+                             recent: list[dict], csrf: str, period: str = "all") -> dict:
     """HTML fragments for the «Прокси» page: ``{element_id: innerHTML}``.
 
     Ids: ``srv-now``, ``cards``, ``proxies-rows``, ``logs-rows``.
     ``status`` is ``ProxyManager.status()``; ``usage_by_proxy`` keys are masked
-    proxies (the ``account`` column in the request log).
+    proxies (the ``account`` column in the request log). ``period`` is a
+    rolling spending window (``day``/``week``/``month``/``all``).
     """
     total = usage.get("total", {"requests": 0, "errors": 0, "tokens": 0, "avg_latency_ms": 0})
     return {
         "srv-now": _now(),
-        "cards": _cards_html(status, total),
-        "proxies-rows": _proxy_rows(status.get("proxies", []), usage_by_proxy, csrf),
+        "cards": _cards_html(status, total, period),
+        "proxies-rows": _proxy_rows(status.get("proxies", []), usage_by_proxy, csrf, period),
         "logs-rows": _log_rows(recent),
     }
 
 
 def render_proxies_page(*, status: dict, usage: dict, usage_by_proxy: dict,
-                        recent: list[dict], csrf: str, msg: str = "") -> str:
+                        recent: list[dict], csrf: str, msg: str = "",
+                        period: str = "all") -> str:
     """Full HTML page «Прокси» (``/admin/ui``)."""
     fr = render_proxies_fragments(status=status, usage=usage,
                                   usage_by_proxy=usage_by_proxy,
-                                  recent=recent, csrf=csrf)
+                                  recent=recent, csrf=csrf, period=period)
     body = f"""<div class="hero page-enter">
   <div class="hero-content"><div class="eyebrow">Система / обзор</div>
     <h1>Пул прокси</h1>
   </div>
 </div>
+{_period_control(period, _PANEL)}
 <div class="cards page-enter" id="cards">{fr["cards"]}</div>
 
 <section class="section page-enter" aria-labelledby="pool-title">
 <div class="section-head"><div class="section-title"><span class="section-icon" aria-hidden="true">◎</span>
-<h2 id="pool-title">Пул прокси</h2></div></div>
+<h2 id="pool-title">Пул прокси</h2></div><span class="section-note">Расходы: {_esc(_PERIOD_SECTIONS.get(period, "За всё время").lower())}</span></div>
 <div class="table-scroll"><table>
 <thead>
 <tr><th>Прокси</th><th>Статус</th><th>Запросы</th><th>Ошибки</th>
@@ -673,28 +777,32 @@ def render_proxies_page(*, status: dict, usage: dict, usage_by_proxy: dict,
 {fr["logs-rows"]}
 </tbody>
 </table></div></section>"""
-    return _shell(active="proxies", msg=msg, data_url=f"{_PANEL}/data",
-                  fragments=fr, body=body, csrf=csrf)
+    return _shell(active="proxies", msg=msg,
+                  data_url=f"{_PANEL}/data?period={period}",
+                  stream_url=f"{_PANEL}/events?period={period}",
+                  fragments=fr, body=body, csrf=csrf, period=period)
 
 
 # --- Keys page (/admin/ui/keys) --------------------------------------------
 
 
-def render_keys_fragments(*, keys: list[dict], usage: dict, csrf: str) -> dict:
+def render_keys_fragments(*, keys: list[dict], usage: dict, csrf: str,
+                          period: str = "all") -> dict:
     """HTML fragments for the «Ключи» page: ``{element_id: innerHTML}``.
 
     Ids: ``srv-now``, ``keys-rows``, ``key-stats-rows``.
     """
     return {
         "srv-now": _now(),
-        "keys-rows": _key_rows(keys, csrf),
+        "keys-rows": _key_rows(keys, csrf, period),
         "key-stats-rows": _key_stats_rows(usage, keys),
     }
 
 
-def render_keys_page(*, keys: list[dict], usage: dict, csrf: str, msg: str = "") -> str:
+def render_keys_page(*, keys: list[dict], usage: dict, csrf: str, msg: str = "",
+                     period: str = "all") -> str:
     """Full HTML page «Ключи» (``/admin/ui/keys``)."""
-    fr = render_keys_fragments(keys=keys, usage=usage, csrf=csrf)
+    fr = render_keys_fragments(keys=keys, usage=usage, csrf=csrf, period=period)
     body = f"""<div class="hero page-enter">
   <div class="hero-content"><div class="eyebrow">Доступ / управление</div>
     <h1>Клиентские ключи</h1>
@@ -705,6 +813,7 @@ def render_keys_page(*, keys: list[dict], usage: dict, csrf: str, msg: str = "")
 <h2 id="add-title">Добавить клиентский ключ</h2></div><span class="section-note">Новый доступ</span></div>
 <div class="form-content"><form class="add" method="post" action="{_PANEL}/keys/add">
   <input type="hidden" name="_csrf" value="{_esc(csrf)}">
+  <input type="hidden" name="period" value="{_esc(period)}">
   <div class="field wide"><label for="key">Ключ доступа</label>
     <input id="key" type="text" name="key" placeholder="sk-..." autocomplete="off" required></div>
   <div class="field"><label for="key_id">Key ID</label>
@@ -734,9 +843,10 @@ def render_keys_page(*, keys: list[dict], usage: dict, csrf: str, msg: str = "")
 </tbody>
 </table></div></section>
 
+{_period_control(period, f"{_PANEL}/keys")}
 <section class="section page-enter" aria-labelledby="stats-title">
 <div class="section-head"><div class="section-title"><span class="section-icon" aria-hidden="true">↗</span>
-<h2 id="stats-title">Статистика по ключам</h2></div><span class="section-note">За всё время</span></div>
+<h2 id="stats-title">Статистика по ключам</h2></div><span class="section-note">{_esc(_PERIOD_SECTIONS.get(period, "За всё время"))}</span></div>
 <div class="table-scroll"><table>
 <thead>
 <tr><th>Key ID</th><th>Статус</th><th>Запросы</th><th>Ошибки</th>
@@ -746,8 +856,10 @@ def render_keys_page(*, keys: list[dict], usage: dict, csrf: str, msg: str = "")
 {fr["key-stats-rows"]}
 </tbody>
 </table></div></section>"""
-    return _shell(active="keys", msg=msg, data_url=f"{_PANEL}/keys/data",
-                  fragments=fr, body=body, csrf=csrf)
+    return _shell(active="keys", msg=msg,
+                  data_url=f"{_PANEL}/keys/data?period={period}",
+                  stream_url=f"{_PANEL}/keys/events?period={period}",
+                  fragments=fr, body=body, csrf=csrf, period=period)
 
 
 # --- Login page (/login): PASSWORD ONLY, no username -----------------------

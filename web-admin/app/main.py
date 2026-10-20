@@ -19,7 +19,9 @@ gateway's internal API with ``X-Internal-Token``. It is exposed only via edge
 
 from __future__ import annotations
 
+import asyncio
 import hmac
+import json
 import logging
 import math
 import secrets
@@ -30,7 +32,9 @@ from urllib.parse import parse_qsl, quote
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
-from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse, Response
+from fastapi.responses import (
+    HTMLResponse, JSONResponse, RedirectResponse, Response, StreamingResponse,
+)
 
 from .config import get_settings
 from .sessions import RedisSessionStore, SessionUnavailable
@@ -47,7 +51,18 @@ _LOGIN_URL = "/login"
 _SESSION_COOKIE = "openroute_session"
 _LOGIN_FAILS_MAX = 10
 _LOGIN_FAILS_WINDOW = 60.0
+_PERIODS = {"day", "week", "month", "all"}
+_SSE_TICK_SECONDS = 1.0
+_SSE_HEARTBEAT_SECONDS = 15.0
+_SSE_AUTH_CHECK_SECONDS = 30.0
 _login_fails: dict[str, list[float]] = {}
+
+
+def _normalize_period(period: str) -> str:
+    """Whitelist the spending window; unknown values mean all time."""
+    value = (period or "all").strip().lower()
+    return value if value in _PERIODS else "all"
+
 
 _internal_client = httpx.AsyncClient(
     base_url=settings.gateway_internal_url,
@@ -124,6 +139,111 @@ async def _api_post(path: str, payload: dict) -> dict:
     return r.json()
 
 
+# --- live updates (SSE) ----------------------------------------------------
+
+
+async def _panel_fragments(page: str, period: str, csrf: str) -> dict:
+    """Fetch one admin snapshot from the gateway and render its HTML fragments."""
+    if page == "keys":
+        from .adminui import render_keys_fragments
+        return render_keys_fragments(
+            **await _api_get(f"/internal/keys-data?period={quote(period)}"),
+            csrf=csrf, period=period,
+        )
+    from .adminui import render_proxies_fragments
+    return render_proxies_fragments(
+        **await _api_get(f"/internal/proxies-data?period={quote(period)}"),
+        csrf=csrf, period=period,
+    )
+
+
+def _fragments_fingerprint(fragments: dict) -> str:
+    """Compare only real data, not the clock label ``srv-now``."""
+    return json.dumps(
+        {k: v for k, v in fragments.items() if k != "srv-now"},
+        ensure_ascii=False, sort_keys=True, separators=(",", ":"),
+    )
+
+
+def _sse_data(fragments: dict) -> str:
+    # JSON escapes newlines inside the ready-made HTML fragments, so one
+    # ``data:`` line is always one complete SSE event.
+    payload = json.dumps(fragments, ensure_ascii=False, separators=(",", ":"))
+    return f"data: {payload}\n\n"
+
+
+async def _sse_events(request: Request, page: str, period: str,
+                      session: dict) -> AsyncIterator[str]:
+    """Push ``{element_id: innerHTML}`` snapshots until the tab disconnects.
+
+    The gateway is sampled once per second (cheap admin queries) and an event
+    is emitted only when something visible changed. A heartbeat keeps nginx and
+    intermediate proxies from closing an idle stream. Expired/deleted sessions
+    stop the stream within ``_SSE_AUTH_CHECK_SECONDS``.
+    """
+    csrf = session["csrf"]
+    sid = session.get("sid", "")
+    last_key: str | None = None
+    last_sent = time.monotonic()
+    last_auth_check = last_sent
+    error_logged = False
+    yield "retry: 3000\n\n"
+
+    while True:
+        if await request.is_disconnected():
+            return
+
+        now = time.monotonic()
+        if sid and now - last_auth_check >= _SSE_AUTH_CHECK_SECONDS:
+            try:
+                current = await _sessions.get(sid)
+            except Exception:
+                logger.exception("SSE session check failed")
+                return
+            if current is None or time.time() > current.get("expires", 0):
+                return
+            last_auth_check = now
+
+        try:
+            fragments = await _panel_fragments(page, period, csrf)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            if not error_logged:
+                logger.warning("SSE snapshot failed: %s", exc)
+                error_logged = True
+        else:
+            error_logged = False
+            key = _fragments_fingerprint(fragments)
+            now = time.monotonic()
+            if key != last_key:
+                last_key = key
+                last_sent = now
+                yield _sse_data(fragments)
+
+        now = time.monotonic()
+        if now - last_sent >= _SSE_HEARTBEAT_SECONDS:
+            last_sent = now
+            yield ": keepalive\n\n"
+
+        if await request.is_disconnected():
+            return
+        await asyncio.sleep(_SSE_TICK_SECONDS)
+
+
+def _sse_response(request: Request, page: str, period: str,
+                  session: dict) -> StreamingResponse:
+    return StreamingResponse(
+        _sse_events(request, page, period, session),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "Connection": "keep-alive",
+            "X-Accel-Buffering": "no",
+        },
+    )
+
+
 # --- sessions / auth (ported from NVRoute) ---------------------------------
 
 
@@ -197,9 +317,13 @@ def _check_csrf(form: dict[str, str], session: dict) -> None:
         raise HTTPException(403, "Invalid CSRF token")
 
 
-def _panel_redirect(msg: str, page: str = "") -> RedirectResponse:
+def _panel_redirect(msg: str, page: str = "", period: str = "all") -> RedirectResponse:
     base = f"{_PANEL}/keys" if page == "keys" else _PANEL
-    return RedirectResponse(f"{base}?msg={quote(msg)}", status_code=303)
+    period = _normalize_period(period)
+    query = f"msg={quote(msg)}"
+    if period != "all":
+        query += f"&period={quote(period)}"
+    return RedirectResponse(f"{base}?{query}", status_code=303)
 
 
 @app.exception_handler(HTTPException)
@@ -270,35 +394,57 @@ async def admin_ui_logout(request: Request, session: dict = Depends(require_pane
 
 
 @app.get(_PANEL, include_in_schema=False)
-async def admin_ui(msg: str = "", session: dict = Depends(require_panel)) -> HTMLResponse:
+async def admin_ui(msg: str = "", period: str = "all",
+                   session: dict = Depends(require_panel)) -> HTMLResponse:
     """Page "Proxies" (default): data snapshot rendered by ``render_proxies_page``."""
     from .adminui import render_proxies_page
+    period = _normalize_period(period)
     return HTMLResponse(render_proxies_page(
-        **await _api_get("/internal/proxies-data"), csrf=session["csrf"], msg=msg,
+        **await _api_get(f"/internal/proxies-data?period={quote(period)}"),
+        csrf=session["csrf"], msg=msg, period=period,
     ))
 
 
 @app.get(f"{_PANEL}/keys", include_in_schema=False)
-async def admin_ui_keys(msg: str = "", session: dict = Depends(require_panel)) -> HTMLResponse:
+async def admin_ui_keys(msg: str = "", period: str = "all",
+                        session: dict = Depends(require_panel)) -> HTMLResponse:
     """Page "Keys": data snapshot rendered by ``render_keys_page``."""
     from .adminui import render_keys_page
+    period = _normalize_period(period)
     return HTMLResponse(render_keys_page(
-        **await _api_get("/internal/keys-data"), csrf=session["csrf"], msg=msg,
+        **await _api_get(f"/internal/keys-data?period={quote(period)}"),
+        csrf=session["csrf"], msg=msg, period=period,
     ))
 
 
 @app.get(f"{_PANEL}/data", include_in_schema=False)
-async def admin_ui_data(session: dict = Depends(require_panel)) -> dict:
-    """HTML fragments for the "Proxies" page (auto-refresh every 5s)."""
-    from .adminui import render_proxies_fragments
-    return render_proxies_fragments(**await _api_get("/internal/proxies-data"), csrf=session["csrf"])
+async def admin_ui_data(period: str = "all", session: dict = Depends(require_panel)) -> dict:
+    """HTML fragments for the "Proxies" page (fallback for EventSource)."""
+    period = _normalize_period(period)
+    return await _panel_fragments("proxies", period, session["csrf"])
 
 
 @app.get(f"{_PANEL}/keys/data", include_in_schema=False)
-async def admin_ui_keys_data(session: dict = Depends(require_panel)) -> dict:
-    """HTML fragments for the "Keys" page (auto-refresh every 5s)."""
-    from .adminui import render_keys_fragments
-    return render_keys_fragments(**await _api_get("/internal/keys-data"), csrf=session["csrf"])
+async def admin_ui_keys_data(period: str = "all", session: dict = Depends(require_panel)) -> dict:
+    """HTML fragments for the "Keys" page (fallback for EventSource)."""
+    period = _normalize_period(period)
+    return await _panel_fragments("keys", period, session["csrf"])
+
+
+@app.get(f"{_PANEL}/events", include_in_schema=False)
+async def admin_ui_events(request: Request, period: str = "all",
+                          session: dict = Depends(require_panel)) -> StreamingResponse:
+    """SSE stream of live fragments for the "Proxies" page."""
+    period = _normalize_period(period)
+    return _sse_response(request, "proxies", period, session)
+
+
+@app.get(f"{_PANEL}/keys/events", include_in_schema=False)
+async def admin_ui_keys_events(request: Request, period: str = "all",
+                               session: dict = Depends(require_panel)) -> StreamingResponse:
+    """SSE stream of live fragments for the "Keys" page."""
+    period = _normalize_period(period)
+    return _sse_response(request, "keys", period, session)
 
 
 # --- routes: mutations (form -> gateway internal API -> redirect) -----------
@@ -312,7 +458,7 @@ async def admin_ui_set_proxy(request: Request, session: dict = Depends(require_p
         "proxy": form.get("proxy", ""),
         "enabled": form.get("enabled") == "1",
     })
-    return _panel_redirect(res.get("message", "Готово"))
+    return _panel_redirect(res.get("message", "Готово"), period=form.get("period", "all"))
 
 
 @app.post(f"{_PANEL}/proxies/delete", include_in_schema=False)
@@ -320,7 +466,8 @@ async def admin_ui_delete_proxy(request: Request, session: dict = Depends(requir
     form = await _read_form(request)
     _check_csrf(form, session)
     res = await _api_post("/internal/proxies/delete", {"proxy": form.get("proxy", "")})
-    return _panel_redirect(res.get("message", "Прокси удалён"))
+    return _panel_redirect(res.get("message", "Прокси удалён"),
+                           period=form.get("period", "all"))
 
 
 @app.post(f"{_PANEL}/keys/add", include_in_schema=False)
@@ -333,7 +480,8 @@ async def admin_ui_add_key(request: Request, session: dict = Depends(require_pan
         "rpm": form.get("rpm") or None, "tpm": form.get("tpm") or None,
         "models": form.get("models", ""),
     })
-    return _panel_redirect(res.get("message", "Готово"), "keys")
+    return _panel_redirect(res.get("message", "Готово"), "keys",
+                           period=form.get("period", "all"))
 
 
 @app.post(f"{_PANEL}/keys/set", include_in_schema=False)
@@ -344,7 +492,8 @@ async def admin_ui_set_key(request: Request, session: dict = Depends(require_pan
         "key_hash": form.get("key_hash", ""),
         "enabled": form.get("enabled") == "1",
     })
-    return _panel_redirect(res.get("message", "Готово"), "keys")
+    return _panel_redirect(res.get("message", "Готово"), "keys",
+                           period=form.get("period", "all"))
 
 
 @app.post(f"{_PANEL}/keys/delete", include_in_schema=False)
@@ -352,7 +501,8 @@ async def admin_ui_delete_key(request: Request, session: dict = Depends(require_
     form = await _read_form(request)
     _check_csrf(form, session)
     res = await _api_post("/internal/keys/delete", {"key_hash": form.get("key_hash", "")})
-    return _panel_redirect(res.get("message", "Ключ удалён"), "keys")
+    return _panel_redirect(res.get("message", "Ключ удалён"), "keys",
+                           period=form.get("period", "all"))
 
 
 @app.get("/health", include_in_schema=False)

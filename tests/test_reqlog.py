@@ -78,6 +78,38 @@ async def test_summary_by_account(pg_dsn):
 
 
 @pytest.mark.asyncio
+async def test_summary_since_filters_entries_and_accounts(pg_dsn):
+    """The admin spending window filters both per-key and per-proxy aggregates."""
+    rl = RequestLog(pg_dsn)
+    now = time.time()
+    old = e(0, key="old", prompt=100, completion=0)
+    old.ts = now - 40 * 24 * 60 * 60
+    old.account = "old.example:8080"
+    recent = e(0, key="new", prompt=7, completion=3)
+    recent.ts = now - 60
+    recent.account = "new.example:8080"
+    await rl.log(old)
+    await rl.log(recent)
+
+    assert rl.summary()["total"]["requests"] == 2
+    day = rl.summary(since=now - 24 * 60 * 60)
+    assert set(day) == {"new", "total"}
+    assert day["total"]["requests"] == 1
+    assert day["total"]["tokens"] == 10
+
+    by = rl.summary_by_account(since=now - 7 * 24 * 60 * 60)
+    assert set(by) == {"new.example:8080"}
+    assert by["new.example:8080"]["tokens"] == 10
+
+    # Async wrappers pass the cutoff through as well.
+    assert (await rl.summary_async(since=now - 24 * 60 * 60))["total"]["requests"] == 1
+    assert set(await rl.summary_by_account_async(since=now - 24 * 60 * 60)) == {
+        "new.example:8080"
+    }
+    rl.close()
+
+
+@pytest.mark.asyncio
 async def test_unreachable_db_never_raises():
     """An unreachable PostgreSQL must not break serving: log() swallows,
     recent() serves the hot cache, summary() returns empty. The pool waits for
