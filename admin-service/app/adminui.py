@@ -51,74 +51,254 @@ def _num(x: int | float) -> str:
 
 
 _CSS = """
-:root { color-scheme: dark; }
+:root {
+  color-scheme: dark;
+  --bg: #090e15; --surface: #101822; --surface-2: #141e29;
+  --line: #263341; --line-soft: #1d2935; --text: #eaf2f4;
+  --muted: #8d9ca9; --mint: #91e8ce; --blue: #91baff;
+  --amber: #f5c77a; --red: #ff9b9b;
+}
 * { box-sizing: border-box; }
-body { margin: 0; font: 14px/1.45 -apple-system, "Segoe UI", Roboto, sans-serif;
-       background: #0d1117; color: #c9d1d9; }
-.wrap { max-width: 1180px; margin: 0 auto; padding: 24px 16px 64px; }
-header.top { display: flex; align-items: baseline; gap: 16px; flex-wrap: wrap;
-             border-bottom: 1px solid #21262d; padding-bottom: 12px; }
-header.top h1 { font-size: 20px; margin: 0; color: #58a6ff; }
-header.top nav { display: flex; gap: 16px; }
-header.top nav a { padding-bottom: 2px; border-bottom: 2px solid transparent; }
-header.top nav a.active { border-bottom-color: #58a6ff; font-weight: 600; }
-header.top .muted { margin-left: auto; }
-a { color: #58a6ff; text-decoration: none; }
-a:hover { text-decoration: underline; }
-.muted { color: #8b949e; }
-.msg { margin: 14px 0 0; padding: 10px 14px; border: 1px solid #1f6feb55;
-       background: #1f6feb22; border-radius: 8px; }
-.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-         gap: 12px; margin: 18px 0; }
-.card { background: #161b22; border: 1px solid #21262d; border-radius: 10px;
-        padding: 14px 16px; }
-.card .num { font-size: 24px; font-weight: 700; }
-.card .lbl { color: #8b949e; margin-top: 2px; }
-h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .06em;
-     color: #8b949e; margin: 28px 0 10px; }
-table { width: 100%; border-collapse: collapse; background: #161b22;
-        border: 1px solid #21262d; border-radius: 10px; overflow: hidden; }
-th, td { padding: 8px 10px; text-align: left; border-bottom: 1px solid #21262d;
-         font-size: 13px; vertical-align: middle; }
-th { color: #8b949e; font-weight: 600; }
-tr:last-child td { border-bottom: none; }
-tr.dead td { opacity: .55; }
-td.mono, code { font-family: ui-monospace, Consolas, monospace; }
-.badge { display: inline-block; padding: 1px 8px; border-radius: 999px;
-         font-size: 12px; border: 1px solid transparent; }
-.b-ok { color: #3fb950; border-color: #23863666; background: #23863622; }
-.b-warn { color: #d29922; border-color: #9e6a0366; background: #9e6a0322; }
-.b-err { color: #f85149; border-color: #da363366; background: #da363322; }
-.b-off { color: #8b949e; border-color: #30363d; background: #21262d; }
-button { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 6px;
-         border: 1px solid #30363d; background: #21262d; color: #c9d1d9;
-         cursor: pointer; }
-button:hover { background: #30363d; }
-button.danger { color: #f85149; }
-button.acc { color: #3fb950; }
+html { scroll-behavior: smooth; }
+body { margin: 0; min-width: 320px; background: var(--bg); color: var(--text);
+  font: 14px/1.5 Inter, "Segoe UI", system-ui, sans-serif; }
+body::before { content: ""; position: fixed; inset: 0; pointer-events: none;
+  background: radial-gradient(ellipse 60% 40% at 95% -10%, #194c4b24, transparent 75%);
+  z-index: -1; }
+a { color: inherit; text-decoration: none; }
+button, input { font: inherit; }
+button, a, input { -webkit-tap-highlight-color: transparent; }
+:focus-visible { outline: 2px solid var(--mint); outline-offset: 3px; }
+.muted { color: var(--muted); }
+.mono, code { font-family: "Cascadia Code", Consolas, ui-monospace, monospace; }
+.wrap { min-height: 100vh; display: grid; grid-template-columns: 240px minmax(0, 1fr); }
+.sidebar { position: sticky; top: 0; height: 100vh; display: flex; flex-direction: column;
+  padding: 30px 16px 22px; border-right: 1px solid var(--line-soft);
+  background: #0d141d; }
+.brand { display: flex; align-items: center; gap: 12px; padding: 3px 12px 38px; }
+.brand-mark { display: grid; place-items: center; width: 36px; height: 36px; border-radius: 11px;
+  background: linear-gradient(145deg, #a5f4d9, #4da9ae); color: #092328;
+  font-size: 17px; font-weight: 900; letter-spacing: -.08em; box-shadow: 0 8px 28px #4da9ae2d; }
+.brand-name { font-size: 17px; font-weight: 750; letter-spacing: -.04em; line-height: 1.1; }
+.brand-sub { display: block; margin-top: 3px; color: #8293a0; font-size: 10px;
+  font-weight: 650; letter-spacing: .14em; text-transform: uppercase; }
+.nav-label { padding: 0 13px 10px; color: #657784; font-size: 10px;
+  font-weight: 800; text-transform: uppercase; letter-spacing: .17em; }
+header.top nav { display: grid; gap: 5px; }
+header.top nav a { display: flex; align-items: center; gap: 11px; min-height: 42px;
+  padding: 0 13px; border: 1px solid transparent; border-radius: 10px;
+  color: #a4b2bd; font-weight: 600; transition: background .2s, color .2s, transform .2s; }
+header.top nav a::before { content: ""; display: block; width: 16px; height: 16px;
+  border: 1.7px solid currentColor; border-radius: 5px; opacity: .8; }
+header.top nav a[href$="keys"]::before { border-radius: 50%; width: 14px; height: 14px;
+  box-shadow: 5px 4px 0 -3px currentColor; }
+header.top nav a:hover { background: #1a2934; color: var(--text); transform: translateX(2px); }
+header.top nav a.active { background: #83decf16; border-color: #88e5cf30; color: var(--mint); }
+.sidebar-bottom { margin-top: auto; padding: 18px 10px 0; border-top: 1px solid var(--line-soft); }
+.side-status { display: flex; align-items: center; gap: 9px; color: #a9b8bd; font-size: 12px; }
+.live-dot { width: 7px; height: 7px; flex: none; border-radius: 50%;
+  background: var(--mint); box-shadow: 0 0 0 4px #91e8ce19, 0 0 12px #91e8ce80;
+  animation: breathe 2.5s ease-in-out infinite; }
+.sidebar-bottom form { margin: 20px 0 0; }
+.sidebar-bottom form button { width: 100%; text-align: left; padding: 9px 11px; }
+.main { min-width: 0; padding: 0 clamp(22px, 4vw, 64px) 72px; }
+.topline { display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  min-height: 74px; border-bottom: 1px solid var(--line-soft); }
+.breadcrumb { color: #7d8e9c; font-size: 12px; font-weight: 650; letter-spacing: .025em; }
+.breadcrumb strong { color: #d6e5e5; font-weight: 650; }
+.top-meta { display: flex; align-items: center; gap: 9px; color: #99a9b5; font-size: 12px; }
+.top-meta .live-dot { width: 6px; height: 6px; }
+#srv-now { font-variant-numeric: tabular-nums; white-space: nowrap; }
+.hero { position: relative; overflow: hidden; margin: 30px 0 24px; min-height: 180px;
+  display: flex; align-items: center; justify-content: space-between; gap: 20px;
+  padding: 35px clamp(24px, 3vw, 42px); border: 1px solid #36505a;
+  border-radius: 19px; background: linear-gradient(110deg, #193938, #172b35 53%, #17212d); }
+.hero::before { content: ""; position: absolute; inset: 0; opacity: .65; pointer-events: none;
+  background: radial-gradient(circle at 82% 18%, #55d1b84a, transparent 27%),
+              radial-gradient(circle at 100% 100%, #6a89d930, transparent 35%); }
+.hero::after { content: ""; position: absolute; width: 290px; height: 290px; right: -75px;
+  top: -85px; border: 1px solid #b4ffee25; border-radius: 50%; box-shadow:
+  0 0 0 40px #b4ffee09, 0 0 0 85px #b4ffee07; pointer-events: none; }
+.hero-content, .hero-aside { position: relative; z-index: 1; }
+.eyebrow { color: #a5edda; font-size: 11px; font-weight: 800; letter-spacing: .19em;
+  text-transform: uppercase; }
+h1 { margin: 7px 0 5px; font-size: clamp(27px, 3vw, 38px); line-height: 1.16;
+  font-weight: 750; letter-spacing: -.045em; }
+.hero p { margin: 0; max-width: 490px; color: #b7cdcf; font-size: 13px; }
+.hero-aside { display: flex; align-items: center; gap: 9px; flex: none; padding: 10px 14px;
+  background: #091b2280; border: 1px solid #aeefdc39; border-radius: 999px;
+  color: #d6f6eb; font-size: 11px; font-weight: 650; white-space: nowrap; }
+.msg { margin: 0 0 22px; padding: 12px 16px; border: 1px solid #8de9d244;
+  background: #8de9d214; color: #b5f4e3; border-radius: 10px; animation: rise .35s ease both; }
+.cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 13px;
+  margin: 0 0 28px; }
+.card { position: relative; overflow: hidden; min-height: 136px; padding: 20px 19px 16px;
+  background: var(--surface); border: 1px solid var(--line); border-radius: 15px;
+  transition: transform .25s, border-color .25s, box-shadow .25s; }
+.card:hover { transform: translateY(-3px); border-color: #4c6c70; box-shadow: 0 15px 30px #00000020; }
+.card::after { content: ""; position: absolute; width: 90px; height: 90px; right: -27px;
+  top: -32px; border-radius: 50%; background: var(--accent); opacity: .1; }
+.card .glyph { display: grid; place-items: center; width: 30px; height: 30px;
+  border-radius: 9px; background: color-mix(in srgb, var(--accent) 12%, transparent);
+  color: var(--accent); font-size: 15px; font-weight: 700; }
+.card .num { margin-top: 11px; font-size: clamp(23px, 2.1vw, 30px); line-height: 1.15;
+  font-weight: 750; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
+.card .lbl { margin-top: 4px; color: var(--muted); font-size: 11px; font-weight: 600; }
+.card:nth-child(1) { --accent: #91e8ce; } .card:nth-child(2) { --accent: #92b9ff; }
+.card:nth-child(3) { --accent: #ff9b9b; } .card:nth-child(4) { --accent: #c9b1ff; }
+.card:nth-child(5) { --accent: #f5c77a; }
+.section { margin: 0 0 22px; overflow: hidden; background: var(--surface);
+  border: 1px solid var(--line); border-radius: 15px; }
+.section-head { display: flex; align-items: center; justify-content: space-between; gap: 15px;
+  min-height: 70px; padding: 16px 22px; border-bottom: 1px solid var(--line-soft); }
+.section-title { display: flex; align-items: center; gap: 11px; }
+.section-icon { display: grid; place-items: center; width: 30px; height: 30px;
+  border-radius: 9px; color: var(--mint); background: #91e8ce17; font-size: 16px; }
+h2 { margin: 0; font-size: 14px; font-weight: 700; letter-spacing: -.01em; }
+.section-note { color: #8294a0; font-size: 11px; white-space: nowrap; }
+.table-scroll { width: 100%; overflow-x: auto; }
+.table-scroll { scrollbar-color: #496777 #111c26; scrollbar-width: thin; }
+table { width: 100%; border-collapse: collapse; }
+th, td { padding: 13px 14px; text-align: left; border-bottom: 1px solid var(--line-soft);
+  font-size: 12px; vertical-align: middle; }
+th { color: #8394a1; font-size: 10px; font-weight: 750; text-transform: uppercase;
+  letter-spacing: .095em; background: #111c26; white-space: nowrap; }
+th:first-child, td:first-child { padding-left: 22px; }
+th:last-child, td:last-child { padding-right: 22px; }
+tbody tr { transition: background .18s; }
+tbody tr:hover { background: #1b2a35; }
+tbody tr:last-child td { border-bottom: 0; }
+tr.dead td { color: #7f909d; }
+td.mono { font-size: 11px; white-space: nowrap; }
 td.actions { white-space: nowrap; }
-td.actions form { display: inline-block; margin: 0 2px 0 0; }
-form.add { display: flex; gap: 8px; align-items: stretch; flex-wrap: wrap; }
-form.add input[type=text] { flex: 1; min-width: 110px; font: inherit; color: #c9d1d9;
-    background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
-    padding: 8px 12px; }
-form.add input.wide { flex: 2; min-width: 230px; }
-form.add input[type=text]:focus { outline: none; border-color: #1f6feb; }
-form.add label.chk { display: flex; align-items: center; gap: 6px; padding: 0 10px;
-    border: 1px solid #30363d; border-radius: 8px; color: #c9d1d9; white-space: nowrap; }
-form.add button { font-size: 13px; padding: 8px 16px; }
-.login-wrap { max-width: 340px; margin: 12vh auto 0; }
-.login-box { background: #161b22; border: 1px solid #21262d; border-radius: 12px;
-             padding: 28px 26px 24px; }
-.login-box h1 { font-size: 18px; margin: 0 0 4px; color: #58a6ff; }
-.login-box p.sub { margin: 0 0 18px; color: #8b949e; }
-.login-box input[type=password] { width: 100%; font: inherit; color: #c9d1d9;
-     background: #0d1117; border: 1px solid #30363d; border-radius: 8px;
-     padding: 10px 12px; margin-bottom: 12px; }
-.login-box input[type=password]:focus { outline: none; border-color: #1f6feb; }
-.login-box button[type=submit] { width: 100%; font-size: 14px; padding: 10px 0; }
-.err { margin: 14px 0 0; padding: 10px 14px; border: 1px solid #da363366;
-       background: #da363322; border-radius: 8px; color: #f85149; }
+td.actions form { display: inline-block; margin: 2px 5px 2px 0; }
+.badge { display: inline-flex; align-items: center; gap: 6px; padding: 4px 9px;
+  border: 1px solid transparent; border-radius: 999px; font-size: 10px;
+  font-weight: 700; white-space: nowrap; }
+.badge::before { content: ""; width: 5px; height: 5px; border-radius: 50%; background: currentColor; }
+.b-ok { color: #96e9c8; border-color: #67d7af34; background: #67d7af16; }
+.b-warn { color: #f5c77a; border-color: #efbd6a38; background: #efbd6a16; }
+.b-err { color: #ff9b9b; border-color: #ff858538; background: #ff858516; }
+.b-off { color: #a1acb7; border-color: #9baab22b; background: #9baab211; }
+button { padding: 7px 11px; border: 1px solid #3a4a58; border-radius: 8px;
+  background: #1b2935; color: #dbe9eb; font-size: 11px; font-weight: 650;
+  cursor: pointer; transition: background .2s, border-color .2s, transform .2s; }
+button:hover { background: #273b48; border-color: #77958e; transform: translateY(-1px); }
+button:active { transform: translateY(0); }
+button.danger { color: var(--red); border-color: #ba77773d; background: #ba777710; }
+button.danger:hover { background: #ba777728; }
+button.acc { color: var(--mint); border-color: #71cdaa48; background: #71cdaa13; }
+button.acc:hover { background: #71cdaa28; }
+.form-content { padding: 22px; }
+form.add { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 15px; }
+.field { grid-column: span 2; display: grid; gap: 7px; min-width: 0; }
+.field.wide { grid-column: span 3; }
+.field label, .check-field > span { color: #a9bac3; font-size: 11px; font-weight: 700; }
+form.add input[type=text], .login-box input[type=password] { width: 100%; min-width: 0;
+  padding: 10px 12px; border: 1px solid #344756; border-radius: 9px;
+  background: #0d1720; color: var(--text); outline: none;
+  transition: border-color .2s, box-shadow .2s, background .2s; }
+form.add input[type=text]::placeholder, .login-box input::placeholder { color: #647684; }
+form.add input[type=text]:focus, .login-box input[type=password]:focus {
+  border-color: #85dfcb; box-shadow: 0 0 0 3px #85dfcb1c; background: #0f1d27; }
+.form-footer { grid-column: 1 / -1; display: flex; align-items: center;
+  justify-content: space-between; gap: 16px; padding-top: 5px; }
+.check-field { display: flex; align-items: center; gap: 9px; color: #a9bac3;
+  font-size: 11px; font-weight: 700; }
+.check-field input { accent-color: #91e8ce; width: 15px; height: 15px; }
+form.add button, .login-box button[type=submit] { padding: 10px 18px;
+  background: var(--mint); border-color: var(--mint); color: #092322; font-size: 12px; font-weight: 800; }
+form.add button:hover, .login-box button[type=submit]:hover {
+  background: #b1f5df; border-color: #b1f5df; }
+.form-hint { color: #6e818e; font-size: 11px; }
+.page-enter { animation: rise .55s cubic-bezier(.2,.7,.2,1) both; }
+.page-enter:nth-of-type(2) { animation-delay: .06s; }
+.page-enter:nth-of-type(3) { animation-delay: .12s; }
+.login-page { min-height: 100vh; display: grid; grid-template-columns: minmax(0, 1.05fr) minmax(420px, .95fr); }
+.login-visual { position: relative; overflow: hidden; display: flex; flex-direction: column;
+  justify-content: space-between; min-height: 100vh; padding: clamp(34px, 5vw, 72px);
+  border-right: 1px solid #38574e; background: linear-gradient(145deg, #102c32, #0e1926 75%); }
+.login-visual::before { content: ""; position: absolute; width: 600px; height: 600px;
+  left: -210px; bottom: -230px; border: 1px solid #91e8ce2c; border-radius: 50%;
+  box-shadow: 0 0 0 65px #91e8ce09, 0 0 0 145px #91e8ce08, 0 0 0 240px #91e8ce06; }
+.login-visual::after { content: ""; position: absolute; width: 360px; height: 360px;
+  right: -130px; top: 18%; border: 1px solid #91e8ce2c; border-radius: 50%;
+  box-shadow: 0 0 0 65px #91e8ce08, 0 0 0 140px #91e8ce05; }
+.login-visual > * { position: relative; z-index: 1; }
+.login-brand { display: flex; align-items: center; gap: 12px; font-size: 20px;
+  font-weight: 750; letter-spacing: -.04em; }
+.login-brand .brand-mark { width: 42px; height: 42px; }
+.login-statement { max-width: 570px; padding-bottom: 12vh; }
+.login-statement .eyebrow { margin-bottom: 19px; }
+.login-statement h2 { font-size: clamp(40px, 5vw, 68px); line-height: 1.07;
+  letter-spacing: -.06em; font-weight: 750; }
+.login-statement p { margin: 19px 0 0; max-width: 420px; color: #a9c3c9; font-size: 15px; }
+.login-foot { color: #78959d; font-size: 11px; letter-spacing: .09em; }
+.login-main { display: grid; place-items: center; padding: 32px; }
+.login-wrap { width: min(100%, 380px); animation: rise .6s ease both; }
+.login-kicker { color: var(--mint); font-size: 11px; font-weight: 800;
+  letter-spacing: .16em; text-transform: uppercase; }
+.login-box h1 { margin: 11px 0 8px; font-size: 35px; }
+.login-box p.sub { margin: 0 0 29px; color: var(--muted); }
+.login-box label { display: block; margin-bottom: 8px; color: #b5c5ce;
+  font-size: 12px; font-weight: 700; }
+.login-box input[type=password] { margin-bottom: 18px; padding: 13px 14px; }
+.login-box button[type=submit] { width: 100%; padding: 13px; font-size: 13px; }
+.login-help { margin-top: 25px; color: #667b89; font-size: 11px; text-align: center; }
+.err { margin: 17px 0 0; padding: 11px 13px; border: 1px solid #ff858548;
+  background: #ff858517; border-radius: 9px; color: var(--red); }
+@keyframes breathe { 50% { box-shadow: 0 0 0 6px #91e8ce0b, 0 0 18px #91e8ce9c; } }
+@keyframes rise { from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: translateY(0); } }
+@media (max-width: 1220px) { .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+@media (max-width: 900px) {
+  .wrap { display: block; }
+  .sidebar { position: relative; height: auto; padding: 12px 20px; flex-direction: row;
+    align-items: center; gap: 16px; border-right: 0; border-bottom: 1px solid var(--line-soft); }
+  .brand { padding: 0; }
+  .brand-sub, .nav-label, .sidebar-bottom { display: none; }
+  header.top nav { display: flex; margin-left: auto; }
+  header.top nav a { min-height: 38px; }
+  .main { padding: 0 22px 50px; }
+  .login-page { grid-template-columns: 1fr; }
+  .login-visual { min-height: 250px; padding: 30px; }
+  .login-statement { padding: 40px 0 0; }
+  .login-statement h2 { font-size: 36px; }
+  .login-statement p, .login-foot { display: none; }
+  .login-main { min-height: 440px; }
+}
+@media (max-width: 650px) {
+  .sidebar { padding: 11px 14px; }
+  .brand-name { font-size: 15px; }
+  .brand-mark { width: 31px; height: 31px; }
+  header.top nav a { min-height: 34px; padding: 0 9px; font-size: 12px; }
+  header.top nav a::before { display: none; }
+  .main { padding: 0 14px 40px; }
+  .topline { min-height: 52px; }
+  .top-meta { font-size: 10px; }
+  .crumb-root, .meta-label { display: none; }
+  .hero { min-height: 160px; margin: 18px 0; padding: 25px 21px; }
+  .hero-aside { display: none; }
+  .cards { grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+  .card { min-height: 120px; padding: 15px; }
+  .section-head { padding: 14px 16px; }
+  .section-note { display: none; }
+  .table-scroll::before { content: "Прокрутите таблицу →"; display: block; position: sticky;
+    left: 0; width: max-content; padding: 10px 16px; color: #7895a3; font-size: 10px; }
+  .table-scroll table { min-width: 760px; }
+  .field, .field.wide { grid-column: span 6; }
+  .form-content { padding: 16px; }
+  .form-footer { align-items: stretch; flex-direction: column; }
+  form.add button { width: 100%; }
+  .login-visual { min-height: 195px; }
+  .login-statement { padding-top: 24px; }
+  .login-statement h2 { font-size: 30px; }
+  .login-main { min-height: 390px; padding: 24px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after { animation-duration: .01ms !important;
+    transition-duration: .01ms !important; scroll-behavior: auto !important; }
+}
 """
 
 # Proxy states. Unlike NVRoute's accounts there is no permanently "dead" state:
@@ -309,15 +489,15 @@ def _log_rows(recent: list[dict]) -> str:
 
 def _cards_html(status: dict, total: dict) -> str:
     return (
-        f'<div class="card"><div class="num">{_num(total.get("requests", 0))}</div>'
+        f'<div class="card"><div class="glyph">↗</div><div class="num">{_num(total.get("requests", 0))}</div>'
         f'<div class="lbl">Запросов всего</div></div>'
-        f'<div class="card"><div class="num">{_num(total.get("tokens", 0))}</div>'
+        f'<div class="card"><div class="glyph">◈</div><div class="num">{_num(total.get("tokens", 0))}</div>'
         f'<div class="lbl">Токенов потрачено</div></div>'
-        f'<div class="card"><div class="num">{_num(total.get("errors", 0))}</div>'
+        f'<div class="card"><div class="glyph">!</div><div class="num">{_num(total.get("errors", 0))}</div>'
         f'<div class="lbl">Ошибок</div></div>'
-        f'<div class="card"><div class="num">{status.get("proxies_enabled", 0)}/{status.get("proxies_total", 0)}</div>'
+        f'<div class="card"><div class="glyph">◎</div><div class="num">{status.get("proxies_enabled", 0)}/{status.get("proxies_total", 0)}</div>'
         f'<div class="lbl">Прокси в ротации</div></div>'
-        f'<div class="card"><div class="num">{status.get("proxies_cooling", 0)} / {status.get("proxies_manually_disabled", 0)}</div>'
+        f'<div class="card"><div class="glyph">◷</div><div class="num">{status.get("proxies_cooling", 0)} / {status.get("proxies_manually_disabled", 0)}</div>'
         f'<div class="lbl">В cooldown / выключено</div></div>'
     )
 
@@ -329,16 +509,20 @@ def _cards_html(status: dict, total: dict) -> str:
 _SCRIPT = """<script>
 (function () {
   var URL = "__DATA_URL__";
+  var busy = false;
   function tick() {
-    fetch(URL).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
+    if (busy) return;
+    busy = true;
+    fetch(URL, { credentials: "same-origin" }).then(function (r) { return r.ok ? r.json() : null; }).then(function (d) {
       if (!d) return;
       for (var id in d) {
         var el = document.getElementById(id);
-        if (el) el.innerHTML = d[id];
+        if (el && el.innerHTML !== d[id]) el.innerHTML = d[id];
       }
-    }).catch(function () {});
+    }).catch(function () {}).finally(function () { busy = false; });
   }
   setInterval(function () { if (!document.hidden) tick(); }, 5000);
+  document.addEventListener("visibilitychange", function () { if (!document.hidden) tick(); });
 })();
 </script>"""
 
@@ -347,9 +531,8 @@ def _now() -> str:
     return datetime.now().strftime("%d.%m.%Y %H:%M:%S")
 
 
-def _header(active: str, srv_now: str, csrf: str) -> str:
-    """Shared header with navigation; the active page is highlighted.
-    On the right — server time and the «Выйти» button (POST with session CSRF)."""
+def _header(active: str, csrf: str) -> str:
+    """Shared sidebar, page breadcrumb, and CSRF-protected logout."""
     def nav(href: str, label: str, name: str) -> str:
         cls = ' class="active"' if name == active else ""
         return f'<a href="{href}"{cls}>{label}</a>'
@@ -357,17 +540,21 @@ def _header(active: str, srv_now: str, csrf: str) -> str:
     logout = (
         f'<form method="post" action="{_PANEL}/logout">'
         f'<input type="hidden" name="_csrf" value="{_esc(csrf)}">'
-        '<button type="submit">Выйти</button></form>'
+        '<button type="submit">↗ &nbsp; Выйти из панели</button></form>'
     )
     return (
-        '<header class="top">'
-        "<h1>OpenRoute Admin</h1>"
+        '<header class="top sidebar">'
+        '<div class="brand"><span class="brand-mark" aria-hidden="true">OR</span>'
+        '<span class="brand-name">OpenRoute<span class="brand-sub">Admin console</span></span></div>'
+        '<div class="nav-label">Управление</div>'
         "<nav>"
         + nav(_PANEL, "Прокси", "proxies")
         + nav(f"{_PANEL}/keys", "Ключи", "keys")
         + "</nav>"
-        + f'<span class="muted" id="srv-now">{srv_now}</span>'
+        + '<div class="sidebar-bottom"><div class="side-status"><span class="live-dot"></span>'
+        'Автообновление каждые 5 сек</div>'
         + logout
+        + '</div>'
         + "</header>"
     )
 
@@ -380,13 +567,19 @@ def _shell(*, active: str, msg: str, data_url: str, fragments: dict, body: str,
     return f"""<!doctype html>
 <html lang="ru"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#090e15">
 <title>OpenRoute Admin</title><style>{_CSS}</style>
 </head><body><div class="wrap">
-{_header(active, fragments["srv-now"], csrf)}
+{_header(active, csrf)}
+<main class="main">
+<div class="topline"><div class="breadcrumb"><span class="crumb-root">Панель управления &nbsp;/&nbsp;</span>
+<strong>{"Прокси" if active == "proxies" else "Ключи"}</strong></div>
+<div class="top-meta"><span class="live-dot"></span> <span class="meta-label">Данные на</span>
+<span id="srv-now">{fragments["srv-now"]}</span></div></div>
 {banner}
 {body}
 {script}
-</div></body></html>"""
+</main></div></body></html>"""
 
 
 # --- Proxies page (/admin/ui) ----------------------------------------------
@@ -415,10 +608,17 @@ def render_proxies_page(*, status: dict, usage: dict, usage_by_proxy: dict,
     fr = render_proxies_fragments(status=status, usage=usage,
                                   usage_by_proxy=usage_by_proxy,
                                   recent=recent, csrf=csrf)
-    body = f"""<div class="cards" id="cards">{fr["cards"]}</div>
+    body = f"""<div class="hero page-enter">
+  <div class="hero-content"><div class="eyebrow">Система / обзор</div>
+    <h1>Пул прокси</h1><p>Состояние маршрутов, расход токенов и последние запросы в одном месте.</p>
+  </div><div class="hero-aside"><span class="live-dot"></span> Мониторинг активен</div>
+</div>
+<div class="cards page-enter" id="cards">{fr["cards"]}</div>
 
-<h2>Пул прокси</h2>
-<table>
+<section class="section page-enter" aria-labelledby="pool-title">
+<div class="section-head"><div class="section-title"><span class="section-icon" aria-hidden="true">◎</span>
+<h2 id="pool-title">Пул прокси</h2></div><span class="section-note">Управление маршрутами</span></div>
+<div class="table-scroll"><table>
 <thead>
 <tr><th>Прокси</th><th>Статус</th><th>Запросы</th><th>Ошибки</th>
 <th>Токены</th><th>Последняя ошибка</th><th>Действия</th></tr>
@@ -426,10 +626,12 @@ def render_proxies_page(*, status: dict, usage: dict, usage_by_proxy: dict,
 <tbody id="proxies-rows">
 {fr["proxies-rows"]}
 </tbody>
-</table>
+</table></div></section>
 
-<h2>Последние запросы</h2>
-<table>
+<section class="section page-enter" aria-labelledby="requests-title">
+<div class="section-head"><div class="section-title"><span class="section-icon" aria-hidden="true">↗</span>
+<h2 id="requests-title">Последние запросы</h2></div><span class="section-note">Журнал активности</span></div>
+<div class="table-scroll"><table>
 <thead>
 <tr><th>Время</th><th>Key</th><th>Модель</th><th>Статус</th><th>Задержка</th>
 <th>Токены</th><th>Прокси</th><th>Ошибка</th></tr>
@@ -437,7 +639,7 @@ def render_proxies_page(*, status: dict, usage: dict, usage_by_proxy: dict,
 <tbody id="logs-rows">
 {fr["logs-rows"]}
 </tbody>
-</table>"""
+</table></div></section>"""
     return _shell(active="proxies", msg=msg, data_url=f"{_PANEL}/data",
                   fragments=fr, body=body, csrf=csrf)
 
@@ -460,21 +662,37 @@ def render_keys_fragments(*, keys: list[dict], usage: dict, csrf: str) -> dict:
 def render_keys_page(*, keys: list[dict], usage: dict, csrf: str, msg: str = "") -> str:
     """Full HTML page «Ключи» (``/admin/ui/keys``)."""
     fr = render_keys_fragments(keys=keys, usage=usage, csrf=csrf)
-    body = f"""<h2>Добавить клиентский ключ</h2>
-<form class="add" method="post" action="{_PANEL}/keys/add">
+    body = f"""<div class="hero page-enter">
+  <div class="hero-content"><div class="eyebrow">Доступ / управление</div>
+    <h1>Клиентские ключи</h1><p>Выдавайте доступ, задавайте лимиты и отслеживайте использование ключей.</p>
+  </div><div class="hero-aside"><span class="live-dot"></span> Доступ под контролем</div>
+</div>
+<section class="section page-enter" aria-labelledby="add-title">
+<div class="section-head"><div class="section-title"><span class="section-icon" aria-hidden="true">＋</span>
+<h2 id="add-title">Добавить клиентский ключ</h2></div><span class="section-note">Новый доступ</span></div>
+<div class="form-content"><form class="add" method="post" action="{_PANEL}/keys/add">
   <input type="hidden" name="_csrf" value="{_esc(csrf)}">
-  <input type="text" class="wide" name="key" placeholder="sk-... (plaintext; сохраняется только sha256)" autocomplete="off">
-  <input type="text" name="key_id" placeholder="key_id (необязательно)" autocomplete="off">
-  <input type="text" name="name" placeholder="Имя (необязательно)" autocomplete="off">
-  <input type="text" name="rpm" placeholder="RPM (пусто = без лимита)" autocomplete="off">
-  <input type="text" name="tpm" placeholder="TPM (пусто = без лимита)" autocomplete="off">
-  <input type="text" name="models" placeholder="Модели через запятую (пусто = все)" autocomplete="off">
-  <label class="chk"><input type="checkbox" name="admin" value="1"> admin</label>
-  <button type="submit">Добавить</button>
-</form>
+  <div class="field wide"><label for="key">Ключ доступа</label>
+    <input id="key" type="text" name="key" placeholder="sk-..." autocomplete="off" required></div>
+  <div class="field"><label for="key_id">Key ID</label>
+    <input id="key_id" type="text" name="key_id" placeholder="Генерируется автоматически" autocomplete="off"></div>
+  <div class="field"><label for="key_name">Имя</label>
+    <input id="key_name" type="text" name="name" placeholder="Например, Frontend" autocomplete="off"></div>
+  <div class="field"><label for="rpm">RPM</label>
+    <input id="rpm" type="text" inputmode="numeric" name="rpm" placeholder="Без лимита" autocomplete="off"></div>
+  <div class="field"><label for="tpm">TPM</label>
+    <input id="tpm" type="text" inputmode="numeric" name="tpm" placeholder="Без лимита" autocomplete="off"></div>
+  <div class="field wide"><label for="models">Доступные модели</label>
+    <input id="models" type="text" name="models" placeholder="Через запятую; пусто — все модели" autocomplete="off"></div>
+  <div class="form-footer"><label class="check-field"><input type="checkbox" name="admin" value="1"> Администратор</label>
+    <span class="form-hint">Сохраняется только SHA-256 ключа</span>
+    <button type="submit">＋ &nbsp; Добавить ключ</button></div>
+</form></div></section>
 
-<h2>Клиентские ключи</h2>
-<table>
+<section class="section page-enter" aria-labelledby="keys-title">
+<div class="section-head"><div class="section-title"><span class="section-icon" aria-hidden="true">◇</span>
+<h2 id="keys-title">Клиентские ключи</h2></div><span class="section-note">Управление доступом</span></div>
+<div class="table-scroll"><table>
 <thead>
 <tr><th>Key ID</th><th>Имя</th><th>Admin</th><th>RPM</th><th>TPM</th>
 <th>Модели</th><th>Статус</th><th>Действия</th></tr>
@@ -482,10 +700,12 @@ def render_keys_page(*, keys: list[dict], usage: dict, csrf: str, msg: str = "")
 <tbody id="keys-rows">
 {fr["keys-rows"]}
 </tbody>
-</table>
+</table></div></section>
 
-<h2>Статистика по ключам</h2>
-<table>
+<section class="section page-enter" aria-labelledby="stats-title">
+<div class="section-head"><div class="section-title"><span class="section-icon" aria-hidden="true">↗</span>
+<h2 id="stats-title">Статистика по ключам</h2></div><span class="section-note">За всё время</span></div>
+<div class="table-scroll"><table>
 <thead>
 <tr><th>Key ID</th><th>Статус</th><th>Запросы</th><th>Ошибки</th>
 <th>Токены</th></tr>
@@ -493,7 +713,7 @@ def render_keys_page(*, keys: list[dict], usage: dict, csrf: str, msg: str = "")
 <tbody id="key-stats-rows">
 {fr["key-stats-rows"]}
 </tbody>
-</table>"""
+</table></div></section>"""
     return _shell(active="keys", msg=msg, data_url=f"{_PANEL}/keys/data",
                   fragments=fr, body=body, csrf=csrf)
 
@@ -509,14 +729,25 @@ def render_login_page(err: str = "") -> str:
     return f"""<!doctype html>
 <html lang="ru"><head>
 <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="theme-color" content="#090e15">
 <title>OpenRoute Admin — вход</title><style>{_CSS}</style>
-</head><body><div class="wrap"><div class="login-wrap"><div class="login-box">
-<h1>OpenRoute Admin</h1>
-<p class="sub">Введите пароль администратора</p>
+</head><body><div class="login-page">
+<aside class="login-visual">
+  <div class="login-brand"><span class="brand-mark" aria-hidden="true">OR</span> OpenRoute</div>
+  <div class="login-statement"><div class="eyebrow">Административная панель</div>
+    <h2>Каждый маршрут<br>под контролем.</h2>
+    <p>Единое пространство для управления прокси, ключами и активностью сервиса.</p>
+  </div><div class="login-foot">OPENROUTE &nbsp; / &nbsp; CONTROL PLANE</div>
+</aside>
+<main class="login-main"><div class="login-wrap"><div class="login-box">
+<div class="login-kicker">Защищённый доступ</div><h1>OpenRoute Admin</h1>
+<p class="sub">Введите пароль администратора, чтобы продолжить.</p>
 <form method="post" action="/login">
-  <input type="password" name="password" placeholder="Пароль"
+  <label for="password">Пароль</label>
+  <input id="password" type="password" name="password" placeholder="Введите пароль"
          autocomplete="current-password" autofocus required>
-  <button type="submit">Войти</button>
+  <button type="submit">Войти в панель &nbsp; ↗</button>
 </form>
 {err_html}
-</div></div></div></body></html>"""
+<div class="login-help">Доступ к панели защищён серверной сессией</div>
+</div></div></main></div></body></html>"""
