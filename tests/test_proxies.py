@@ -609,32 +609,38 @@ def test_mask_proxy_short_and_empty():
     assert mask_proxy(None) == "***"
 
 
-# --- egress groups (one exit IP, many purchased ports) ---------------------
+# --- quota buckets (one per purchased proxy URL) ---------------------------
 
 
-def test_egress_groups_merge_ports_of_one_ip_and_normalize_hosts():
+def test_quota_buckets_are_per_proxy_url_not_entry_ip():
+    """An IPv4 entry can exit via IPv6; never merge its ports into one bucket."""
     m = mgr(proxies=[
         "http://u:p@217.29.62.211:10077",
         "http://u:p@217.29.62.211:10078",
         "http://Proxy-B.INVALID:8080",
     ])
     groups = m.egress_groups()
-    assert [g.host for g in groups] == ["217.29.62.211", "proxy-b.invalid"]
-    assert len(groups[0].proxies) == 2
-    assert m.group_of("http://217.29.62.211:10078") is groups[0]
+    assert [g.host for g in groups] == [
+        "217.29.62.211:10077", "217.29.62.211:10078", "proxy-b.invalid:8080"]
+    assert all(len(g.proxies) == 1 for g in groups)
+    assert m.group_of("http://217.29.62.211:10078") is groups[1]
+    assert m.group_of("http://217.29.62.211:10078") is not groups[0]
     assert m.group_of("http://other:1") is None
 
 
-def test_egress_group_ipv6_uses_64_prefix():
+def test_quota_buckets_do_not_merge_ipv6_prefixes():
     m = mgr(proxies=[
         "http://[2001:db8:0:1::1]:8080",
         "http://[2001:db8:0:1::2]:8080",
         "http://[2001:db8:0:2::1]:8080",
     ])
     groups = m.egress_groups()
-    assert len(groups) == 2
-    assert len(groups[0].proxies) == 2
-    assert m.group_of("http://[2001:db8:0:1::2]:8080") is groups[0]
+    assert len(groups) == 3
+    assert [g.host for g in groups] == [
+        "[2001:db8:0:1::1]:8080", "[2001:db8:0:1::2]:8080",
+        "[2001:db8:0:2::1]:8080"]
+    assert all(len(g.proxies) == 1 for g in groups)
+    assert m.group_of("http://[2001:db8:0:1::2]:8080") is groups[1]
 
 
 def test_next_proxy_never_returns_parked_group_url():
@@ -665,31 +671,34 @@ def test_mark_success_never_clears_group_parking():
     assert m.next_proxy().url == "http://b:1"  # a stays parked
 
 
-def test_apply_proxies_preserves_parking_and_groups_on_refresh():
+def test_apply_proxies_preserves_parking_per_proxy_on_refresh():
     m = mgr(proxies=["http://10.0.0.1:1", "http://10.0.0.2:2"])
     g1, g2 = m.egress_groups()
     until = time.time() + 500
     m.mark_quota_exhausted(g1, until)
     m.mark_banned(g2, until)
 
-    # Refresh (same rows + a new purchased port on the same IP).
+    # Refresh: same rows + a new port on the same entry IP. The new port must
+    # NOT inherit the parked bucket of :1 (IPv4 entry != IPv6 exit).
     m.apply_proxies([
         ("http://10.0.0.1:1", True),
         ("http://10.0.0.1:3", True),
         ("http://10.0.0.2:2", True),
     ])
     groups = m.egress_groups()
-    assert len(groups) == 2
-    assert len(groups[0].proxies) == 2
+    assert [g.host for g in groups] == [
+        "10.0.0.1:1", "10.0.0.1:3", "10.0.0.2:2"]
+    assert [len(g.proxies) for g in groups] == [1, 1, 1]
     assert groups[0].quota_until == until
-    assert groups[1].banned_until == until
+    assert groups[1].quota_until == 0.0
+    assert groups[2].banned_until == until
 
-    # Removing the only URL of a group removes the group; siblings survive.
+    # Removing one URL removes only its own bucket.
     m.remove_proxy("http://10.0.0.1:1")
-    assert [g.host for g in m.egress_groups()] == ["10.0.0.1", "10.0.0.2"]
-    assert len(m.egress_groups()[0].proxies) == 1
+    assert [g.host for g in m.egress_groups()] == [
+        "10.0.0.1:3", "10.0.0.2:2"]
     m.remove_proxy("http://10.0.0.1:3")
-    assert [g.host for g in m.egress_groups()] == ["10.0.0.2"]
+    assert [g.host for g in m.egress_groups()] == ["10.0.0.2:2"]
 
 
 def test_earliest_ready_seconds_includes_parked_group_even_if_excluded():
@@ -725,17 +734,12 @@ def test_no_ready_kind_empty_excluded_saturated():
     assert ei.value.retry_after == pytest.approx(30.0, abs=2.0)
 
 
-def test_next_proxy_in_group_round_robin_and_exclude():
-    m = mgr(proxies=["http://10.0.0.1:1", "http://10.0.0.1:2", "http://10.0.0.2:3"])
+def test_next_proxy_in_group_returns_its_only_proxy():
+    m = mgr(proxies=["http://10.0.0.1:1"])
     g = m.egress_groups()[0]
-    assert [m.next_proxy_in_group(g).url for _ in range(4)] == [
-        "http://10.0.0.1:1", "http://10.0.0.1:2",
-        "http://10.0.0.1:1", "http://10.0.0.1:2",
-    ]
-    assert m.next_proxy_in_group(g, exclude={"http://10.0.0.1:1"}).url == \
-        "http://10.0.0.1:2"
+    assert m.next_proxy_in_group(g).url == "http://10.0.0.1:1"
     with pytest.raises(NoReadyProxyError):
-        m.next_proxy_in_group(g, exclude={"http://10.0.0.1:1", "http://10.0.0.1:2"})
+        m.next_proxy_in_group(g, exclude={"http://10.0.0.1:1"})
 
 
 @pytest.mark.asyncio
@@ -764,9 +768,23 @@ def test_status_adds_group_info_without_breaking_proxy_order():
     st = m.status()
     assert [row["proxy"] for row in st["proxies"]] == [
         "10.0.0.1:1", "10.0.0.1:2", "10.0.0.2:3"]
-    assert st["egress_groups_total"] == 2
-    assert st["egress_groups_ready"] == 2
+    assert st["egress_groups_total"] == 3
+    assert st["egress_groups_ready"] == 3
     assert st["egress_groups_quota_parked"] == 0
     assert st["egress_groups_banned"] == 0
-    assert [g["ip"] for g in st["egress_groups"]] == ["10.0.0.1", "10.0.0.2"]
-    assert st["egress_groups"][0]["proxy_count"] == 2
+    assert [g["ip"] for g in st["egress_groups"]] == [
+        "10.0.0.1:1", "10.0.0.1:2", "10.0.0.2:3"]
+    assert all(g["proxy_count"] == 1 for g in st["egress_groups"])
+
+
+def test_status_exposes_per_proxy_quota_and_ready_count():
+    m = mgr(proxies=["http://10.0.0.1:1", "http://10.0.0.2:2"])
+    g = m.egress_groups()[0]
+    m.mark_quota_exhausted(g, time.time() + 3600)
+    st = m.status()
+    parked, healthy = st["proxies"]
+    assert parked["egress_group"] == "10.0.0.1:1"
+    assert parked["quota_seconds_left"] > 3500
+    assert healthy["quota_seconds_left"] == 0.0
+    assert st["proxies_ready"] == 1
+    assert st["egress_groups_quota_parked"] == 1

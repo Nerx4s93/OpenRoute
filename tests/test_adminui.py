@@ -84,6 +84,8 @@ class FakeState:
 
     def __init__(self) -> None:
         self.proxies: dict[str, bool] = {}  # full URL -> enabled (manual flag)
+        self.quota: dict[str, float] = {}  # full URL -> seconds left
+        self.banned: dict[str, float] = {}  # full URL -> seconds left
         self.keys: dict[str, dict] = {}  # key_hash -> row
         self.usage_by_proxy: dict[str, dict] = {}  # masked -> stats
         self.usage_by_key: dict[str, dict] = {}  # key_id -> stats
@@ -143,6 +145,8 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
     def proxy_status() -> dict:
         rows = []
         for url, enabled in state.proxies.items():
+            quota = state.quota.get(url, 0.0)
+            banned = state.banned.get(url, 0.0)
             rows.append({
                 "proxy": mask_proxy(url),          # host:port (display + usage key)
                 "url": f"http://{mask_proxy(url)}",  # masked
@@ -155,14 +159,29 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
                 "cooldown_seconds_left": 0.0,
                 "rpm_window": 0,
                 "rpm_capped": False,
+                "egress_group": mask_proxy(url),
+                "quota_seconds_left": quota,
+                "banned_seconds_left": banned,
                 "last_error": None,
             })
+        ready = sum(
+            1 for p in rows
+            if p["enabled"] and not p["quota_seconds_left"]
+            and not p["banned_seconds_left"]
+        )
         return {
             "proxies_total": len(rows),
             "proxies_enabled": sum(1 for p in rows if p["enabled"]),
+            "proxies_ready": ready,
             "proxies_manually_disabled": sum(1 for p in rows if p["manual"]),
             "proxies_cooling": 0,
             "proxies_rpm_capped": 0,
+            "egress_groups_total": len(rows),
+            "egress_groups_ready": ready,
+            "egress_groups_quota_parked": sum(
+                1 for p in rows if p["quota_seconds_left"] > 0),
+            "egress_groups_banned": sum(
+                1 for p in rows if p["banned_seconds_left"] > 0),
             "last_proxies_fetch": None,
             "proxies": rows,
         }
@@ -542,6 +561,26 @@ def test_proxy_rows_show_masked_hostport(panel):
     assert "10.0.0.1:3128" in html               # masked host:port in the table
     # the table cell shows host:port, not the full credentialised URL
     assert 'class="mono">10.0.0.1:3128<' in html
+
+
+def test_proxy_quota_and_ban_are_visible(panel):
+    """Daily quota parking is an operator-facing state, not just an API field."""
+    login_ok(panel)
+    quota_url = "http://u:p@quota:8080"
+    ban_url = "http://u:p@banned:8080"
+    seed_proxy(panel, quota_url)
+    seed_proxy(panel, ban_url)
+    panel.state.quota[quota_url] = 2 * 3600
+    panel.state.banned[ban_url] = 125
+
+    data = panel.client.get("/admin/ui/data").json()
+    rows = data["proxies-rows"]
+    assert "лимит 2ч 00м" in rows
+    assert "бан 2м" in rows
+    # The «ready» card no longer counts parked proxies; the quota card shows 1/2.
+    assert "0/2" in data["cards"]
+    assert "1 / 2" in data["cards"]
+    assert "Прокси в лимите" in data["cards"]
 
 
 def test_ui_add_key_validation(panel):

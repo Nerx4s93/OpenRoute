@@ -130,7 +130,7 @@ h1 { margin: 7px 0 5px; font-size: clamp(27px, 3vw, 38px); line-height: 1.16;
   color: #d6f6eb; font-size: 11px; font-weight: 650; white-space: nowrap; }
 .msg { margin: 0 0 22px; padding: 12px 16px; border: 1px solid #8de9d244;
   background: #8de9d214; color: #b5f4e3; border-radius: 10px; animation: rise .35s ease both; }
-.cards { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: 13px;
+.cards { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 13px;
   margin: 0 0 28px; }
 .card { position: relative; overflow: hidden; min-height: 136px; padding: 20px 19px 16px;
   background: var(--surface); border: 1px solid var(--line); border-radius: 15px;
@@ -146,7 +146,7 @@ h1 { margin: 7px 0 5px; font-size: clamp(27px, 3vw, 38px); line-height: 1.16;
 .card .lbl { margin-top: 4px; color: var(--muted); font-size: 11px; font-weight: 600; }
 .card:nth-child(1) { --accent: #91e8ce; } .card:nth-child(2) { --accent: #92b9ff; }
 .card:nth-child(3) { --accent: #ff9b9b; } .card:nth-child(4) { --accent: #c9b1ff; }
-.card:nth-child(5) { --accent: #f5c77a; }
+.card:nth-child(5) { --accent: #f5c77a; } .card:nth-child(6) { --accent: #ffb38a; }
 .section { margin: 0 0 22px; overflow: hidden; background: var(--surface);
   border: 1px solid var(--line); border-radius: 15px; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 15px;
@@ -307,6 +307,8 @@ form.add button:hover, .login-box button[type=submit]:hover {
 # so the renderer keeps working if the gateway adds such a flag later.
 _STATE_LABELS = {
     "ok": ("ok", "b-ok"),
+    "quota": ("лимит", "b-warn"),
+    "ban": ("бан", "b-err"),
     "cooldown": ("cooldown", "b-warn"),
     "rpm": ("RPM-кап", "b-warn"),
     "noproxy": ("нет в пуле", "b-warn"),
@@ -323,6 +325,10 @@ def _proxy_state(s: dict) -> str:
         return "off"
     if not s.get("enabled", True):
         return "noproxy"
+    if (s.get("banned_seconds_left") or 0) > 0:
+        return "ban"
+    if (s.get("quota_seconds_left") or 0) > 0:
+        return "quota"
     if (s.get("cooldown_seconds_left") or 0) > 0:
         return "cooldown"
     if s.get("rpm_capped"):
@@ -353,12 +359,31 @@ def _proxy_identity(s: dict) -> str:
     return candidates[0] if candidates else ""
 
 
+def _duration_label(seconds: object) -> str:
+    """Compact remaining-time label for quota/ban badges."""
+    try:
+        total = max(0, int(float(seconds or 0)))
+    except (TypeError, ValueError):
+        total = 0
+    if total < 60:
+        return "<1м"
+    hours, rest = divmod(total, 3600)
+    minutes = rest // 60
+    if hours:
+        return f"{hours}ч {minutes:02d}м"
+    return f"{minutes}м"
+
+
 def _proxy_rows(proxies: list[dict], usage: dict, csrf: str) -> str:
     rows = []
     for s in proxies:
         state = _proxy_state(s)
         label, cls = _STATE_LABELS[state]
-        if state == "cooldown":
+        if state == "quota":
+            label = f"лимит {_duration_label(s.get('quota_seconds_left'))}"
+        elif state == "ban":
+            label = f"бан {_duration_label(s.get('banned_seconds_left'))}"
+        elif state == "cooldown":
             label = f"cooldown {float(s.get('cooldown_seconds_left') or 0):.0f}s"
         u = usage.get(_proxy_display(s), {}) or {}
         # Requests/errors come from the persistent request log (all-time), not
@@ -492,6 +517,9 @@ def _log_rows(recent: list[dict]) -> str:
 
 
 def _cards_html(status: dict, total: dict) -> str:
+    ready = status.get("proxies_ready", status.get("proxies_enabled", 0))
+    quota_parked = status.get("egress_groups_quota_parked", 0)
+    groups = status.get("egress_groups_total", 0)
     return (
         f'<div class="card"><div class="glyph">↗</div><div class="num">{_num(total.get("requests", 0))}</div>'
         f'<div class="lbl">Запросов всего</div></div>'
@@ -499,10 +527,12 @@ def _cards_html(status: dict, total: dict) -> str:
         f'<div class="lbl">Токенов потрачено</div></div>'
         f'<div class="card"><div class="glyph">!</div><div class="num">{_num(total.get("errors", 0))}</div>'
         f'<div class="lbl">Ошибок</div></div>'
-        f'<div class="card"><div class="glyph">◎</div><div class="num">{status.get("proxies_enabled", 0)}/{status.get("proxies_total", 0)}</div>'
+        f'<div class="card"><div class="glyph">◎</div><div class="num">{ready}/{status.get("proxies_total", 0)}</div>'
         f'<div class="lbl">Прокси в ротации</div></div>'
         f'<div class="card"><div class="glyph">◷</div><div class="num">{status.get("proxies_cooling", 0)} / {status.get("proxies_manually_disabled", 0)}</div>'
         f'<div class="lbl">В cooldown / выключено</div></div>'
+        f'<div class="card"><div class="glyph">⊘</div><div class="num">{quota_parked} / {groups}</div>'
+        f'<div class="lbl">Прокси в лимите</div></div>'
     )
 
 

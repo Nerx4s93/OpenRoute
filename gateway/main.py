@@ -29,15 +29,15 @@ Request flow for ``ANY /v1/{rest:path}``:
    when sticky sessions are enabled, else ``ProxyManager.next_proxy(exclude=tried)``:
    * build the upstream request with gate headers/body (:mod:`gateway.opencode`),
    * on ``httpx.HTTPError`` -> ``mark_failure`` + backoff + next proxy,
-   * on ``429 FreeUsageLimitError`` -> park the whole egress group until the
-     next 00:00 UTC, evacuate its sessions, retry on another group,
+   * on ``429 FreeUsageLimitError`` -> park that proxy's quota bucket until
+     the next 00:00 UTC, evacuate its sessions, retry on another proxy,
    * on any other 429 -> pass the upstream body + ``Retry-After`` through to
      the client (no cooldown, parking or rotation),
    * on 401 / 403 with a body-level ``FreeTierError`` verdict (the upstream
      gate: "not from OpenCode") -> pass the verdict through to the client:
      every proxy answers the same, so retrying would only burn the pool,
-   * on ``403 abusive traffic`` -> ban the whole egress group, evacuate its
-     sessions, retry on another group,
+   * on ``403 abusive traffic`` -> ban that proxy's quota bucket, evacuate
+     its sessions, retry on another proxy,
    * on 5xx / other 401 / 403 -> ``mark_failure`` + next proxy,
    * other statuses (2xx/4xx) are the client's answer,
 6. stream via ``StreamingResponse`` (SSE, no buffering) or convert, or return
@@ -714,9 +714,11 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                 await upstream.aclose()
                 retry_after = opencode.parse_retry_after(upstream)
                 if opencode.is_free_usage_limit(upstream_body_429):
-                    # Daily per-exit-IP quota: park the WHOLE IP group until the
-                    # next 00:00 UTC (+ margin), then evacuate its sessions and
-                    # continue this request on another ready group.
+                    # Daily quota: park this proxy's quota bucket until the next
+                    # 00:00 UTC (+ margin), then evacuate its sessions and
+                    # continue this request on another ready proxy. Buckets are
+                    # per proxy URL: an IPv4 entry may exit through IPv6, so
+                    # merging by entry IP would park unused proxies.
                     wait = max(opencode.seconds_to_utc_midnight(),
                                retry_after or 0.0) + settings.quota_reset_margin_seconds
                     until = time.time() + wait
@@ -734,14 +736,14 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                         if not parked:
                             manager.mark_quota_exhausted(group, until)
                         logger.warning(
-                            "Proxy %s got FreeUsageLimitError: egress group %s parked "
+                            "Proxy %s got FreeUsageLimitError: quota bucket %s parked "
                             "for %.0fs (until %.0f), sessions evacuated",
                             mask_proxy(proxy.url), group.host, wait, until,
                         )
                     continue
-                # Any other 429 (provider/key/per-minute/unknown) is NOT an
-                # exit-IP property: pass it through without cooldown, parking or
-                # rotation.
+                # Any other 429 (provider/key/per-minute/unknown) is not a
+                # daily-quota verdict for this proxy: pass it through without
+                # cooldown, parking or rotation.
                 logger.warning(
                     "Proxy %s got HTTP 429 (type=%s) — passing through without parking",
                     mask_proxy(proxy.url), opencode.error_type(upstream_body_429))
@@ -771,9 +773,9 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                                  error=rejection)
                     return _openai_error(status, rejection, "upstream_error")
                 if status == 403 and opencode.is_abusive_ban(upstream_body_403):
-                    # Abusive-traffic ban is an exit-IP property: ban the whole
-                    # group, evacuate its sessions and retry this request on a
-                    # different IP.
+                    # Abusive-traffic ban applies to this proxy's quota bucket:
+                    # ban it, evacuate its sessions and retry this request on a
+                    # different proxy.
                     until = time.time() + settings.abusive_ban_seconds
                     group = manager.group_of(proxy)
                     if group is not None:
@@ -789,7 +791,7 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                         if not banned:
                             manager.mark_banned(group, until)
                         logger.warning(
-                            "Proxy %s got abusive-traffic 403: egress group %s "
+                            "Proxy %s got abusive-traffic 403: quota bucket %s "
                             "banned for %.0fs (until %.0f), sessions evacuated",
                             mask_proxy(proxy.url), group.host,
                             settings.abusive_ban_seconds, until,

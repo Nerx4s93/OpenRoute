@@ -3,7 +3,9 @@
 This is the direct analogue of ``NVRoute/app/accounts.py`` — the key difference
 is that a pool member IS an HTTP(S) proxy (there is no separate token)::
 
-    Proxy (one ``http://user:pass@host:port``) -> one opencode.ai quota bucket
+    Proxy (one ``http://user:pass@host:port``) -> one opencode.ai quota bucket.
+    Do not merge buckets by entry IP: an IPv4 entry may exit through an
+    unrelated IPv6 address, so only the purchased proxy URL is a safe key.
 
 CONTRACT (stable signatures used by ``main.py``):
 
@@ -26,7 +28,6 @@ which does not count against the chat quota).
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import logging
 import re
 import time
@@ -153,46 +154,45 @@ class Proxy:
         return not self.manually_disabled
 
 
-def canonical_exit_host(proxy_or_url: object) -> str:
-    """Canonical egress-group key for a proxy URL / :class:`Proxy`.
+def canonical_quota_key(proxy_or_url: object) -> str:
+    """Stable per-proxy quota-bucket key.
 
-    Upstream quota and abusive bans are keyed by **exit IP**, not by the
-    purchased ``host:port``: two ports on one IP are one quota bucket. The key
-    is therefore the URL host, lowercased; IP literals are normalised with
-    :mod:`ipaddress` and IPv6 is truncated to ``/64`` (matching the upstream).
-    Empty/unparseable input yields ``""``.
+    The upstream daily quota is an exit-IP property, but the exit IP is NOT
+    the purchased proxy host: an IPv4 entry can exit through a different IPv6
+    address, and different ports on one entry IPv4 can have unrelated IPv6
+    exits. Grouping by the entry host therefore parks healthy proxies.
+
+    The only safe local key is the purchased endpoint itself: ``host:port``
+    with credentials stripped, lowercased and IPv6 bracketed. Empty or
+    unparseable input yields ``""``.
     """
     raw = getattr(proxy_or_url, "url", proxy_or_url)
     text = str(raw or "").strip()
     if not text:
         return ""
-    host: str | None = None
     try:
-        host = httpx.URL(text).host
+        u = httpx.URL(text)
+        if u.host and u.port is not None:
+            host = u.host.lower()
+            if ":" in host:
+                host = f"[{host}]"
+            return f"{host}:{u.port}"
     except Exception:
-        host = None
-    if not host:
-        # Best effort for malformed/partial URLs: strip userinfo and port.
-        tail = text.split("@")[-1]
-        if tail.startswith("["):
-            host = tail[1:].split("]", 1)[0]
-        else:
-            host = tail.rsplit(":", 1)[0]
-    host = (host or "").strip().strip("[]").lower()
-    if not host:
-        return ""
-    try:
-        ip = ipaddress.ip_address(host)
-    except ValueError:
-        return host
-    if ip.version == 6:
-        return str(ipaddress.ip_network((ip, 64), strict=False))
-    return str(ip)
+        pass
+    tail = text.split("@")[-1]
+    if "://" in tail:
+        tail = tail.split("://", 1)[1]
+    return tail.lower().rstrip("/")
 
 
 @dataclass
 class EgressGroup:
-    """One exit IP (egress): every purchased proxy URL that shares it.
+    """One quota bucket: one purchased proxy endpoint.
+
+    Upstream quota/abusive bans are keyed by exit IP, but the exit IP cannot be
+    derived from the entry URL (IPv4 entry may use IPv6 egress). We therefore
+    keep one bucket per proxy endpoint and never merge by the entry host.
+    ``host`` holds the non-secret ``host:port`` key.
 
     ``quota_until`` / ``banned_until`` are ``time.time()`` (wall-clock) epochs:
     a daily upstream quota reset is tied to the UTC calendar and the values are
@@ -227,7 +227,7 @@ class ProxyManager:
         self._s = settings
         self.proxies: list[Proxy] = []
         self._groups: list[EgressGroup] = []
-        self._group_by_host: dict[str, EgressGroup] = {}
+        self._group_by_key: dict[str, EgressGroup] = {}
         self._group_by_url: dict[str, EgressGroup] = {}
         self.last_fetch_status: Optional[str] = None
         self.db = None  # optional ProxyDB (duck-typed); bound via bind_db()
@@ -264,58 +264,58 @@ class ProxyManager:
         self._rebuild_groups()
 
     def _rebuild_groups(self) -> None:
-        """Rebuild egress groups from ``self.proxies``, preserving parking.
+        """Rebuild quota buckets from ``self.proxies``, preserving parking.
 
         A refresh must not lose a ``quota_until``/``banned_until`` set between
-        two fetches: the state is carried over by canonical host, not by URL
-        object. First-appearance order follows the stable ``self.proxies``
+        two fetches: the state is carried over by canonical proxy key, not by
+        URL object. First-appearance order follows the stable ``self.proxies``
         order. Runtime ``Proxy`` objects (and therefore cooldown/RPM state) are
         already preserved by :meth:`apply_proxies`.
         """
         previous = {g.host: g for g in self._groups}
         groups: list[EgressGroup] = []
-        by_host: dict[str, EgressGroup] = {}
+        by_key: dict[str, EgressGroup] = {}
         by_url: dict[str, EgressGroup] = {}
         for proxy in self.proxies:
-            host = canonical_exit_host(proxy)
-            group = by_host.get(host)
+            key = canonical_quota_key(proxy)
+            group = by_key.get(key)
             if group is None:
-                old = previous.get(host)
+                old = previous.get(key)
                 group = EgressGroup(
-                    host=host,
+                    host=key,
                     quota_until=old.quota_until if old else 0.0,
                     banned_until=old.banned_until if old else 0.0,
                     _rr=old._rr if old else 0,
                 )
-                by_host[host] = group
+                by_key[key] = group
                 groups.append(group)
             group.proxies.append(proxy)
             by_url[proxy.url] = group
         for group in groups:
             group._rr = group._rr % len(group.proxies) if group.proxies else 0
         self._groups = groups
-        self._group_by_host = by_host
+        self._group_by_key = by_key
         self._group_by_url = by_url
 
     def egress_groups(self) -> list[EgressGroup]:
         """Egress groups in stable (first-appearance) order."""
         return list(self._groups)
 
-    def group_by_host(self, host: str) -> Optional[EgressGroup]:
-        """Group by canonical host key (see :func:`canonical_exit_host`)."""
-        return self._group_by_host.get((host or "").lower())
+    def group_by_key(self, key: str) -> Optional[EgressGroup]:
+        """Group by canonical quota key (see :func:`canonical_quota_key`)."""
+        return self._group_by_key.get((key or "").lower())
 
     def group_of(self, proxy_or_url: object) -> Optional[EgressGroup]:
         """Egress group of a :class:`Proxy` or URL; ``None`` if not in pool.
 
-        Falls back to the canonical host so a URL that was just removed still
-        resolves to its IP group when another purchased port on that IP remains.
+        Falls back to the canonical key so a URL that was just removed still
+        resolves to its quota bucket during the same refresh cycle.
         """
         raw = getattr(proxy_or_url, "url", proxy_or_url)
         group = self._group_by_url.get(str(raw))
         if group is not None:
             return group
-        return self._group_by_host.get(canonical_exit_host(raw))
+        return self._group_by_key.get(canonical_quota_key(raw))
 
     def remove_proxy(self, proxy: str) -> bool:
         """Remove from the pool; client is closed in the background."""
@@ -627,7 +627,7 @@ class ProxyManager:
         return any(self._proxy_ready(p, now_mono) for p in group.proxies)
 
     def mark_quota_exhausted(self, group: EgressGroup, until: float) -> None:
-        """Park the WHOLE egress group (daily FreeUsageLimit) until an epoch.
+        """Park this proxy's quota bucket (daily FreeUsageLimit) until an epoch.
 
         Only forward movement: a shorter value never shortens existing parking.
         ``mark_success``/health probes never clear it (only expiry does).
@@ -635,7 +635,7 @@ class ProxyManager:
         group.quota_until = max(group.quota_until, float(until))
 
     def mark_banned(self, group: EgressGroup, until: float) -> None:
-        """Ban the whole egress group (abusive traffic) until a wall-clock epoch."""
+        """Ban this proxy's quota bucket (abusive traffic) until a wall-clock epoch."""
         group.banned_until = max(group.banned_until, float(until))
 
     def _ready_urls(self, group: EgressGroup, exclude: set[str],
@@ -649,8 +649,8 @@ class ProxyManager:
         """Uniform round-robin over ready proxies; never returns ``None``.
 
         Ready = enabled (in pool, not manually disabled), not disabled, not in
-        cooldown, not on the RPM cap, not in ``exclude``, and its whole egress
-        group is not parked (``quota_until`` / ``banned_until`` in the future).
+        cooldown, not on the RPM cap, not in ``exclude``, and its quota bucket
+        is not parked (``quota_until`` / ``banned_until`` in the future).
         The ``_rr`` index lives over the STABLE ``self.proxies`` list (not over
         the recomputed ready subset): each pick walks forward from ``_rr``,
         skipping non-ready entries, and leaves ``_rr`` right after the chosen
@@ -703,7 +703,7 @@ class ProxyManager:
 
     def next_proxy_in_group(self, group: EgressGroup,
                             exclude: Optional[set[str]] = None) -> Proxy:
-        """Round-robin over ready URLs of ONE egress group.
+        """Round-robin over ready URLs of one quota bucket.
 
         Unlike :meth:`next_proxy`, this never crosses group boundaries: affinity
         uses it to keep a session on its exit IP. Raises ``NoReadyProxyError``
@@ -888,16 +888,18 @@ class ProxyManager:
         """Separate counters (do not mix "dead" with "manually disabled").
 
         CONTRACT (main.py /health): ``proxies_total`` — every row;
-        ``proxies_enabled`` — in rotation (not manually disabled, not dead);
-        ``proxies_cooling`` — in cooldown; ``proxies_rpm_capped`` — hit the
-        local rolling RPM cap (may overlap with cooling). Per-proxy:
-        ``rpm_window`` — current RPM load, ``rpm_capped`` — whether capped.
+        ``proxies_enabled`` — manually enabled (not dead); ``proxies_ready`` —
+        actually selectable now (enabled, not cooling/RPM-capped, quota bucket
+        not parked); ``proxies_cooling`` — in cooldown; ``proxies_rpm_capped``
+        — hit the local rolling RPM cap (may overlap with cooling). Per-proxy:
+        ``rpm_window`` — current RPM load, ``rpm_capped`` — whether capped,
+        ``quota_seconds_left`` / ``banned_seconds_left`` — bucket parking.
 
         Additive egress-group contract: ``egress_groups_total`` /
         ``egress_groups_ready`` / ``egress_groups_quota_parked`` /
         ``egress_groups_banned`` plus an ``egress_groups`` list with host-only
-        data (never credentials). The order and keys of ``proxies`` are
-        unchanged (admin templates zip it with ``manager.proxies``).
+        data (never credentials). One group == one proxy endpoint, so group
+        quota fields are also mirrored on each proxy row for the admin UI.
         """
         now = time.monotonic()
         now_wall = time.time()
@@ -905,10 +907,42 @@ class ProxyManager:
         groups = self.egress_groups()
         group_ready = [self.group_is_ready(g, now_mono=now, now_wall=now_wall)
                        for g in groups]
+        proxy_rows = []
+        for p in self.proxies:
+            group = self.group_of(p)
+            proxy_rows.append({
+                "proxy": mask_proxy(p.url),
+                "url": _masked_url(p.url),
+                "enabled": p.enabled,
+                "requests": p.requests,
+                "errors": p.errors,
+                "consecutive_errors": p.consecutive_errors,
+                "disabled": p.disabled,
+                "manual": p.manually_disabled,
+                "cooldown_seconds_left": (
+                    round(p.cooldown_until - now, 1) if p.cooldown_until > now else 0.0
+                ),
+                "rpm_window": len(p._rpm) if self._s.openroute_rpm_limit > 0 else 0,
+                "rpm_capped": self._rpm_capped(p, now),
+                "egress_group": group.host if group else None,
+                "quota_seconds_left": (
+                    round(max(0.0, group.quota_until - now_wall), 1) if group else 0.0
+                ),
+                "banned_seconds_left": (
+                    round(max(0.0, group.banned_until - now_wall), 1) if group else 0.0
+                ),
+                "last_error": p.last_error,
+            })
         return {
             "provider": PROVIDER_NAME,
             "proxies_total": len(self.proxies),
             "proxies_enabled": len(enabled),
+            "proxies_ready": sum(
+                1 for p in enabled
+                if self._proxy_ready(p, now)
+                and (group := self.group_of(p)) is not None
+                and not self._group_parked(group, now_wall)
+            ),
             "proxies_dead": sum(1 for p in self.proxies if p.disabled),
             "proxies_manually_disabled": sum(1 for p in self.proxies if p.manually_disabled),
             "proxies_cooling": sum(1 for p in enabled if p.cooldown_until > now),
@@ -919,25 +953,7 @@ class ProxyManager:
             "egress_groups_banned": sum(1 for g in groups if g.banned_until > now_wall),
             # Defensive: never expose userinfo/DSN credentials in the snapshot.
             "last_proxies_fetch": redact_url(self.last_fetch_status) if self.last_fetch_status else None,
-            "proxies": [
-                {
-                    "proxy": mask_proxy(p.url),
-                    "url": _masked_url(p.url),
-                    "enabled": p.enabled,
-                    "requests": p.requests,
-                    "errors": p.errors,
-                    "consecutive_errors": p.consecutive_errors,
-                    "disabled": p.disabled,
-                    "manual": p.manually_disabled,
-                    "cooldown_seconds_left": (
-                        round(p.cooldown_until - now, 1) if p.cooldown_until > now else 0.0
-                    ),
-                    "rpm_window": len(p._rpm) if self._s.openroute_rpm_limit > 0 else 0,
-                    "rpm_capped": self._rpm_capped(p, now),
-                    "last_error": p.last_error,
-                }
-                for p in self.proxies
-            ],
+            "proxies": proxy_rows,
             "egress_groups": [
                 {
                     "ip": g.host,

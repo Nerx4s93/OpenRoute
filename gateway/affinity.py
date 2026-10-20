@@ -1,11 +1,11 @@
-"""Sticky sessions over egress groups with score balancing (S + R + T).
+"""Sticky sessions over per-proxy quota buckets with score balancing (S + R + T).
 
-One chat conversation is bound **permanently** to one purchased exit IP (an
-:class:`gateway.proxies.EgressGroup`): the binding is never moved because another
-IP became less loaded. Only a quota reset, an abusive ban, or an admin
-delete/disable invalidates it.
+One chat conversation is bound **permanently** to one purchased proxy URL (an
+:class:`gateway.proxies.EgressGroup`, one endpoint per bucket): the binding is
+never moved because another proxy became less loaded. Only a quota reset, an
+abusive ban, or an admin delete/disable invalidates it.
 
-New sessions (and sessions evacuated from a parked group) are balanced with:
+New sessions (and sessions evacuated from a parked bucket) are balanced with:
 
 - ``S`` — number of bound sessions per group (completed sessions keep their
   slot; this is the plan's default, see ``_aggregate``),
@@ -445,9 +445,8 @@ class AffinityManager:
                    exclude: Optional[set[str]] = None) -> None:
         """Lazily validate the permanent binding against the runtime pool.
 
-        - URL missing / disabled / manually disabled -> rebind (prefer another
-          purchased port of the SAME exit IP when it exists),
-        - whole group parked -> evacuate it synchronously,
+        - URL missing / disabled / manually disabled -> rebind to a ready proxy,
+        - quota bucket parked -> evacuate it synchronously,
         - no proxy at all -> try to bind by score.
         A merely cooling/RPM-capped URL stays bound: that is a temporary
         fallback for the current request, not a permanent move.

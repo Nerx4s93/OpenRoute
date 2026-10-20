@@ -27,10 +27,10 @@ Session ids have a strict format (``packages/schema/src/identifier.ts``):
 of the same shape but *without* the hex prefix -> 403. See
 :func:`new_session_id`.
 
-Free-tier quota is keyed by client IP; for IPv6 the server truncates to the
-first 4 groups (/64). Therefore one proxy exit address == one quota bucket.
-Nothing in this module deals with quotas directly — that is
-:mod:`gateway.proxies`.
+Free-tier quota is keyed by the client exit IP; for IPv6 the server truncates
+to the first 4 groups (/64). The exit IP cannot be derived from an IPv4 proxy
+entry, so the gateway parks one purchased proxy URL at a time (see
+:mod:`gateway.proxies`). Nothing in this module deals with quotas directly.
 """
 
 from __future__ import annotations
@@ -326,7 +326,7 @@ def is_free_usage_limit(body: bytes | str | None) -> bool:
 
     That is the upstream's per-exit-IP DAILY quota (reset at 00:00 UTC). Other
     429 bodies (provider/per-key/per-minute/unknown) must pass through without
-    parking the egress group.
+    parking that proxy's quota bucket.
     """
     return error_type(body) == "FreeUsageLimitError"
 

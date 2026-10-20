@@ -125,7 +125,7 @@ def test_weight_sessions_only_picks_least_sessions():
 def test_tie_break_does_not_stick_to_one_group():
     aff, manager, _ = make_affinity()
     picks = [aff._pick_group(set()).host for _ in range(6)]
-    assert picks == ["a.invalid", "b.invalid", "c.invalid"] * 2
+    assert picks == ["a.invalid:1", "b.invalid:1", "c.invalid:1"] * 2
 
 
 def test_new_session_skips_parked_group():
@@ -384,7 +384,7 @@ def test_status_is_host_only_and_never_leaks_credentials():
     blob = str(aff.status())
     assert "supersecret" not in blob and "user:" not in blob
     group = aff.status()["egress_groups"][0]
-    assert group["ip"] == "10.0.0.1"
+    assert group["ip"] == "10.0.0.1:3128"
     assert group["sessions"] == 1
     assert group["proxy_count"] == 1
     assert group["score"] >= 0.0

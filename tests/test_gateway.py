@@ -280,7 +280,7 @@ def test_admin_status_exposes_host_only_affinity_groups(make_gateway):
     assert bound["proxy_count"] == 1
     assert bound["requests_1h"] == 1 and bound["tokens_1h"] == 8
     # Host-only snapshot: masked host:port entries, no scheme or credentials.
-    assert bound["proxies"] == [f"{bound['host']}:8080"]
+    assert bound["proxies"] == [bound["host"]]
     assert "://" not in json.dumps(aff)
 
 
