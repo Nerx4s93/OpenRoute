@@ -778,28 +778,26 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                                  error=rejection)
                     return _openai_error(status, rejection, "upstream_error")
                 if status == 403 and opencode.is_abusive_ban(upstream_body_403):
-                    # Abusive-traffic ban applies to this proxy's quota bucket:
-                    # ban it, evacuate its sessions and retry this request on a
-                    # different proxy.
-                    until = time.time() + settings.abusive_ban_seconds
+                    # Abusive-traffic ban applies to this proxy's bucket for
+                    # ever: persist it, evacuate its sessions and retry this
+                    # request on a different proxy.
                     group = manager.group_of(proxy)
                     if group is not None:
                         banned = False
                         if affinity is not None and settings.affinity_enabled:
                             try:
                                 await affinity.evacuate(
-                                    group, banned_until=until, exclude=tried)
+                                    group, permanent_ban=True, exclude=tried)
                                 banned = True
                             except Exception:
                                 logger.exception(
                                     "Affinity evacuation failed; banning group only")
                         if not banned:
-                            manager.mark_banned(group, until)
+                            manager.mark_permanently_banned(group)
                         logger.warning(
-                            "Proxy %s got abusive-traffic 403: quota bucket %s "
-                            "banned for %.0fs (until %.0f), sessions evacuated",
+                            "Proxy %s got abusive-traffic 403: bucket %s "
+                            "permanently banned, sessions evacuated",
                             mask_proxy(proxy.url), group.host,
-                            settings.abusive_ban_seconds, until,
                         )
                     else:
                         manager.mark_failure(proxy, "upstream abusive traffic 403")

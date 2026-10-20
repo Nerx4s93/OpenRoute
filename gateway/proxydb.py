@@ -6,16 +6,18 @@ waits for in-flight operations.
 
 Semantics (frozen): this table is the persistent record of pool
 membership, each proxy's manual ``enabled`` flag, and upstream
-quota/abuse parking (``quota_until`` / ``banned_until``). Membership is seeded
+quota/abuse parking (``quota_until`` / ``banned_until``) and the non-expiring
+``permanently_banned`` abusive-traffic verdict. Membership is seeded
 exclusively by ``refresh_proxies`` — there is no manual-add path. The refresh
 only ever UPSERTS fetched proxies (insert new rows with ``enabled = TRUE``;
 never flips an existing row's flag; never deletes). Manual admin actions
 (``set_enabled`` / ``remove``) mutate the same table.
 
-Parking values are wall-clock epochs (``time.time()``). They are written by
-``ProxyManager.mark_quota_exhausted`` / ``mark_banned`` and loaded at startup,
-so a gateway restart does not lose the “quota exhausted” state shown in the
-admin panel. Expired values are harmless and are overwritten by the next mark.
+Parking values are wall-clock epochs (``time.time()``); ``permanently_banned``
+never expires. They are written by ``ProxyManager`` and loaded at startup, so a
+gateway restart does not lose the “quota exhausted” / “banned” state shown in
+the admin panel. Expired epochs are harmless and are overwritten by the next
+mark.
 """
 
 from __future__ import annotations
@@ -28,13 +30,15 @@ from .pg import ensure_schema, make_pool
 
 
 class ProxyDB:
-    """``proxies(id, proxy UNIQUE, enabled, added_at, quota_until, banned_until)``.
+    """``proxies(id, proxy UNIQUE, enabled, added_at, quota_until,
+    banned_until, permanently_banned)``.
 
     ``enabled = FALSE`` — disabled by hand from the admin UI (persists across
     restarts, unlike the runtime circuit breaker); ``quota_until`` /
-    ``banned_until`` persist upstream parking; ``id`` is insertion order
-    (analogue of sqlite rowid) and defines ``all()`` ordering. Lifecycle:
-    after ``close()`` the store never "resurrects"; ``close()`` is idempotent.
+    ``banned_until`` persist timed upstream parking; ``permanently_banned``
+    persists the abusive-traffic verdict; ``id`` is insertion order (analogue
+    of sqlite rowid) and defines ``all()`` ordering. Lifecycle: after
+    ``close()`` the store never "resurrects"; ``close()`` is idempotent.
     """
 
     def __init__(self, dsn: str) -> None:
@@ -71,25 +75,27 @@ class ProxyDB:
             ).fetchall()
         return [(p, bool(e)) for p, e in rows]
 
-    def parking_all(self) -> list[tuple[str, float, float]]:
-        """``[(proxy, quota_until, banned_until)]`` in insertion order.
+    def parking_all(self) -> list[tuple[str, float, float, bool]]:
+        """``[(proxy, quota_until, banned_until, permanently_banned)]``.
 
-        Values are wall-clock epochs. The manager merges rows that share the
-        same canonical quota key (max wins), so duplicated proxy endpoints do
-        not lose the longest parking.
+        Rows are in insertion order. Timed values are wall-clock epochs. The
+        manager merges rows that share the same canonical quota key (max epoch
+        wins; permanent ban ORs), so duplicated proxy endpoints do not lose the
+        longest parking.
         """
         self._ensure()
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT proxy, quota_until, banned_until FROM proxies ORDER BY id"
+                "SELECT proxy, quota_until, banned_until, permanently_banned"
+                " FROM proxies ORDER BY id"
             ).fetchall()
         return [
-            (p, float(q or 0.0), float(b or 0.0))
-            for p, q, b in rows
+            (p, float(q or 0.0), float(b or 0.0), bool(permanent))
+            for p, q, b, permanent in rows
         ]
 
     def save_parking(self, proxies: Iterable[str], quota_until: float,
-                     banned_until: float) -> int:
+                     banned_until: float, permanently_banned: bool) -> int:
         """Persist parking for every URL of one quota bucket; returns rows hit."""
         self._ensure()
         urls = list(dict.fromkeys(p for p in proxies if p))
@@ -97,9 +103,11 @@ class ProxyDB:
             return 0
         with self._pool.connection() as conn:
             cur = conn.execute(
-                "UPDATE proxies SET quota_until = %s, banned_until = %s"
+                "UPDATE proxies SET quota_until = %s, banned_until = %s,"
+                " permanently_banned = permanently_banned OR %s"
                 " WHERE proxy = ANY(%s)",
-                (float(quota_until), float(banned_until), urls),
+                (float(quota_until), float(banned_until),
+                 bool(permanently_banned), urls),
             )
             return cur.rowcount
 

@@ -243,6 +243,10 @@ def test_is_abusive_ban_case_insensitive_text_search():
     assert opencode.is_abusive_ban(b"Forbidden: Abusive Traffic detected")
     assert opencode.is_abusive_ban(b'{"error":{"message":"ABUSIVE TRAFFIC"}}')
     assert opencode.is_abusive_ban("We saw abusive traffic from this IP")
+    # The exact upstream 403 body seen in the request log.
+    assert opencode.is_abusive_ban(
+        "OpenCode's free models aren't available from your current network "
+        "because we've detected abusive traffic from this IP address.")
     assert not opencode.is_abusive_ban(b"FreeTierError")
     assert not opencode.is_abusive_ban(None)
 

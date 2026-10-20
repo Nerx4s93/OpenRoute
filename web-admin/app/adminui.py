@@ -313,10 +313,10 @@ form.add button:hover, .login-box button[type=submit]:hover {
 }
 """
 
-# Proxy states. Unlike NVRoute's accounts there is no permanently "dead" state:
-# proxies are never disabled permanently — sustained failure is expressed as a
-# cooldown only. "disabled"/"dead" are still read defensively
-# so the renderer keeps working if the gateway adds such a flag later.
+# Proxy states. A 403 abusive-traffic verdict is the only permanent state: the
+# gateway persists it and never selects that bucket again. Other failures are
+# expressed as cooldowns/parking only. "disabled"/"dead" are still read
+# defensively so the renderer keeps working if the gateway adds such a flag.
 _STATE_LABELS = {
     "ok": ("ok", "b-ok"),
     "quota": ("лимит", "b-warn"),
@@ -352,6 +352,10 @@ _PERIOD_SECTIONS = {
 
 def _proxy_state(s: dict) -> str:
     """Classify one status row into a state key (see ``_STATE_LABELS``)."""
+    # A permanent abusive-traffic ban is the strongest state: even if an
+    # operator later disables the row, the panel must keep showing «бан».
+    if s.get("banned") or s.get("permanently_banned"):
+        return "ban"
     if s.get("disabled"):
         return "dead"
     if s.get("manual"):
@@ -416,7 +420,8 @@ def _proxy_rows(proxies: list[dict], usage: dict, csrf: str,
         if state == "quota":
             label = f"лимит {_duration_label(s.get('quota_seconds_left'))}"
         elif state == "ban":
-            label = f"бан {_duration_label(s.get('banned_seconds_left'))}"
+            label = ("бан" if s.get("banned") or s.get("permanently_banned")
+                     else f"бан {_duration_label(s.get('banned_seconds_left'))}")
         elif state == "cooldown":
             label = f"cooldown {float(s.get('cooldown_seconds_left') or 0):.0f}s"
         u = usage.get(_proxy_display(s), {}) or {}

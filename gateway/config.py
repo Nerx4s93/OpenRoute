@@ -65,6 +65,8 @@ class Settings(BaseSettings):
     affinity_weight_requests: float = 1.0
     affinity_weight_tokens: float = 1.0
     quota_reset_margin_seconds: float = 60.0
+    # Deprecated: 403 abusive traffic is a permanent ban now. Kept so existing
+    # deployments can keep the env var (the field set is a frozen contract).
     abusive_ban_seconds: float = 86_400.0
 
 

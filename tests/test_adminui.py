@@ -87,6 +87,7 @@ class FakeState:
         self.proxies: dict[str, bool] = {}  # full URL -> enabled (manual flag)
         self.quota: dict[str, float] = {}  # full URL -> seconds left
         self.banned: dict[str, float] = {}  # full URL -> seconds left
+        self.permanent_bans: set[str] = set()  # full URL -> forever
         self.last_period = "all"  # last ?period= forwarded to the fake gateway
         self.keys: dict[str, dict] = {}  # key_hash -> row
         self.usage_by_proxy: dict[str, dict] = {}  # masked -> stats
@@ -149,6 +150,7 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
         for url, enabled in state.proxies.items():
             quota = state.quota.get(url, 0.0)
             banned = state.banned.get(url, 0.0)
+            permanent = url in state.permanent_bans
             rows.append({
                 "proxy": mask_proxy(url),          # host:port (display + usage key)
                 "url": f"http://{mask_proxy(url)}",  # masked
@@ -163,13 +165,14 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
                 "rpm_capped": False,
                 "egress_group": mask_proxy(url),
                 "quota_seconds_left": quota,
-                "banned_seconds_left": banned,
+                "banned": permanent,
+                "banned_seconds_left": 0.0 if permanent else banned,
                 "last_error": None,
             })
         ready = sum(
             1 for p in rows
             if p["enabled"] and not p["quota_seconds_left"]
-            and not p["banned_seconds_left"]
+            and not p["banned"] and not p["banned_seconds_left"]
         )
         return {
             "proxies_total": len(rows),
@@ -183,7 +186,7 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
             "egress_groups_quota_parked": sum(
                 1 for p in rows if p["quota_seconds_left"] > 0),
             "egress_groups_banned": sum(
-                1 for p in rows if p["banned_seconds_left"] > 0),
+                1 for p in rows if p["banned"] or p["banned_seconds_left"] > 0),
             "last_proxies_fetch": None,
             "proxies": rows,
         }
@@ -591,6 +594,19 @@ def test_proxy_quota_and_ban_are_visible(panel):
     assert data["cards"].count('class="card"') == 3
     for removed in ("Ошибок", "В cooldown / выключено", "Прокси в лимите"):
         assert removed not in data["cards"]
+
+
+def test_permanent_ban_badge_is_red_and_forever(panel):
+    login_ok(panel)
+    url = "http://u:p@abusive:8080"
+    seed_proxy(panel, url)
+    panel.state.permanent_bans.add(url)
+
+    data = panel.client.get("/admin/ui/data").json()
+    rows = data["proxies-rows"]
+    # No countdown: the bucket is banned until an operator removes it.
+    assert '<span class="badge b-err">бан</span>' in rows
+    assert "0/1" in data["cards"]
 
 
 def test_ui_add_key_validation(panel):

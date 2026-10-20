@@ -103,7 +103,8 @@ class NoReadyProxyError(RuntimeError):
     CONTRACT (main.py): ``retry_after`` — seconds until the earliest proxy
     becomes ready (end of cooldown OR a slot in the RPM window OR the end of a
     group's ``quota_until``/``banned_until`` parking), so the gateway can answer
-    429/503 with ``Retry-After``; ``None`` means waiting is pointless.
+    429/503 with ``Retry-After``; ``None`` means waiting is pointless (including
+    a permanently banned abusive-traffic bucket).
 
     ``kind`` (additive, keeps the old constructor/``retry_after`` contract):
 
@@ -196,19 +197,26 @@ class EgressGroup:
 
     ``quota_until`` / ``banned_until`` are ``time.time()`` (wall-clock) epochs:
     a daily upstream quota reset is tied to the UTC calendar and the values are
-    shown to operators. Per-URL breaker state (``Proxy.cooldown_until``,
-    ``_rpm``) stays on the ``time.monotonic()`` clock.
+    shown to operators. ``permanently_banned`` is the abusive-traffic verdict:
+    it never expires and the bucket must never be selected or probed again.
+    Per-URL breaker state (``Proxy.cooldown_until``, ``_rpm``) stays on the
+    ``time.monotonic()`` clock.
     """
 
     host: str
     proxies: list[Proxy] = field(default_factory=list, repr=False)
     quota_until: float = 0.0
     banned_until: float = 0.0
+    permanently_banned: bool = False
     _rr: int = field(default=0, repr=False)
 
     def parked_until(self) -> float:
-        """Current parking epoch (``max(quota, ban)``; 0 = not parked)."""
+        """Current timed parking epoch (``max(quota, ban)``; 0 = not parked)."""
         return max(self.quota_until, self.banned_until)
+
+    def is_parked(self, now_wall: float) -> bool:
+        """Permanent abusive-traffic ban or a timed quota/ban still running."""
+        return self.permanently_banned or self.parked_until() > now_wall
 
 
 class ProxyManager:
@@ -263,36 +271,42 @@ class ProxyManager:
         self._rr = self._rr % len(new) if new else 0
         self._rebuild_groups()
 
-    def load_parking(self, rows: list[tuple[str, float, float]]) -> None:
-        """Restore persisted ``(proxy, quota_until, banned_until)`` rows.
+    def load_parking(self, rows: list[tuple[str, float, float, bool]]) -> None:
+        """Restore persisted ``(proxy, quota_until, banned_until, permanent)``.
 
         Called once at startup after :meth:`apply_proxies`. Rows are grouped by
-        the canonical quota key and the maximum value wins, matching the
-        runtime invariant that parking may only move forward.
+        the canonical quota key; the maximum epoch wins and a permanent ban
+        ORs together, matching the runtime invariant that parking may only move
+        forward and never expires for abusive traffic.
         """
-        by_key: dict[str, tuple[float, float]] = {}
-        for proxy, quota_until, banned_until in rows:
+        by_key: dict[str, tuple[float, float, bool]] = {}
+        for proxy, quota_until, banned_until, permanently_banned in rows:
             key = canonical_quota_key(proxy)
             if not key:
                 continue
-            old_q, old_b = by_key.get(key, (0.0, 0.0))
+            old_q, old_b, old_perm = by_key.get(key, (0.0, 0.0, False))
             by_key[key] = (
                 max(old_q, float(quota_until or 0.0)),
                 max(old_b, float(banned_until or 0.0)),
+                old_perm or bool(permanently_banned),
             )
         for group in self._groups:
-            quota_until, banned_until = by_key.get(group.host, (0.0, 0.0))
+            quota_until, banned_until, permanently_banned = by_key.get(
+                group.host, (0.0, 0.0, False))
             group.quota_until = max(group.quota_until, quota_until)
             group.banned_until = max(group.banned_until, banned_until)
+            group.permanently_banned = (
+                group.permanently_banned or permanently_banned)
 
     def _rebuild_groups(self) -> None:
         """Rebuild quota buckets from ``self.proxies``, preserving parking.
 
-        A refresh must not lose a ``quota_until``/``banned_until`` set between
-        two fetches: the state is carried over by canonical proxy key, not by
-        URL object. First-appearance order follows the stable ``self.proxies``
-        order. Runtime ``Proxy`` objects (and therefore cooldown/RPM state) are
-        already preserved by :meth:`apply_proxies`.
+        A refresh must not lose a ``quota_until``/``banned_until`` or permanent
+        abusive-traffic ban set between two fetches: the state is carried over
+        by canonical proxy key, not by URL object. First-appearance order
+        follows the stable ``self.proxies`` order. Runtime ``Proxy`` objects
+        (and therefore cooldown/RPM state) are already preserved by
+        :meth:`apply_proxies`.
         """
         previous = {g.host: g for g in self._groups}
         groups: list[EgressGroup] = []
@@ -307,6 +321,7 @@ class ProxyManager:
                     host=key,
                     quota_until=old.quota_until if old else 0.0,
                     banned_until=old.banned_until if old else 0.0,
+                    permanently_banned=old.permanently_banned if old else False,
                     _rr=old._rr if old else 0,
                 )
                 by_key[key] = group
@@ -475,7 +490,7 @@ class ProxyManager:
         parked_urls = {
             p.url
             for g in self.egress_groups()
-            if g.parked_until() > now_wall
+            if g.is_parked(now_wall)
             for p in g.proxies
         }
         probe_urls = [p.url for p in snapshot if p.enabled and p.url not in parked_urls]
@@ -490,7 +505,7 @@ class ProxyManager:
                 if not p.enabled:
                     continue
                 group = self.group_of(p)
-                if group is not None and group.parked_until() > now_wall:
+                if group is not None and group.is_parked(now_wall):
                     continue  # never clear quota/banned parking via a probe
                 if p.url in alive:
                     self.mark_success(p)  # proxy came back -> lift cooldown early
@@ -504,7 +519,7 @@ class ProxyManager:
                 if p.enabled and not p.disabled and p.cooldown_until <= now
                 and not self._rpm_capped(p, now)
                 and (self.group_of(p) is None
-                     or self.group_of(p).parked_until() <= now_wall)
+                     or not self.group_of(p).is_parked(now_wall))
             )
             self.last_fetch_status = (
                 f"ok at {time.strftime('%Y-%m-%d %H:%M:%S')}: "
@@ -636,7 +651,7 @@ class ProxyManager:
         )
 
     def _group_parked(self, group: EgressGroup, now_wall: float) -> bool:
-        return group.parked_until() > now_wall
+        return group.is_parked(now_wall)
 
     def group_is_ready(self, group: EgressGroup, *,
                        now_mono: Optional[float] = None,
@@ -659,6 +674,7 @@ class ProxyManager:
                 [p.url for p in group.proxies],
                 group.quota_until,
                 group.banned_until,
+                group.permanently_banned,
             )
         except Exception as exc:
             logger.warning("ProxyDB parking write failed for %s: %s",
@@ -676,8 +692,18 @@ class ProxyManager:
         self._persist_parking(group)
 
     def mark_banned(self, group: EgressGroup, until: float) -> None:
-        """Ban this proxy's quota bucket (abusive traffic) until a wall-clock epoch."""
+        """Ban this proxy's quota bucket temporarily until a wall-clock epoch."""
         group.banned_until = max(group.banned_until, float(until))
+        self._persist_parking(group)
+
+    def mark_permanently_banned(self, group: EgressGroup) -> None:
+        """Ban an abusive-traffic bucket forever.
+
+        The flag is persisted immediately and is never cleared by a successful
+        probe, a refresh, a restart, or ``mark_success``; the bucket is skipped
+        by every selection path.
+        """
+        group.permanently_banned = True
         self._persist_parking(group)
 
     def _ready_urls(self, group: EgressGroup, exclude: set[str],
@@ -692,7 +718,8 @@ class ProxyManager:
 
         Ready = enabled (in pool, not manually disabled), not disabled, not in
         cooldown, not on the RPM cap, not in ``exclude``, and its quota bucket
-        is not parked (``quota_until`` / ``banned_until`` in the future).
+        is not parked (permanently banned, or ``quota_until`` / ``banned_until``
+        in the future).
         The ``_rr`` index lives over the STABLE ``self.proxies`` list (not over
         the recomputed ready subset): each pick walks forward from ``_rr``,
         skipping non-ready entries, and leaves ``_rr`` right after the chosen
@@ -732,7 +759,7 @@ class ProxyManager:
             return NoReadyProxyError(None, "empty")
         not_excluded = [p for p in eligible if p.url not in exclude]
         parked = any(
-            g.parked_until() > now_wall
+            g.is_parked(now_wall)
             and any(self._eligible(p) for p in g.proxies)
             for g in self._groups
         )
@@ -758,6 +785,8 @@ class ProxyManager:
         if not group.proxies:
             raise NoReadyProxyError(None, "empty")
         if self._group_parked(group, now_wall):
+            if group.permanently_banned:
+                raise NoReadyProxyError(None, "saturated")
             wait = max(group.parked_until() - now_wall, 0.0)
             url_wait = self._group_url_wait(group, exclude, now)
             raise NoReadyProxyError(max(wait, url_wait), "saturated")
@@ -812,6 +841,8 @@ class ProxyManager:
         for group in self._groups:
             if not any(self._eligible(p) for p in group.proxies):
                 continue
+            if group.permanently_banned:
+                continue  # never wait for an abusive-traffic bucket
             parked_wait = max(group.parked_until() - now_wall, 0.0)
             if parked_wait > 0:
                 url_wait = self._group_url_wait(group, set(), now)
@@ -935,7 +966,8 @@ class ProxyManager:
         not parked); ``proxies_cooling`` — in cooldown; ``proxies_rpm_capped``
         — hit the local rolling RPM cap (may overlap with cooling). Per-proxy:
         ``rpm_window`` — current RPM load, ``rpm_capped`` — whether capped,
-        ``quota_seconds_left`` / ``banned_seconds_left`` — bucket parking.
+        ``quota_seconds_left`` / ``banned_seconds_left`` — bucket parking,
+        ``banned`` — permanent abusive-traffic ban (never selectable again).
 
         Additive egress-group contract: ``egress_groups_total`` /
         ``egress_groups_ready`` / ``egress_groups_quota_parked`` /
@@ -970,8 +1002,11 @@ class ProxyManager:
                 "quota_seconds_left": (
                     round(max(0.0, group.quota_until - now_wall), 1) if group else 0.0
                 ),
+                "banned": bool(group and group.permanently_banned),
                 "banned_seconds_left": (
-                    round(max(0.0, group.banned_until - now_wall), 1) if group else 0.0
+                    0.0 if group and group.permanently_banned
+                    else (round(max(0.0, group.banned_until - now_wall), 1)
+                          if group else 0.0)
                 ),
                 "last_error": p.last_error,
             })
@@ -992,7 +1027,9 @@ class ProxyManager:
             "egress_groups_total": len(groups),
             "egress_groups_ready": sum(1 for ok in group_ready if ok),
             "egress_groups_quota_parked": sum(1 for g in groups if g.quota_until > now_wall),
-            "egress_groups_banned": sum(1 for g in groups if g.banned_until > now_wall),
+            "egress_groups_banned": sum(
+                1 for g in groups
+                if g.permanently_banned or g.banned_until > now_wall),
             # Defensive: never expose userinfo/DSN credentials in the snapshot.
             "last_proxies_fetch": redact_url(self.last_fetch_status) if self.last_fetch_status else None,
             "proxies": proxy_rows,
@@ -1003,7 +1040,11 @@ class ProxyManager:
                     "proxies": [mask_proxy(p.url) for p in g.proxies],
                     "proxy_count": len(g.proxies),
                     "quota_seconds_left": round(max(0.0, g.quota_until - now_wall), 1),
-                    "banned_seconds_left": round(max(0.0, g.banned_until - now_wall), 1),
+                    "banned": g.permanently_banned,
+                    "banned_seconds_left": (
+                        0.0 if g.permanently_banned
+                        else round(max(0.0, g.banned_until - now_wall), 1)
+                    ),
                     "ready": ready,
                 }
                 for g, ready in zip(groups, group_ready)

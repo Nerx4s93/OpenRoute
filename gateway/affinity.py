@@ -472,7 +472,7 @@ class AffinityManager:
             else:
                 self._bind_state(state, target.url)
             return
-        if group is not None and group.parked_until() > now_wall:
+        if group is not None and group.is_parked(now_wall):
             self._evacuate_sync(group, exclude=exclude)
 
     # --- per-request API ---------------------------------------------------
@@ -534,19 +534,19 @@ class AffinityManager:
         proxy = self._find_proxy(self.proxies, state.proxy)
         group = lease.group
         if (proxy is not None and group is not None
-                and group.parked_until() <= now_wall
+                and not group.is_parked(now_wall)
                 and self.proxies._proxy_ready(proxy, now_mono)
                 and proxy.url not in exclude):
             return proxy
 
-        if group is not None and group.parked_until() > now_wall:
+        if group is not None and group.is_parked(now_wall):
             self._evacuate_sync(group, exclude=exclude)
             lease.bound_proxy_url = state.proxy
             lease.group = self.proxies.group_of(state.proxy) if state.proxy else None
             proxy = self._find_proxy(self.proxies, state.proxy)
             group = lease.group
             if (proxy is not None and group is not None
-                    and group.parked_until() <= now_wall
+                    and not group.is_parked(now_wall)
                     and self.proxies._proxy_ready(proxy, now_mono)
                     and proxy.url not in exclude):
                 return proxy
@@ -609,6 +609,7 @@ class AffinityManager:
     def _evacuate_sync(self, group: EgressGroup, *,
                        quota_until: Optional[float] = None,
                        banned_until: Optional[float] = None,
+                       permanent_ban: bool = False,
                        exclude: Optional[set[str]] = None) -> list[SessionState]:
         """Park + move sessions in-memory without a single ``await``.
 
@@ -623,6 +624,8 @@ class AffinityManager:
             self.proxies.mark_quota_exhausted(group, quota_until)
         if banned_until is not None:
             self.proxies.mark_banned(group, banned_until)
+        if permanent_ban:
+            self.proxies.mark_permanently_banned(group)
 
         moving = [
             s for s in self._sessions.values()
@@ -655,6 +658,7 @@ class AffinityManager:
     async def evacuate(self, group: EgressGroup, *,
                        quota_until: Optional[float] = None,
                        banned_until: Optional[float] = None,
+                       permanent_ban: bool = False,
                        exclude: Optional[set[str]] = None) -> list[SessionState]:
         """Async wrapper around :meth:`_evacuate_sync`.
 
@@ -664,7 +668,7 @@ class AffinityManager:
         """
         return self._evacuate_sync(
             group, quota_until=quota_until, banned_until=banned_until,
-            exclude=exclude,
+            permanent_ban=permanent_ban, exclude=exclude,
         )
 
     def forget_proxy(self, url: str) -> int:
@@ -703,7 +707,11 @@ class AffinityManager:
                 "score": round(scores.get(group.host, 0.0), 6),
                 "ready": self.proxies.group_is_ready(group, now_wall=now),
                 "quota_seconds_left": round(max(0.0, group.quota_until - now), 1),
-                "banned_seconds_left": round(max(0.0, group.banned_until - now), 1),
+                "banned": group.permanently_banned,
+                "banned_seconds_left": (
+                    0.0 if group.permanently_banned
+                    else round(max(0.0, group.banned_until - now), 1)
+                ),
             })
         return {
             "enabled": bool(self._s.affinity_enabled),

@@ -36,8 +36,9 @@ SCHEMA: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_request_log_ts ON request_log (ts)",
     "CREATE INDEX IF NOT EXISTS idx_request_log_key ON request_log (key_id)",
     # Proxy pool (proxydb.py) — replaces NVRoute's ``accounts`` table.
-    # quota_until/banned_until persist the runtime parking state so a gateway
-    # restart does not forget that an upstream quota was already exhausted.
+    # quota_until/banned_until persist timed parking; permanently_banned is the
+    # non-expiring abusive-traffic verdict, so a gateway restart never forgets
+    # that a proxy must not be used again.
     """
     CREATE TABLE IF NOT EXISTS proxies (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -45,15 +46,18 @@ SCHEMA: tuple[str, ...] = (
         enabled BOOLEAN NOT NULL DEFAULT TRUE,
         added_at DOUBLE PRECISION NOT NULL,
         quota_until DOUBLE PRECISION NOT NULL DEFAULT 0,
-        banned_until DOUBLE PRECISION NOT NULL DEFAULT 0
+        banned_until DOUBLE PRECISION NOT NULL DEFAULT 0,
+        permanently_banned BOOLEAN NOT NULL DEFAULT FALSE
     )
     """,
-    # Existing installations have the old four-column table: add the parking
-    # columns in place. IF NOT EXISTS makes the migration idempotent.
+    # Existing installations have the old table: add the parking columns in
+    # place. IF NOT EXISTS makes the migration idempotent.
     "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS quota_until"
     " DOUBLE PRECISION NOT NULL DEFAULT 0",
     "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS banned_until"
     " DOUBLE PRECISION NOT NULL DEFAULT 0",
+    "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS permanently_banned"
+    " BOOLEAN NOT NULL DEFAULT FALSE",
     # Sticky session -> exit proxy binding (affinitydb.py). ``ON DELETE SET
     # NULL`` unbinds a session when its proxy is removed; ``created_at`` is
     # never changed by a move (only ``proxy``/``last_used_at`` are updated).

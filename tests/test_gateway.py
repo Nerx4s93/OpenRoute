@@ -358,6 +358,7 @@ def test_generic_429_passthrough_no_cooldown_no_rotation(make_gateway):
     assert a.requests == 1 and a.errors == 0
     assert a.cooldown_until == 0.0
     assert all(g.quota_until == 0.0 and g.banned_until == 0.0
+               and not g.permanently_banned
                for g in gw.manager.egress_groups())
     assert gw.sleeps == []
 
@@ -441,7 +442,7 @@ def test_free_usage_limit_parks_group_and_evacuates_current_session(make_gateway
     expected = max(main.opencode.seconds_to_utc_midnight(), 30.0) \
         + gw.settings.quota_reset_margin_seconds
     assert a.quota_until - time.time() == pytest.approx(expected, abs=5.0)
-    assert a.banned_until == 0.0
+    assert a.banned_until == 0.0 and not a.permanently_banned
     a_proxy = a.proxies[0]
     assert a_proxy.errors == 0 and a_proxy.cooldown_until == 0.0  # no mark_failure
 
@@ -591,12 +592,22 @@ def test_abusive_traffic_403_bans_group_and_evacuates(make_gateway):
     assert len(tr.requests) == 2  # banned A -> retry on B
 
     a, b = gw.manager.egress_groups()
-    assert a.banned_until - time.time() == pytest.approx(
-        gw.settings.abusive_ban_seconds, abs=5.0)
-    assert a.quota_until == 0.0
+    assert a.permanently_banned is True
+    assert a.banned_until == 0.0 and a.quota_until == 0.0
     assert a.proxies[0].errors == 0  # not a proxy failure
     state = gw.affinity._sessions[f"sid:{sid}"]
     assert gw.manager.group_of(state.proxy) is b
+    row = next(p for p in gw.manager.status()["proxies"]
+               if p["proxy"] == "proxy-a.invalid:8080")
+    assert row["banned"] is True and row["banned_seconds_left"] == 0.0
+    assert gw.manager.status()["egress_groups_banned"] == 1
+
+    # A later request must never select the permanently banned bucket again.
+    r2 = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
+    assert r2.status_code == 200
+    assert len(tr.requests) == 3  # A once, then B twice (no A retry)
+    assert a.proxies[0].requests == 1
+    assert b.proxies[0].requests == 2
 
 
 def test_free_tier_403_is_not_an_abusive_ban(make_gateway):
@@ -612,7 +623,8 @@ def test_free_tier_403_is_not_an_abusive_ban(make_gateway):
     gw.script_upstream(router)
     r = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
     assert r.status_code == 403
-    assert all(g.banned_until == 0.0 for g in gw.manager.egress_groups())
+    assert all(g.banned_until == 0.0 and not g.permanently_banned
+               for g in gw.manager.egress_groups())
 
 
 

@@ -500,16 +500,95 @@ async def test_parking_persists_across_manager_restart(pg_dsn):
     await m2.aclose()
 
 
+def test_permanently_banned_bucket_is_never_selected_or_waited_for():
+    m = mgr(proxies=["http://u:p@a:1", "http://u2:p@b:1"])
+    a, b = m.egress_groups()
+    m.mark_permanently_banned(a)
+    assert a.permanently_banned is True and a.is_parked(time.time())
+    for _ in range(3):
+        assert m.next_proxy().url == b.proxies[0].url
+    with pytest.raises(NoReadyProxyError) as err:
+        m.next_proxy_in_group(a)
+    assert err.value.kind == "saturated" and err.value.retry_after is None
+    assert m.earliest_ready_seconds() is not None  # B is still usable
+    m.mark_permanently_banned(b)
+    with pytest.raises(NoReadyProxyError) as err:
+        m.next_proxy()
+    assert err.value.kind == "saturated" and err.value.retry_after is None
+    assert m.earliest_ready_seconds() is None
+
+
+@pytest.mark.asyncio
+async def test_permanent_ban_persists_across_manager_restart(pg_dsn):
+    from gateway.proxydb import ProxyDB
+
+    db = ProxyDB(pg_dsn)
+    assert db.upsert_many(["http://h1:1", "http://h2:2"]) == 2
+
+    m = ProxyManager(build_settings(pg_dsn))
+    m.bind_db(db)
+    m.apply_proxies(db.all())
+    a = next(g for g in m.egress_groups() if g.host == "h1:1")
+    m.mark_permanently_banned(a)
+    await m.aclose()
+    db.close()
+
+    db2 = ProxyDB(pg_dsn)
+    m2 = ProxyManager(build_settings(pg_dsn))
+    m2.bind_db(db2)
+    m2.apply_proxies(db2.all())
+    m2.load_parking(db2.parking_all())
+    restored = next(g for g in m2.egress_groups() if g.host == "h1:1")
+    assert restored.permanently_banned is True
+    assert restored.is_parked(time.time())
+    assert all(m2.next_proxy().url == "http://h2:2" for _ in range(3))
+    assert m2.status()["egress_groups_banned"] == 1
+    db2.close()
+    await m2.aclose()
+
+
 def test_load_parking_merges_duplicate_keys_by_max():
     m = mgr(proxies=["http://u1:p@h:1", "http://u2:p@h:1"])
     assert len(m.egress_groups()) == 1
     m.load_parking([
-        ("http://u1:p@h:1", 100.0, 0.0),
-        ("http://u2:p@h:1", 50.0, 200.0),
+        ("http://u1:p@h:1", 100.0, 0.0, False),
+        ("http://u2:p@h:1", 50.0, 200.0, True),
     ])
     group = m.egress_groups()[0]
     assert group.quota_until == 100.0
     assert group.banned_until == 200.0
+    assert group.permanently_banned is True
+
+
+@pytest.mark.asyncio
+async def test_refresh_never_probes_or_unbans_permanent_ban(pg_dsn):
+    from gateway.proxydb import ProxyDB
+
+    db = ProxyDB(pg_dsn)
+    assert db.upsert_many(["http://h1:1", "http://h2:2"]) == 2
+    m = ProxyManager(build_settings(pg_dsn))
+    m.bind_db(db)
+    m.apply_proxies(db.all())
+    a = next(g for g in m.egress_groups() if g.host == "h1:1")
+    m.mark_permanently_banned(a)
+
+    probed: list[str] = []
+
+    async def probe(url: str) -> bool:
+        probed.append(url)
+        return True
+
+    m._probe_proxy = probe
+    await _fake_fetch(m, {"proxies": [{"host": "h1", "port": 1},
+                                     {"host": "h2", "port": 2}]})
+    assert await m.refresh_proxies() is True
+    assert probed == ["http://h2:2"]  # banned bucket is never health-checked
+    restored = next(g for g in m.egress_groups() if g.host == "h1:1")
+    assert restored.permanently_banned is True
+    m.mark_success(restored.proxies[0])
+    assert restored.permanently_banned is True
+    db.close()
+    await m.aclose()
 
 
 @pytest.mark.asyncio

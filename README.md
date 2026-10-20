@@ -17,8 +17,8 @@ OpenAI-совместимый API-шлюз, который балансируе�
   до ближайшей полуночи UTC; сессии эвакуируются на другие прокси. Любой другой
   429 — прозрачный passthrough без cooldown и ротации: лимиты провайдера/ключа
   не являются свойством конкретного прокси.
-- **`403 abusive traffic`** банит только этот прокси-URL (по умолчанию 24 ч) и
-  эвакуирует его сессии.
+- **`403 abusive traffic`** навсегда банит только этот прокси-URL (флаг в БД),
+  эвакуирует его сессии, и больше никогда его не выбирает.
 - Round-robin по готовым прокси; при сбое запрос немедленно уходит на следующий
   прокси (каждый пробуется за запрос максимум один раз).
 - Клиентская поверхность как у NVRoute: `/v1/*` (OpenAI passthrough) за
@@ -131,10 +131,11 @@ OpenRoute/
 - **Квоты**: каждый прокси-URL — отдельное ведро (`canonical_quota_key`).
   Прокси не объединяются по входному IPv4: выход может быть IPv6, и разные
   порты одного входного адреса могут иметь разные выходные адреса.
-- **Парковка переживает рестарт**: `quota_until` и `banned_until` пишутся в
-  таблицу `proxies` при получении `FreeUsageLimitError` / abusive-403 и
-  загружаются при старте gateway. После пересборки контейнера админка снова
-  показывает «лимит …» / «бан …», а запаркованные прокси не опрашиваются.
+- **Парковка и баны переживают рестарт**: `quota_until`, `banned_until` и
+  `permanently_banned` пишутся в таблицу `proxies` при получении
+  `FreeUsageLimitError` / abusive-403 и загружаются при старте gateway. После
+  пересборки контейнера админка снова показывает «лимит …» / «бан …», а
+  запаркованные и навсегда забаненные прокси не опрашиваются и не выбираются.
 - **Round-robin** по готовым прокси (не в cooldown, не отключён, не на локальном
   RPM-капе, не запаркован). Каждый прокси пробуется в запросе максимум один раз.
 - **Circuit breaker** (сетевые ошибки / 5xx): ошибки копятся в скользящем окне
@@ -148,16 +149,16 @@ OpenRoute/
   Механика cooldown/парковки отдельного прокси (`mark_failure` с 429,
   `ACCOUNT_THROTTLE_*`) сохранена для внутренних путей, но HTTP-обработчик
   её больше не вызывает.
-- **403 `abusive traffic`** (case-insensitive поиск в теле) → бан этого
-  прокси-URL на `ABUSIVE_BAN_SECONDS` (по умолчанию 86400 с) с эвакуацией;
+- **403 `abusive traffic`** (case-insensitive поиск в теле) → **постоянный
+  бан** этого прокси-URL (`permanently_banned = TRUE` в БД) с эвакуацией;
   `FreeTierError` — passthrough; прочие 403 — обычный failover
   (`mark_failure` + следующая попытка).
 - **Ретраи**: 5xx/сетевые — повтор на следующем прокси с экспоненциальным
   backoff от `RETRY_BACKOFF_BASE_SECONDS`, суммарно не дольше
   `RETRY_BUDGET_SECONDS` (исчерпан → 504).
-- **Прокси никогда не «мёртв» навсегда**: устойчивый сбой выражается только
-  через cooldown; health-probe периодически проверяет прокси и может снять
-  cooldown досрочно.
+- **Сбой не убивает прокси навсегда**: устойчивые сетевые ошибки/5xx
+  выражаются через cooldown, health-probe может снять его досрочно.
+  Единственное необратимое состояние — abusive-бан выше.
 
 ### Квота: один прокси-URL = одно «ведро»
 
@@ -169,7 +170,7 @@ OpenRoute/
 ведро (`canonical_quota_key`). Дневной лимит уточняется телами ответов:
 `429 FreeUsageLimitError` → паркуется только этот прокси-URL до ближайшей
 полуночи UTC (если `Retry-After` больше — берётся он); `403 abusive traffic` →
-бан только этого прокси-URL на `ABUSIVE_BAN_SECONDS`.
+навсегда банится только этот прокси-URL.
 
 ---
 
@@ -192,9 +193,9 @@ OpenRoute/
   fingerprint диалога.
 - Переменные: `AFFINITY_ENABLED`, `AFFINITY_WINDOW_SECONDS`,
   `AFFINITY_WEIGHT_SESSIONS`, `AFFINITY_WEIGHT_REQUESTS`,
-  `AFFINITY_WEIGHT_TOKENS`, `QUOTA_RESET_MARGIN_SECONDS`,
-  `ABUSIVE_BAN_SECONDS`. В `/admin/status` — блок `affinity` (host-only),
-  в `/health` — счётчики `egress_groups_*` и `sessions_*`.
+  `AFFINITY_WEIGHT_TOKENS`, `QUOTA_RESET_MARGIN_SECONDS`. Abusive-бан не имеет
+  настройки срока: он постоянный. В `/admin/status` — блок `affinity`
+  (host-only), в `/health` — счётчики `egress_groups_*` и `sessions_*`.
 
 ---
 
@@ -227,10 +228,10 @@ OpenRoute/
 |-----|-------|------|
 | 401 | неизвестный/отозванный клиентский ключ | `{"error": {"message": "...", "type": "invalid_request_error", "code": 401}}` |
 | 403 | модель вне allow-list ключа; неверный `X-Internal-Token` | OpenAI-конверт (шлюз отдаёт его и на `/internal/*`) |
-| 403 | `abusive traffic` от opencode — банит прокси-URL | тело upstream (passthrough) |
+| 403 | `abusive traffic` от opencode — навсегда банит прокси-URL и повторяет запрос на другом прокси | OpenAI-конверт, если не осталось прокси |
 | 404 | внутренний API выключен (пустой `INTERNAL_API_TOKEN`); неизвестный прокси/ключ в мутации | OpenAI-конверт |
 | 413 | тело запроса больше `MAX_BODY_BYTES` (без чтения тела при `Content-Length`) | OpenAI-конверт |
-| 429 | превышены RPM/TPM ключа; все прокси запаркованы (квота до полуночи UTC / бан) — с `Retry-After` | `{"error": {"type": "rate_limit_error", ...}}` |
+| 429 | превышены RPM/TPM ключа; все прокси запаркованы (квота до полуночи UTC / временный бан) — с `Retry-After` | `{"error": {"type": "rate_limit_error", ...}}` |
 | 429 | любой другой 429 upstream (провайдер/ключ) | тело upstream (passthrough, без cooldown и ротации) |
 | 502 | все прокси, которые пробовали, упали (`All upstream attempts failed`) | OpenAI-конверт |
 | 503 | пул пуст (нет прокси / фетч не удаётся) | OpenAI-конверт |
