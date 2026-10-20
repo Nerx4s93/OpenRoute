@@ -141,7 +141,7 @@ h1 { margin: 7px 0 5px; font-size: clamp(27px, 3vw, 38px); line-height: 1.16;
 .period-tabs a:hover { color: var(--text); background: #1b2a35; }
 .period-tabs a.active { color: var(--mint); background: #83decf16;
   box-shadow: inset 0 0 0 1px #88e5cf30; }
-.cards { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 13px;
+.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 13px;
   margin: 0 0 28px; }
 .card { position: relative; overflow: hidden; min-height: 136px; padding: 20px 19px 16px;
   background: var(--surface); border: 1px solid var(--line); border-radius: 15px;
@@ -156,8 +156,7 @@ h1 { margin: 7px 0 5px; font-size: clamp(27px, 3vw, 38px); line-height: 1.16;
   font-weight: 750; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
 .card .lbl { margin-top: 4px; color: var(--muted); font-size: 11px; font-weight: 600; }
 .card:nth-child(1) { --accent: #91e8ce; } .card:nth-child(2) { --accent: #92b9ff; }
-.card:nth-child(3) { --accent: #ff9b9b; } .card:nth-child(4) { --accent: #c9b1ff; }
-.card:nth-child(5) { --accent: #f5c77a; } .card:nth-child(6) { --accent: #ffb38a; }
+.card:nth-child(3) { --accent: #c9b1ff; }
 .section { margin: 0 0 22px; overflow: hidden; background: var(--surface);
   border: 1px solid var(--line); border-radius: 15px; }
 .section-head { display: flex; align-items: center; justify-content: space-between; gap: 15px;
@@ -261,7 +260,6 @@ form.add button:hover, .login-box button[type=submit]:hover {
 @keyframes breathe { 50% { box-shadow: 0 0 0 6px #91e8ce0b, 0 0 18px #91e8ce9c; } }
 @keyframes rise { from { opacity: 0; transform: translateY(12px); }
   to { opacity: 1; transform: translateY(0); } }
-@media (max-width: 1220px) { .cards { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 900px) {
   .wrap { display: block; }
   .sidebar { position: relative; height: auto; padding: 12px 20px; flex-direction: row;
@@ -558,25 +556,16 @@ def _log_rows(recent: list[dict]) -> str:
 
 def _cards_html(status: dict, total: dict, period: str = "all") -> str:
     ready = status.get("proxies_ready", status.get("proxies_enabled", 0))
-    quota_parked = status.get("egress_groups_quota_parked", 0)
-    groups = status.get("egress_groups_total", 0)
     caption = _PERIOD_CAPTIONS.get(period)
     requests_label = "Запросов всего" if not caption else f"Запросов {caption}"
     tokens_label = "Токенов потрачено" if not caption else f"Токенов {caption}"
-    errors_label = "Ошибок" if not caption else f"Ошибок {caption}"
     return (
         f'<div class="card"><div class="glyph">↗</div><div class="num">{_num(total.get("requests", 0))}</div>'
         f'<div class="lbl">{requests_label}</div></div>'
         f'<div class="card"><div class="glyph">◈</div><div class="num">{_num(total.get("tokens", 0))}</div>'
         f'<div class="lbl">{tokens_label}</div></div>'
-        f'<div class="card"><div class="glyph">!</div><div class="num">{_num(total.get("errors", 0))}</div>'
-        f'<div class="lbl">{errors_label}</div></div>'
         f'<div class="card"><div class="glyph">◎</div><div class="num">{ready}/{status.get("proxies_total", 0)}</div>'
         f'<div class="lbl">Прокси в ротации</div></div>'
-        f'<div class="card"><div class="glyph">◷</div><div class="num">{status.get("proxies_cooling", 0)} / {status.get("proxies_manually_disabled", 0)}</div>'
-        f'<div class="lbl">В cooldown / выключено</div></div>'
-        f'<div class="card"><div class="glyph">⊘</div><div class="num">{quota_parked} / {groups}</div>'
-        f'<div class="lbl">Прокси в лимите</div></div>'
     )
 
 

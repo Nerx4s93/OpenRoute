@@ -585,10 +585,12 @@ def test_proxy_quota_and_ban_are_visible(panel):
     rows = data["proxies-rows"]
     assert "лимит 2ч 00м" in rows
     assert "бан 2м" in rows
-    # The «ready» card no longer counts parked proxies; the quota card shows 1/2.
+    # The «ready» card no longer counts parked proxies; extra status cards
+    # were removed from the operator UI.
     assert "0/2" in data["cards"]
-    assert "1 / 2" in data["cards"]
-    assert "Прокси в лимите" in data["cards"]
+    assert data["cards"].count('class="card"') == 3
+    for removed in ("Ошибок", "В cooldown / выключено", "Прокси в лимите"):
+        assert removed not in data["cards"]
 
 
 def test_ui_add_key_validation(panel):
