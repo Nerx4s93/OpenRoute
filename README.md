@@ -6,7 +6,7 @@ OpenAI-совместимый API-шлюз, который балансируе�
 **нет апстрим-токенов**: член пула — это сам прокси. Каждый выходной IP = одно
 «ведро» квоты opencode.ai (порты одного IP — одна egress-группа).
 
-- При старте и периодически шлюз забирает список прокси из `proxy6-service`,
+- При старте и периодически шлюз забирает список прокси из `px6-service`,
   который фильтрует их по комментарию **`OPENROUTE`** (аналог `USE_IN_API` в
   NVRoute) через API [px6.net](https://px6.net).
 - **Sticky-сессии**: задача (`x-opencode-session`, либо fingerprint диалога)
@@ -23,9 +23,6 @@ OpenAI-совместимый API-шлюз, который балансируе�
 - Клиентская поверхность как у NVRoute: `/v1/*` (OpenAI passthrough) за
   клиентскими ключами (RPM/TPM, allow-list моделей), `/admin/status`,
   `/admin/logs`, `/health`, `/internal/*` (X-Internal-Token) и веб-админка.
-
-Полный контракт (модули, эндпоинты, DDL, env, семантика 429) — в
-[`DESIGN.md`](DESIGN.md).
 
 Требования к клиенту — как у OpenAI SDK:
 
@@ -67,24 +64,24 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
  Клиент/браузер ──► 0.0.0.0:53202 (edge, nginx — «стена», единственный
                      публичный порт; хост-порт задаёт OPENROUTE_EDGE_PORT)
                         ├─ /v1/*, /admin/status, /admin/logs, /health, /docs,
-                        │    /openapi.json ─────────────────────────► [openroute] (data plane)
-                        └─ /, /login, /admin/ui* ──────────────────► [admin-service] (control plane)
+                        │    /openapi.json ─────────────────────────► [gateway] (data plane)
+                        └─ /, /login, /admin/ui* ──────────────────► [web-admin] (control plane)
                                                                          │
-   [openroute] ──► [openroute-proxy6] ──► px6.net      (список прокси, descr=OPENROUTE)
-   [openroute] ──► [PostgreSQL]                        (request_log + proxies + keys + session_affinity)
-   [openroute] ──► opencode.ai                         (free-tier инференс через прокси)
-   [admin-service] ──► [Redis]                         (серверные сессии админки)
-   [admin-service] ──► [openroute] /internal/*         (X-Internal-Token, только внутри сети)
+   [gateway] ──► [openroute-px6] ──► px6.net       (список прокси, descr=OPENROUTE)
+   [gateway] ──► [PostgreSQL]                       (request_log + proxies + keys + session_affinity)
+   [gateway] ──► opencode.ai                        (free-tier инференс через прокси)
+   [web-admin] ──► [Redis]                          (серверные сессии админки)
+   [web-admin] ──► [gateway] /internal/*            (X-Internal-Token, только внутри сети)
 ```
 
 - **`edge/`** — nginx: единственная точка входа, маршрутизация на сервисы;
   `/internal/*` наружу не маршрутизируется вообще. SSE-стримы не буферизуются.
-- **`app/` (openroute)** — шлюз (data plane): `/v1/*`, пул прокси, клиентские
+- **`gateway/`** — шлюз (data plane): `/v1/*`, пул прокси, клиентские
   ключи, лог запросов в PostgreSQL, internal API для админки. Своих хостовых
   портов не публикует.
-- **`admin-service/`** — сайт-админка (control plane): `/login`, `/admin/ui*`,
+- **`web-admin/`** — сайт-админка (control plane): `/login`, `/admin/ui*`,
   сессии в Redis, CSRF; своими данными не владеет — ходит в шлюз по internal API.
-- **`proxy6-service/`** — микросервис списка прокси: обёртка над API px6.net с
+- **`px6-service/`** — микросервис списка прокси: обёртка над API px6.net с
   TTL-кэшем, фильтр `descr == "OPENROUTE"`.
 - **`postgres`** — PostgreSQL 17: хранилище шлюза (`request_log`, `proxies`,
   `keys`, `session_affinity`). Том `pgdata`; порт наружу не публикуется.
@@ -96,7 +93,6 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
 
 ```
 OpenRoute/
-├── DESIGN.md                 # замороженный контракт (модули, эндпоинты, DDL, env)
 ├── README.md
 ├── docker-compose.yml        # весь стек одной командой (сеть openroute-net)
 ├── docker-compose.test.yml   # PostgreSQL для pytest (127.0.0.1:55433)
@@ -104,7 +100,7 @@ OpenRoute/
 ├── requirements.txt          # запайнено: fastapi/uvicorn/httpx/pydantic-settings/psycopg
 ├── requirements-dev.txt      # + pytest/pytest-asyncio/redis
 ├── .env.example
-├── app/                      # шлюз (data plane) — РЕАЛИЗОВАНО
+├── gateway/                  # шлюз (data plane) — РЕАЛИЗОВАНО
 │   ├── opencode.py           # gate-заголовки, session id, body, Retry-After, SSE, классификаторы 429/403
 │   ├── sessions.py           # fingerprint диалога -> один upstream session id
 │   ├── affinity.py           # sticky-сессии: привязки, score S/R/T, эвакуация
@@ -112,8 +108,8 @@ OpenRoute/
 │   ├── config.py  proxies.py  proxydb.py  keys.py  keydb.py  reqlog.py  pg.py
 │   └── main.py               # FastAPI: passthrough /v1/*, ретраи, internal API, lifespan
 ├── edge/                     # nginx: nginx.conf, proxy_params_edge.conf, Dockerfile
-├── proxy6-service/           # РЕАЛИЗОВАНО: px6.net → descr=OPENROUTE
-├── admin-service/            # РЕАЛИЗОВАНО: config, sessions, adminui, main
+├── px6-service/              # РЕАЛИЗОВАНО: px6.net → descr=OPENROUTE
+├── web-admin/                # РЕАЛИЗОВАНО: config, sessions, adminui, main
 └── tests/                    # pytest: шлюз, прокси, ключи, лог, админка, opencode
 ```
 
@@ -122,7 +118,7 @@ OpenRoute/
 ## Правила пула
 
 - Прокси автоматически подтягиваются из `PROXIES_URL`
-  (`openroute-proxy6`, `descr=OPENROUTE`) каждые `PROXY_REFRESH_SECONDS`; при
+  (`openroute-px6`, `descr=OPENROUTE`) каждые `PROXY_REFRESH_SECONDS`; при
   неудачном фетче — повтор через `PROXY_RETRY_SECONDS`.
 - Добавить прокси вручную нельзя: членство в пуле определяется **только**
   фетчем; в админке доступны лишь включить/выключить/удалить существующий
@@ -130,7 +126,7 @@ OpenRoute/
 - Список прокси **добавляется** в БД (upsert); существующие записи не удаляются
   и не сбрасывают свой флаг `enabled`. Чтобы навсегда исключить прокси, который
   всё ещё отдаётся сервисом, — **отключите** его (удалённый вернётся на
-  следующем обновлении). См. `DESIGN.md §4`.
+  следующем обновлении).
 - **Egress-группы**: прокси с одним exit-хостом объединяются в группу — квота
   и бан привязаны к exit IP, а не к отдельному порту (`canonical_exit_host`;
   IPv6 нормализуется до `/64`).
@@ -203,16 +199,16 @@ OpenRoute/
 
 | Метод | Путь | Куда (edge) | Описание |
 |-------|------|-------------|----------|
-| ANY | `/v1/*` | openroute | Passthrough к opencode.ai (`chat/completions`, `models`, ...); стриминг поддержан |
-| GET | `/` | admin-service | Редирект на `/login` |
-| GET/POST | `/login` | admin-service | Вход в админку (только пароль) |
-| GET | `/admin/status` | openroute | Состояние пула: прокси, egress-группы, session affinity, счётчики, usage по ключам |
-| GET | `/admin/logs?limit=N` | openroute | Последние запросы из лога (1..500, по умолчанию 100) |
-| GET | `/admin/ui` | admin-service | Веб-админка: страница «Прокси» |
-| GET | `/admin/ui/keys` | admin-service | Веб-админка: страница «Ключи» |
-| GET | `/health` | openroute | Liveness + счётчики пула, egress-групп и привязанных сессий |
-| GET | `/docs`, `/openapi.json` | openroute | Swagger UI / схема |
-| ANY | `/internal/*` | — (нет наружу) | Internal API шлюза; доступен только admin-service по `X-Internal-Token` |
+| ANY | `/v1/*` | gateway | Passthrough к opencode.ai (`chat/completions`, `models`, ...); стриминг поддержан |
+| GET | `/` | web-admin | Редирект на `/login` |
+| GET/POST | `/login` | web-admin | Вход в админку (только пароль) |
+| GET | `/admin/status` | gateway | Состояние пула: прокси, egress-группы, session affinity, счётчики, usage по ключам |
+| GET | `/admin/logs?limit=N` | gateway | Последние запросы из лога (1..500, по умолчанию 100) |
+| GET | `/admin/ui` | web-admin | Веб-админка: страница «Прокси» |
+| GET | `/admin/ui/keys` | web-admin | Веб-админка: страница «Ключи» |
+| GET | `/health` | gateway | Liveness + счётчики пула, egress-групп и привязанных сессий |
+| GET | `/docs`, `/openapi.json` | gateway | Swagger UI / схема |
+| ANY | `/internal/*` | — (нет наружу) | Internal API шлюза; доступен только web-admin по `X-Internal-Token` |
 
 `/admin/status` и `/admin/logs` требуют клиентский ключ с `"admin": true`.
 `/internal/*` при пустом `INTERNAL_API_TOKEN` отвечает 404, при неверном токене
@@ -244,26 +240,27 @@ OpenRoute/
 ```bash
 # перед первым запуском: скопируйте примеры и задайте секреты
 cp .env.example .env                                   # INTERNAL_API_TOKEN
-cp admin-service/.env.example admin-service/.env       # ADMIN_PASSWORD + тот же INTERNAL_API_TOKEN
-cp proxy6-service/.env.example proxy6-service/.env     # PX6_API_KEY
+cp web-admin/.env.example web-admin/.env       # ADMIN_PASSWORD + тот же INTERNAL_API_TOKEN
+cp px6-service/.env.example px6-service/.env     # PX6_API_KEY
 
 docker compose up --build -d                 # весь стек одной командой; сеть openroute-net compose создаёт сам
 docker compose logs -f edge                  # логи стены
-docker compose logs -f openroute             # логи шлюза
+docker compose logs -f gateway               # логи шлюза
 docker compose down                          # остановка всего
 ```
 
 Наружу смотрит **только edge** на http://127.0.0.1:53202 (хост-порт задаёт
 `OPENROUTE_EDGE_PORT`): и API (`/v1`), и админка (`/`, `/login`, `/admin/ui`).
-Сервисы (openroute, admin-service, openroute-proxy6, postgres, redis) хостовых
+Сервисы (gateway, web-admin, px6, postgres, redis) хостовых
 портов не публикуют. Данные — в томах `pgdata`/`redisdata` (удаляются только
 `docker compose down -v`). `docker compose stop` ждёт до 320 с
 (`stop_grace_period`), чтобы стримы доработали до конца.
 
 > **Сосуществование с NVRoute.** OpenRoute полностью изолирован от соседнего
 > стека NVRoute: у него собственная docker-сеть `openroute-net` (не общая
-> `service-net`), уникальные имена контейнеров (`openroute-proxy6`,
-> `openroute-postgres`, `openroute-redis`; остальные — автоимена `openroute-*`)
+> `service-net`), уникальные имена контейнеров (`openroute-px6`,
+> `openroute-postgres`, `openroute-redis`; остальные — автоимена
+> `openroute-gateway-*` и `openroute-web-admin-*`)
 > и собственный хост-порт edge `OPENROUTE_EDGE_PORT` (по умолчанию 53202;
 > NVRoute занимает 53201). Оба стека поднимаются одновременно и не
 > конфликтуют.
@@ -273,13 +270,13 @@ docker compose down                          # остановка всего
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn app.main:app --host 127.0.0.1 --port 8000   # шлюз: /v1/*, /admin/*, /health, /internal/*
+uvicorn gateway.main:app --host 127.0.0.1 --port 8000   # шлюз: /v1/*, /admin/*, /health, /internal/*
 ```
 
 Нужен доступный PostgreSQL (по умолчанию
 `POSTGRES_DSN=postgresql://openroute:openroute@localhost:5432/openroute`); схема
 создаётся сама при первом обращении. Без Docker edge нет — админка запускается
-отдельно (см. `admin-service/`).
+отдельно (см. `web-admin/`).
 
 ---
 
@@ -287,12 +284,11 @@ uvicorn app.main:app --host 127.0.0.1 --port 8000   # шлюз: /v1/*, /admin/*,
 
 | Компонент | Статус |
 |---|---|
-| `app/` (шлюз: `main`, `config`, `proxies`, `proxydb`, `affinity`, `affinitydb`, `keys`, `keydb`, `reqlog`, `pg`, `opencode`) | **реализовано** |
-| `admin-service/` (`config`, `sessions`, `adminui`, `main`) | **реализовано** |
-| `proxy6-service/` | **реализовано** (px6.net → `descr=OPENROUTE`) |
+| `gateway/` (шлюз: `main`, `config`, `proxies`, `proxydb`, `affinity`, `affinitydb`, `keys`, `keydb`, `reqlog`, `pg`, `opencode`) | **реализовано** |
+| `web-admin/` (`config`, `sessions`, `adminui`, `main`) | **реализовано** |
+| `px6-service/` | **реализовано** (px6.net → `descr=OPENROUTE`) |
 | edge / compose / Dockerfile / requirements / .env.example | **готово** |
 | `tests/` (`test_gateway`, `test_proxies`, `test_affinity`, `test_affinitydb`, `test_keys`, `test_reqlog`, `test_adminui`, `test_opencode`) | **реализовано** |
-| `DESIGN.md` | замороженный контракт |
 
 ## Тесты
 

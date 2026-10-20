@@ -1,4 +1,4 @@
-"""proxy6-service — microservice exposing the px6.net proxy list filtered by
+"""px6-service — microservice exposing the px6.net proxy list filtered by
 ``descr == "OPENROUTE"``.
 
 Only proxies tagged with the OPENROUTE comment in the px6.net panel are
@@ -42,7 +42,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(
-    title="proxy6-service",
+    title="px6-service",
     description=f"Микросервис-обёртка над px6.net: отдаёт только прокси с descr == {TARGET_DESCR}",
     version="1.0.0",
     lifespan=lifespan,

@@ -2,9 +2,8 @@
 
 ``Settings`` field names map to upper-case env vars case-insensitively
 (``postgres_dsn`` <- ``POSTGRES_DSN``). :func:`get_settings` returns the
-process-wide singleton (``lru_cache``). The field set is the FROZEN contract
-from ``DESIGN.md`` — do not rename fields: the env-var names are part of the
-contract.
+process-wide singleton (``lru_cache``). The field set is a frozen contract —
+do not rename fields: the env-var names are part of the contract.
 """
 
 from __future__ import annotations
@@ -17,7 +16,7 @@ PROVIDER_NAME = "OpenRoute"
 
 
 class Settings(BaseSettings):
-    """All gateway env vars (see ``.env.example`` / ``DESIGN.md``).
+    """All gateway env vars (see ``.env.example``).
 
     Field names map to upper-case env vars case-insensitively
     (``postgres_dsn`` <- ``POSTGRES_DSN``).
@@ -25,12 +24,12 @@ class Settings(BaseSettings):
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
-    # --- internal API (admin-service <-> gateway) ---
+    # --- internal API (web-admin <-> gateway) ---
     internal_api_token: str = ""  # empty = internal API disabled (404)
     postgres_dsn: str = "postgresql://openroute:openroute@localhost:5432/openroute"
 
     # --- proxy pool source ---
-    proxies_url: str = "http://openroute-proxy6:8000/proxies"
+    proxies_url: str = "http://openroute-px6:8000/proxies"
     proxy_refresh_seconds: float = 300.0
     proxy_retry_seconds: float = 10.0
 

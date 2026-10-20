@@ -6,7 +6,7 @@ round-robins the request across a pool of HTTP(S) proxies
 inference. The differences from ``NVRoute/app/main.py``:
 
 - the upstream is opencode.ai: the gate headers + gated system message come
-  from :mod:`app.opencode`; the client's ``Authorization`` is NOT forwarded —
+  from :mod:`gateway.opencode`; the client's ``Authorization`` is NOT forwarded —
   the gate always carries ``Bearer public`` + a session id (the caller's own
   affinity when it sends one, otherwise one id per conversation),
 - the pool is proxies (no tokens): ``ProxyManager`` instead of
@@ -27,7 +27,7 @@ Request flow for ``ANY /v1/{rest:path}``:
    conversation fingerprint -> one-shot (:func:`_resolve_session_id`),
 5. retry loop over the session lease: ``affinity.next_proxy(lease, exclude=tried)``
    when sticky sessions are enabled, else ``ProxyManager.next_proxy(exclude=tried)``:
-   * build the upstream request with gate headers/body (:mod:`app.opencode`),
+   * build the upstream request with gate headers/body (:mod:`gateway.opencode`),
    * on ``httpx.HTTPError`` -> ``mark_failure`` + backoff + next proxy,
    * on ``429 FreeUsageLimitError`` -> park the whole egress group until the
      next 00:00 UTC, evacuate its sessions, retry on another group,
@@ -397,7 +397,7 @@ async def _fetch_models_catalogue() -> dict:
 
 
 def _fallback_models() -> dict:
-    """Graceful fallback: the known free-model ids (see app.opencode.FREE_MODELS)."""
+    """Graceful fallback: the known free-model ids (see gateway.opencode.FREE_MODELS)."""
     return {
         "object": "list",
         "data": [
@@ -961,10 +961,10 @@ async def health() -> dict:
     }
 
 
-# --- internal API (admin-service only; X-Internal-Token) -------------------
+# --- internal API (web-admin only; X-Internal-Token) -------------------
 #
 # Panel logic (sessions, /login, forms, rendering) lives in the separate
-# admin-service; it calls these endpoints for data and mutations. Access is
+# web-admin; it calls these endpoints for data and mutations. Access is
 # ONLY via the X-Internal-Token header (shared secret in both services'
 # env, constant-time compare). All endpoints are disabled (404) when the token
 # is unset. Edge (nginx) never routes /internal/* at all — a second layer.

@@ -16,8 +16,8 @@ from email.utils import format_datetime
 import httpx
 import pytest
 
-import app.main as main
-import app.proxies as prox
+import gateway.main as main
+import gateway.proxies as prox
 
 from gw import TrackingStream
 
@@ -668,7 +668,7 @@ def test_no_proxies_503_message_is_generic(make_gateway):
     """The empty-pool 503 must not leak the internal fetch URL/credentials."""
     gw = make_gateway(proxies=())
     gw.manager.last_fetch_status = (
-        "error: 500 for url 'http://svc:supersecret@proxy6-service:8000/proxies'"
+        "error: 500 for url 'http://svc:supersecret@px6-service:8000/proxies'"
     )
     tr = gw.script_upstream(lambda req: sse_response())
     r = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
@@ -677,7 +677,7 @@ def test_no_proxies_503_message_is_generic(make_gateway):
     assert err["code"] == 503
     assert err["message"] == "No enabled proxies"
     assert "http://" not in err["message"]
-    assert "supersecret" not in r.text and "proxy6-service" not in r.text
+    assert "supersecret" not in r.text and "px6-service" not in r.text
     assert tr.requests == []
 
 
@@ -685,15 +685,15 @@ def test_health_and_admin_status_redact_fetch_credentials(make_gateway):
     """last_proxies_fetch (public /health + admin /admin/status) strips userinfo."""
     gw = make_gateway(proxies=())
     gw.manager.last_fetch_status = (
-        "error: 500 for url 'http://svc:supersecret@proxy6-service:8000/proxies'"
+        "error: 500 for url 'http://svc:supersecret@px6-service:8000/proxies'"
     )
     h = gw.client.get("/health").json()
     assert "supersecret" not in json.dumps(h)
-    assert "http://***@proxy6-service:8000/proxies" in h["last_proxies_fetch"]
+    assert "http://***@px6-service:8000/proxies" in h["last_proxies_fetch"]
 
     a = gw.client.get("/admin/status", headers=AUTH).json()
     assert "supersecret" not in json.dumps(a)
-    assert "http://***@proxy6-service:8000/proxies" in a["last_proxies_fetch"]
+    assert "http://***@px6-service:8000/proxies" in a["last_proxies_fetch"]
 
 
 # --- local RPM cap ---

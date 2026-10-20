@@ -1,7 +1,7 @@
 """Sticky sessions over egress groups with score balancing (S + R + T).
 
 One chat conversation is bound **permanently** to one purchased exit IP (an
-:class:`app.proxies.EgressGroup`): the binding is never moved because another
+:class:`gateway.proxies.EgressGroup`): the binding is never moved because another
 IP became less loaded. Only a quota reset, an abusive ban, or an admin
 delete/disable invalidates it.
 

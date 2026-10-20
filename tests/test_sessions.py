@@ -1,7 +1,7 @@
-"""Unit tests for app.sessions — conversation-scoped upstream session ids."""
+"""Unit tests for gateway.sessions — conversation-scoped upstream session ids."""
 
-from app import opencode
-from app.sessions import SessionRegistry
+from gateway import opencode
+from gateway.sessions import SessionRegistry
 
 
 def test_registry_reuses_id_until_ttl():

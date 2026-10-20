@@ -1,9 +1,9 @@
-# proxy6-service
+# px6-service
 
 Микросервис-обёртка над API [px6.net](https://px6.net): отдаёт только те прокси,
 у которых поле-комментарий `descr` равно **`OPENROUTE`** (аналог `USE_IN_API` в
 NVRoute). Шлюз OpenRoute читает список по
-`PROXIES_URL=http://openroute-proxy6:8000/proxies`.
+`PROXIES_URL=http://openroute-px6:8000/proxies`.
 
 ## Эндпоинты
 
@@ -27,12 +27,12 @@ CACHE_HOURS=8
 ## Запуск (в составе стека)
 
 ```bash
-docker compose up --build -d proxy6
+docker compose up --build -d px6
 ```
 
 Хостовый порт **не публикуется**: `/proxies` отдаёт креды прокси в открытом
 виде, наружу ему торчать незачем. Диагностика из docker-сети:
 
 ```bash
-docker run --rm --network openroute-net curlimages/curl http://openroute-proxy6:8000/proxies
+docker run --rm --network openroute-net curlimages/curl http://openroute-px6:8000/proxies
 ```

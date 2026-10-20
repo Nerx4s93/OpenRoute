@@ -21,7 +21,7 @@ from pathlib import Path
 import httpx
 from fastapi.testclient import TestClient
 
-import app.main as main
+import gateway.main as main
 
 TESTS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = TESTS_DIR.parent
@@ -29,14 +29,14 @@ for _p in (str(PROJECT_ROOT), str(TESTS_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
-from app.affinity import AffinityManager  # noqa: E402
-from app.affinitydb import AffinityDB  # noqa: E402
-from app.config import Settings  # noqa: E402
-from app.keydb import KeyDB  # noqa: E402
-from app.keys import KeyStore, hash_key  # noqa: E402
-from app.proxies import ProxyManager  # noqa: E402
-from app.proxydb import ProxyDB  # noqa: E402
-from app.reqlog import RequestLog  # noqa: E402
+from gateway.affinity import AffinityManager  # noqa: E402
+from gateway.affinitydb import AffinityDB  # noqa: E402
+from gateway.config import Settings  # noqa: E402
+from gateway.keydb import KeyDB  # noqa: E402
+from gateway.keys import KeyStore, hash_key  # noqa: E402
+from gateway.proxies import ProxyManager  # noqa: E402
+from gateway.proxydb import ProxyDB  # noqa: E402
+from gateway.reqlog import RequestLog  # noqa: E402
 
 
 def build_settings(pg_dsn, **over):

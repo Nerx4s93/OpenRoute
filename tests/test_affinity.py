@@ -1,4 +1,4 @@
-"""Unit tests for app.affinity (no network, no PostgreSQL required).
+"""Unit tests for gateway.affinity (no network, no PostgreSQL required).
 
 Covers score balancing, the 1-hour window, sticky bindings, temporary
 fallback, one-shot buffers and evacuation.
@@ -12,13 +12,13 @@ import time
 
 import pytest
 
-from app.affinity import (
+from gateway.affinity import (
     AffinityManager,
     RequestEvent,
     SessionIdentity,
     SessionState,
 )
-from app.proxies import ProxyManager
+from gateway.proxies import ProxyManager
 
 from gw import build_settings
 

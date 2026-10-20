@@ -28,9 +28,9 @@ of the same shape but *without* the hex prefix -> 403. See
 :func:`new_session_id`.
 
 Free-tier quota is keyed by client IP; for IPv6 the server truncates to the
-first 4 groups (/64). Therefore one proxy exit address == one quota bucket
-(see DESIGN.md). Nothing in this module deals with quotas directly — that is
-:mod:`app.proxies`.
+first 4 groups (/64). Therefore one proxy exit address == one quota bucket.
+Nothing in this module deals with quotas directly — that is
+:mod:`gateway.proxies`.
 """
 
 from __future__ import annotations

@@ -1,6 +1,6 @@
 """Server-rendered HTML admin UI (no template engine, no JS frameworks).
 
-Module of the ``admin-service`` microservice. Multi-page: «Прокси» (``/admin/ui``)
+Module of the ``web-admin`` microservice. Multi-page: «Прокси» (``/admin/ui``)
 and «Ключи» (``/admin/ui/keys``); on each page the add-form sits ABOVE the table
 so nothing has to be scrolled back to. Per-key statistics are computed from the
 request log, so they survive key deletion (the ``key_id`` lives on in the log
@@ -21,7 +21,7 @@ dynamic sections of each page. The full page and the data endpoints
 JS polls the data endpoint every 5 seconds and swaps them in by id — the page
 stays fresh without clobbering form input.
 
-Data shapes (FROZEN by DESIGN.md §2):
+Data shapes (frozen):
 
 - Proxies: ``status`` = ``ProxyManager.status()``; ``usage_by_proxy`` keys are
   masked proxies (``host:port``, the ``account`` column of the request log).
@@ -303,7 +303,7 @@ form.add button:hover, .login-box button[type=submit]:hover {
 
 # Proxy states. Unlike NVRoute's accounts there is no permanently "dead" state:
 # proxies are never disabled permanently — sustained failure is expressed as a
-# cooldown only (DESIGN.md §5.1). "disabled"/"dead" are still read defensively
+# cooldown only. "disabled"/"dead" are still read defensively
 # so the renderer keeps working if the gateway adds such a flag later.
 _STATE_LABELS = {
     "ok": ("ok", "b-ok"),

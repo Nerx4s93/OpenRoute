@@ -4,7 +4,7 @@ Mirrors ``NVRoute/app/acctdb.py``: lazy ``psycopg_pool.ConnectionPool``, schema
 created on first use (DDL lives in ``pg.py``), idempotent ``close()`` that
 waits for in-flight operations.
 
-Semantics (FROZEN, see DESIGN.md): this table is the persistent record of pool
+Semantics (frozen): this table is the persistent record of pool
 membership and each proxy's manual ``enabled`` flag. Membership is seeded
 exclusively by ``refresh_proxies`` — there is no manual-add path. The refresh
 only ever UPSERTS fetched proxies (insert new rows with ``enabled = TRUE``;

@@ -3,9 +3,9 @@ hashing; KeyDB CRUD/persistence; incremental KeyStore mutations."""
 
 import pytest
 
-import app.keys as keys_mod
-from app.keydb import KeyDB
-from app.keys import AuthError, KeyInfo, KeyStore, RateLimitError, hash_key
+import gateway.keys as keys_mod
+from gateway.keydb import KeyDB
+from gateway.keys import AuthError, KeyInfo, KeyStore, RateLimitError, hash_key
 
 
 def row(e):

@@ -1,4 +1,4 @@
-"""Admin session store: Redis (survives admin-service restarts).
+"""Admin session store: Redis (survives web-admin restarts).
 
 Key ``openroute:session:<sid>`` -> JSON ``{"csrf": str, "expires": float}``.
 Redis TTL == session TTL, so expired entries evict themselves. Only the sid is

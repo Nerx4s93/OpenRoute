@@ -1,13 +1,12 @@
-# admin-service
+# web-admin
 
 Веб-админка OpenRoute (control plane) как отдельный микросервис. Вход — только
 по паролю (`ADMIN_PASSWORD`), серверные сессии в Redis, CSRF, страницы
 «Прокси» и «Ключи». **Своими данными сервис не владеет**: он ходит в internal
 API шлюза (`/internal/*`) с общим секретом `X-Internal-Token`.
 
-> **Статус: scaffold (фаза 1).** Шапка (сессии, `/login`, CSRF, проксирование
-> мутаций в internal API) реализована; рендеринг страниц (`app/adminui.py`) —
-> заглушки с `TODO`. Полный список internal-эндпоинтов шлюза — в `DESIGN.md`.
+> **Статус: реализовано.** Сессии, `/login`, CSRF, проксирование мутаций в
+> internal API и рендеринг страниц (`app/adminui.py`).
 
 ## Маршруты
 
@@ -27,5 +26,5 @@ API шлюза (`/internal/*`) с общим секретом `X-Internal-Token`
 ## Конфигурация
 
 См. `.env.example`: `ADMIN_PASSWORD`, `ADMIN_SESSION_TTL_SECONDS`,
-`REDIS_URL`, `GATEWAY_INTERNAL_URL` (в docker-сети `http://openroute:8000`),
+`REDIS_URL`, `GATEWAY_INTERNAL_URL` (в docker-сети `http://gateway:8000`),
 `INTERNAL_API_TOKEN` (тот же, что у шлюза), `INTERNAL_TIMEOUT_SECONDS`.

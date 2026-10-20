@@ -1,6 +1,6 @@
 FROM nginx:1.27-alpine
 
-# Конфиг «стены»: единая точка входа, маршрутизация на openroute/admin-service.
+# Конфиг «стены»: единая точка входа, маршрутизация на gateway/web-admin.
 COPY nginx.conf /etc/nginx/nginx.conf
 COPY proxy_params_edge.conf /etc/nginx/proxy_params_edge.conf
 

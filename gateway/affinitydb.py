@@ -1,6 +1,6 @@
 """Sticky session -> proxy bindings in PostgreSQL (table ``session_affinity``).
 
-Modelled on :mod:`app.proxydb`: a lazy ``psycopg_pool.ConnectionPool`` with the
+Modelled on :mod:`gateway.proxydb`: a lazy ``psycopg_pool.ConnectionPool`` with the
 DDL created on first use (the DDL lives in ``pg.py``), idempotent ``close()``.
 
 Semantics:

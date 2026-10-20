@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from app.reqlog import LogEntry, RequestLog
+from gateway.reqlog import LogEntry, RequestLog
 
 
 def e(i, key="k1", status=200, prompt=10, completion=5, error=None, latency=100.0, stream=False):

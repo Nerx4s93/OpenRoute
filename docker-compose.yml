@@ -4,7 +4,7 @@ name: openroute
 services:
   # --- edge: ЕДИНСТВЕННАЯ точка входа (API Gateway-паттерн) ---
   # Наружу (0.0.0.0:${OPENROUTE_EDGE_PORT:-53202}) торчит только nginx;
-  # openroute и admin-service прячутся в docker-сети, их порты хосту не
+  # gateway и web-admin прячутся в docker-сети, их порты хосту не
   # публикуются. /internal/* наружу не маршрутизируется вообще.
   # Хост-порт настраивается через OPENROUTE_EDGE_PORT (по умолчанию 53202;
   # NVRoute занимает 53201) — оба стека работают одновременно.
@@ -39,13 +39,13 @@ services:
     networks:
       - net
     depends_on:
-      openroute:
+      gateway:
         condition: service_healthy
-      admin-service:
+      web-admin:
         condition: service_started
 
   # --- PostgreSQL: хранилище шлюза (лог запросов + proxies/keys).
-  # В приватной сети openroute-net; порт наружу НЕ публикуется (как у proxy6).
+  # В приватной сети openroute-net; порт наружу НЕ публикуется (как у px6).
   # Данные — в именованном томе pgdata (переживает пересоздание контейнера).
   postgres:
     image: postgres:17-alpine
@@ -68,7 +68,7 @@ services:
     networks:
       - net
 
-  # --- Redis: хранилище сессий admin-service. В приватной сети openroute-net;
+  # --- Redis: хранилище сессий web-admin. В приватной сети openroute-net;
   # порт наружу НЕ публикуется. AOF (everysec) + том: сессии переживают
   # рестарт. allkeys-lru: при нехватке памяти выгоняются старейшие ключи
   # (только сессии), Redis не падает.
@@ -100,10 +100,10 @@ services:
       - net
 
   # --- шлюз OpenRoute: data plane (/v1/*, /admin/status, /admin/logs, /health)
-  # + internal API (/internal/*, X-Internal-Token) для admin-service ---
-  openroute:
+  # + internal API (/internal/*, X-Internal-Token) для web-admin ---
+  gateway:
     build: .
-    image: openroute
+    image: openroute-gateway
     env_file:
       - .env
     environment:
@@ -134,25 +134,25 @@ services:
       start_period: 10s
     networks:
       - net
-    # Порядок старта: сначала proxy6 (шлюз тянет из него список прокси) и
-    # postgres (хранилище лога/прокси/ключей). /health у proxy6 не ходит в
-    # апстрим, так что condition безопасен; если proxy6 всё же упал — шлюз
+    # Порядок старта: сначала px6 (шлюз тянет из него список прокси) и
+    # postgres (хранилище лога/прокси/ключей). /health у px6 не ходит в
+    # апстрим, так что condition безопасен; если px6 всё же упал — шлюз
     # ретраит фетч через PROXY_RETRY_SECONDS.
     depends_on:
-      proxy6:
+      px6:
         condition: service_healthy
       postgres:
         condition: service_healthy
 
-  # --- admin-service: control plane (сайт /login + /admin/ui* + сессии).
+  # --- web-admin: control plane (сайт /login + /admin/ui* + сессии).
   # Данными владеет шлюз; сюда ходит через его internal API с общим секретом.
-  # Имя сервиса = DNS-имя в сети (admin-service:8000); на него ссылается
+  # Имя сервиса = DNS-имя в сети (web-admin:8000); на него ссылается
   # upstream в edge/nginx.conf — не переименовывать в одну сторону.
-  admin-service:
-    build: ./admin-service
-    image: openroute-admin
+  web-admin:
+    build: ./web-admin
+    image: openroute-web-admin
     env_file:
-      - ./admin-service/.env
+      - ./web-admin/.env
     restart: unless-stopped
     init: true
     mem_limit: 128m
@@ -174,24 +174,24 @@ services:
     networks:
       - net
     depends_on:
-      openroute:
+      gateway:
         condition: service_healthy
       redis:
         condition: service_healthy
 
-  proxy6:
-    build: ./proxy6-service
-    image: openroute-proxy6
+  px6:
+    build: ./px6-service
+    image: openroute-px6
     # container_name задаёт DNS-имя в сети: шлюз ходит по
-    # PROXIES_URL=http://openroute-proxy6:8000/proxies — не переименовывать.
+    # PROXIES_URL=http://openroute-px6:8000/proxies — не переименовывать.
     # Имя уникально для всего docker-демона и не конфликтует с NVRoute
     # (у того контейнер прокси-сервиса называется proxy6-service).
-    container_name: openroute-proxy6
+    container_name: openroute-px6
     env_file:
-      - ./proxy6-service/.env
+      - ./px6-service/.env
     # Хост-порт НЕ публикуем: /proxies отдаёт креды прокси в открытом виде.
     # Debug: docker run --rm --network openroute-net curlimages/curl \
-    #   http://openroute-proxy6:8000/proxies
+    #   http://openroute-px6:8000/proxies
     restart: unless-stopped
     init: true
     mem_limit: 128m

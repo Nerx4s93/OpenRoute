@@ -5,10 +5,10 @@ from __future__ import annotations
 import psycopg
 import pytest
 
-from app.affinity import AffinityManager, SessionState
-from app.affinitydb import AffinityDB
-from app.proxies import ProxyManager
-from app.proxydb import ProxyDB
+from gateway.affinity import AffinityManager, SessionState
+from gateway.affinitydb import AffinityDB
+from gateway.proxies import ProxyManager
+from gateway.proxydb import ProxyDB
 
 from gw import build_settings
 

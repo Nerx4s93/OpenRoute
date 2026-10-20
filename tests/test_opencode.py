@@ -1,4 +1,4 @@
-"""Unit tests for app.opencode — the gated opencode.ai integration primitives.
+"""Unit tests for gateway.opencode — the gated opencode.ai integration primitives.
 
 Pure/stdlib-only: no network, no DB, no third-party imports beyond pytest.
 """
@@ -11,7 +11,7 @@ from email.utils import format_datetime
 
 import pytest
 
-from app import opencode
+from gateway import opencode
 
 
 # --- session id ------------------------------------------------------------

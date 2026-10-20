@@ -11,13 +11,12 @@ __pycache__
 .ruff_cache
 *.egg-info
 README.md
-DESIGN.md
 Dockerfile
 docker-compose.yml
 docker-compose.test.yml
 requirements-dev.txt
 tests
 # соседние микросервисы собираются из своих контекстов
-proxy6-service
-admin-service
+px6-service
+web-admin
 edge

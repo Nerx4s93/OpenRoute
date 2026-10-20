@@ -1,11 +1,11 @@
-"""proxy6-service unit tests: the px6 API key must never reach the logs.
+"""px6-service unit tests: the px6 API key must never reach the logs.
 
 The key is part of the request URL *path* (``/{key}/{method}``), a shape httpx
 logs verbatim at INFO. ``app/client.py`` raises the httpx/httpcore loggers to
 WARNING; these tests assert the key stays out of captured output for a failed
 upstream call and that ``redact_url`` strips credentials.
 
-``proxy6-service`` is not an importable package name (hyphen), so the module is
+``px6-service`` is not an importable package name (hyphen), so the module is
 loaded from its file path. It has no relative imports of its own.
 """
 
@@ -20,13 +20,13 @@ import httpx
 import pytest
 
 _CLIENT_PATH = (pathlib.Path(__file__).resolve().parent.parent
-                / "proxy6-service" / "app" / "client.py")
+                / "px6-service" / "app" / "client.py")
 
 API_KEY = "px6-test-key-DO-NOT-LEAK"
 
 
 def _load_client():
-    """Import ``proxy6-service/app/client.py`` by path (executes its module code)."""
+    """Import ``px6-service/app/client.py`` by path (executes its module code)."""
     spec = importlib.util.spec_from_file_location("openroute_px6_client", _CLIENT_PATH)
     module = importlib.util.module_from_spec(spec)
     sys.modules[spec.name] = module

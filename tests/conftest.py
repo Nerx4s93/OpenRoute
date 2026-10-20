@@ -56,7 +56,7 @@ def pg_dsn():
 
 @pytest.fixture(scope="session", autouse=True)
 def _close_import_time_pools():
-    """Close the reqlog pool created when app.main was imported (DSN from .env).
+    """Close the reqlog pool created when gateway.main was imported (DSN from .env).
 
     Otherwise psycopg_pool workers "say goodbye" via __del__ on an already
     closed stderr at interpreter exit — a flood of Logging errors in pytest's
@@ -64,7 +64,7 @@ def _close_import_time_pools():
     instance.
     """
     yield
-    import app.main as main
+    import gateway.main as main
     try:
         main.reqlog.close()
     except Exception:

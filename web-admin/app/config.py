@@ -1,4 +1,4 @@
-"""admin-service configuration (pydantic-settings). Mirrors NVRoute."""
+"""web-admin configuration (pydantic-settings). Mirrors NVRoute."""
 
 from functools import lru_cache
 
@@ -12,10 +12,10 @@ class Settings(BaseSettings):
     admin_password: str = ""
     # Admin session TTL, seconds (12 hours).
     admin_session_ttl_seconds: int = 43200
-    # Redis — session store (survives admin-service restarts).
+    # Redis — session store (survives web-admin restarts).
     redis_url: str = "redis://redis:6379/0"
     # Gateway internal API base URL (docker network name).
-    gateway_internal_url: str = "http://openroute:8000"
+    gateway_internal_url: str = "http://gateway:8000"
     # Must equal INTERNAL_API_TOKEN in the gateway's .env (X-Internal-Token).
     internal_api_token: str = ""
     # Timeout for internal API requests to the gateway, seconds.

@@ -17,9 +17,9 @@ from email.utils import format_datetime
 import httpx
 import pytest
 
-import app.opencode as opencode
-import app.proxies as prox
-from app.proxies import NoReadyProxyError, Proxy, ProxyManager, mask_proxy
+import gateway.opencode as opencode
+import gateway.proxies as prox
+from gateway.proxies import NoReadyProxyError, Proxy, ProxyManager, mask_proxy
 
 from gw import build_settings
 
@@ -385,7 +385,7 @@ def test_proxy_url_accepts_dicts_and_strings_rejects_malformed():
 
 @pytest.mark.asyncio
 async def test_refresh_proxies_skips_malformed_and_dedups(caplog):
-    caplog.set_level(logging.WARNING, logger="app.proxies")
+    caplog.set_level(logging.WARNING, logger="gateway.proxies")
     m = mgr()
     payload = {"proxies": [
         {"host": "h1.internal", "port": 8081, "user": "u1", "password": "p1"},
@@ -428,7 +428,7 @@ async def test_refresh_failure_redacts_credentials_in_last_fetch_status():
     """A fetch/HTTP error message may embed PROXIES_URL with credentials; the
     status payload (exposed via /health and /admin/status) must be redacted."""
     m = mgr()
-    url = "http://svc:topsecret@proxy6-service:8000/proxies"
+    url = "http://svc:topsecret@px6-service:8000/proxies"
 
     class _BoomFetcher:
         async def get(self, _url):
@@ -447,10 +447,10 @@ async def test_refresh_failure_redacts_credentials_in_last_fetch_status():
 
     assert await m.refresh_proxies() is False
     assert "topsecret" not in (m.last_fetch_status or "")
-    assert "http://***@proxy6-service:8000/proxies" in (m.last_fetch_status or "")
+    assert "http://***@px6-service:8000/proxies" in (m.last_fetch_status or "")
     # status() is the payload /health and /admin/status return
     assert "topsecret" not in json.dumps(m.status())
-    assert "http://***@proxy6-service:8000/proxies" in m.status()["last_proxies_fetch"]
+    assert "http://***@px6-service:8000/proxies" in m.status()["last_proxies_fetch"]
     await m.aclose()
 
 
@@ -467,7 +467,7 @@ def test_redact_url_strips_userinfo_and_secret():
 
 @pytest.mark.asyncio
 async def test_refresh_upsert_preserves_manual_disable(pg_dsn):
-    from app.proxydb import ProxyDB
+    from gateway.proxydb import ProxyDB
 
     db = ProxyDB(pg_dsn)
     assert db.upsert_many(["http://h1:1"]) == 1
@@ -492,7 +492,7 @@ async def test_refresh_upsert_preserves_manual_disable(pg_dsn):
 
 @pytest.mark.asyncio
 async def test_probe_proxy_407_5xx_and_network_errors_mean_dead(monkeypatch, caplog):
-    caplog.set_level(logging.INFO, logger="app.proxies")
+    caplog.set_level(logging.INFO, logger="gateway.proxies")
     m = mgr()
     made = {"status": 200}
 

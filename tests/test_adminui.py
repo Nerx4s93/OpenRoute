@@ -1,6 +1,6 @@
-"""Tests for the OpenRoute web admin (``admin-service``) — ``/admin/ui``.
+"""Tests for the OpenRoute web admin (``web-admin``) — ``/admin/ui``.
 
-Hermetic by construction: the admin-service is driven by ``TestClient`` and its
+Hermetic by construction: the web-admin is driven by ``TestClient`` and its
 internal-API client is pointed at an in-process fake gateway (``FastAPI`` +
 ``httpx.ASGITransport``), so no Redis, no PostgreSQL and no network are needed.
 This mirrors ``NVRoute/tests/test_adminui.py``, adapted from accounts to proxies.
@@ -27,13 +27,13 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
-# --- load the admin-service ``app`` package under a unique name -------------
-# ``admin-service`` has a hyphen, so it is not importable as a package; load it
+# --- load the web-admin ``app`` package under a unique name -------------
+# ``web-admin`` has a hyphen, so it is not importable as a package; load it
 # explicitly (same trick as NVRoute/tests/gw.py). Relative imports inside
 # ``.config``/``.sessions``/``.adminui`` keep working.
 
 TESTS_DIR = Path(__file__).resolve().parent
-ADMIN_SERVICE_DIR = TESTS_DIR.parent / "admin-service"
+WEB_ADMIN_DIR = TESTS_DIR.parent / "web-admin"
 
 
 def _load_package(name: str, pkg_dir: Path):
@@ -47,12 +47,12 @@ def _load_package(name: str, pkg_dir: Path):
     return mod
 
 
-_load_package("adminservice", ADMIN_SERVICE_DIR / "app")
+_load_package("adminservice", WEB_ADMIN_DIR / "app")
 
 
 def _load_admin_main():
     spec = importlib.util.spec_from_file_location(
-        "adminservice.main", str(ADMIN_SERVICE_DIR / "app" / "main.py"),
+        "adminservice.main", str(WEB_ADMIN_DIR / "app" / "main.py"),
     )
     mod = importlib.util.module_from_spec(spec)
     sys.modules["adminservice.main"] = mod
@@ -123,7 +123,7 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
         """Mirror the REAL gateway: ALL HTTP errors use the OpenAI envelope.
 
         The gateway wraps every ``HTTPException`` as
-        ``{"error": {"message", "type", "code"}}`` (DESIGN.md §10), including
+        ``{"error": {"message", "type", "code"}}``, including
         internal ones — not FastAPI's ``{"detail": ...}``.
         """
         return JSONResponse(
@@ -269,7 +269,7 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
     return app
 
 
-# --- admin-service harness --------------------------------------------------
+# --- web-admin harness --------------------------------------------------
 
 
 class FakeSessionStore:
@@ -309,7 +309,7 @@ def build_admin_settings(**over):
 
 
 class Panel:
-    """A running admin-service wired to the fake gateway, driven by TestClient."""
+    """A running web-admin wired to the fake gateway, driven by TestClient."""
 
     def __init__(self, monkeypatch, password: str = PW) -> None:
         self.sessions = FakeSessionStore()

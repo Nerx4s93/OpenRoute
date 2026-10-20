@@ -1,8 +1,8 @@
-"""admin-service — OpenRoute web admin as a separate microservice (control plane).
+"""web-admin — OpenRoute web admin as a separate microservice (control plane).
 
 Session/login/CSRF plumbing mirrors ``NVRoute/admin-service/app/main.py``; the
 page-rendering and mutation routes delegate to ``adminui.py`` and drive the
-gateway's FROZEN internal API (DESIGN.md §2):
+gateway's frozen internal API:
 
     GET  /internal/proxies-data        -> snapshot for the "Proxies" page
     GET  /internal/keys-data           -> snapshot for the "Keys" page
@@ -36,7 +36,7 @@ from .config import get_settings
 from .sessions import RedisSessionStore, SessionUnavailable
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
-logger = logging.getLogger("openroute-admin")
+logger = logging.getLogger("openroute-web-admin")
 
 settings = get_settings()
 
@@ -78,8 +78,8 @@ def _gateway_error(r: httpx.Response) -> HTTPException:
     """Map a gateway error response to an ``HTTPException`` with a clean message.
 
     The gateway answers ALL HTTP errors (including internal 403/404/5xx) with
-    the OpenAI envelope ``{"error": {"message", "type", "code"}}`` (DESIGN.md
-    §10), so prefer ``payload["error"]["message"]``; fall back to FastAPI's
+    the OpenAI envelope ``{"error": {"message", "type", "code"}}``, so prefer
+    ``payload["error"]["message"]``; fall back to FastAPI's
     ``{"detail": ...}``, then a bare ``{"message": ...}``, then the raw body.
     The raw JSON envelope is never surfaced to the operator.
     """
