@@ -1137,7 +1137,7 @@ def test_internal_proxies_add_endpoint_removed(make_gateway):
     assert r.status_code == 404
 
 
-def test_internal_proxies_set_delete(make_gateway):
+def test_internal_proxies_set_and_delete_removed(make_gateway):
     gw = make_gateway()
     h = {"X-Internal-Token": "test-internal-token"}
 
@@ -1149,17 +1149,14 @@ def test_internal_proxies_set_delete(make_gateway):
                if p["real_proxy"] == "http://proxy-a.invalid:8080")
     assert row["enabled"] is False and row["manual"] is True
 
+    # Proxy deletion is out of scope: the internal endpoint is gone.
     r2 = gw.internal.post("/internal/proxies/delete",
                           json={"proxy": "http://proxy-b.invalid:8080"}, headers=h)
-    assert r2.status_code == 200
-    with pytest.raises(StopIteration):
-        next(p for p in gw.manager.proxies if p.url == "http://proxy-b.invalid:8080")
-
-    r3 = gw.internal.post("/internal/proxies/delete", json={"proxy": "http://nope:1"}, headers=h)
-    assert r3.status_code == 404
+    assert r2.status_code == 404
+    assert any(p.url == "http://proxy-b.invalid:8080" for p in gw.manager.proxies)
 
 
-def test_internal_disable_and_delete_invalidate_affinity(make_gateway):
+def test_internal_disable_invalidates_affinity(make_gateway):
     gw = make_gateway()
     h = {"X-Internal-Token": "test-internal-token"}
     sid = "ses_0123456789ab" + "F" * 14
@@ -1183,13 +1180,6 @@ def test_internal_disable_and_delete_invalidate_affinity(make_gateway):
     # The next turn leaves the disabled exit and binds to the remaining one.
     assert gw.client.post("/v1/chat/completions", json=body(), headers=auth).status_code == 200
     assert state.proxy == other
-
-    r2 = gw.internal.post("/internal/proxies/delete", json={"proxy": other}, headers=h)
-    assert r2.status_code == 200
-    assert state.proxy is None
-    gw.flush_affinity()
-    row = next(r for r in gw.affinitydb.load_all() if r[0] == f"sid:{sid}")
-    assert row[1] is None
 
 
 def test_internal_keys_add_set_delete_and_persist(make_gateway):

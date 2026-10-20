@@ -213,16 +213,6 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
             return {"ok": True, "message": "Прокси включён" if enabled else "Прокси отключён"}
         raise HTTPException(404, "Proxy not found")
 
-    @app.post("/internal/proxies/delete")
-    async def proxies_delete(req: Request) -> dict:
-        require(req)
-        data = await req.json()
-        url = str(data.get("proxy", ""))
-        if url in state.proxies:
-            del state.proxies[url]
-            return {"ok": True, "message": "Прокси удалён"}
-        raise HTTPException(404, "Proxy not found")
-
     @app.get("/internal/keys-data")
     async def keys_data(req: Request) -> dict:
         require(req)
@@ -534,7 +524,7 @@ def test_ui_add_proxy_route_removed(panel):
     assert "http://u:p@h-new:8080" not in panel.state.proxies
 
 
-def test_ui_toggle_delete_proxy(panel):
+def test_ui_toggle_proxy_has_no_delete_action(panel):
     login_ok(panel)
     csrf = panel_csrf(panel)
     seed_proxy(panel, "http://u:p@h1:8080")
@@ -547,22 +537,18 @@ def test_ui_toggle_delete_proxy(panel):
     assert panel.state.proxies["http://u:p@h1:8080"] is False
     html = panel.client.get("/admin/ui").text
     assert "выключен" in html
+    # Proxy deletion is out of scope: no button and no route.
+    assert "proxies/delete" not in html
+    assert "Удалить" not in html
+    r = panel.client.post("/admin/ui/proxies/delete", follow_redirects=False,
+                          data={"_csrf": csrf, "proxy": "http://u:p@h2:8080"})
+    assert r.status_code == 404
+    assert "http://u:p@h2:8080" in panel.state.proxies
 
     # re-enable
     panel.client.post("/admin/ui/proxies/set", follow_redirects=False,
                       data={"_csrf": csrf, "proxy": "http://u:p@h1:8080", "enabled": "1"})
     assert panel.state.proxies["http://u:p@h1:8080"] is True
-
-    # delete removes it
-    r = panel.client.post("/admin/ui/proxies/delete", follow_redirects=False,
-                          data={"_csrf": csrf, "proxy": "http://u:p@h2:8080"})
-    assert r.status_code == 303
-    assert "http://u:p@h2:8080" not in panel.state.proxies
-
-    # unknown proxy → 404
-    r = panel.client.post("/admin/ui/proxies/delete", follow_redirects=False,
-                          data={"_csrf": csrf, "proxy": "http://nope:1"})
-    assert r.status_code == 404
 
 
 def test_proxy_rows_show_masked_hostport(panel):
@@ -835,11 +821,14 @@ def test_panel_data_reflects_changes_live(panel):
     seed_proxy(panel, "http://u:p@live-1:8080")
     before = panel.client.get("/admin/ui/data").json()
     assert "live-1:8080" in before["proxies-rows"]
-    r = panel.client.post("/admin/ui/proxies/delete", follow_redirects=False,
-                          data={"_csrf": csrf, "proxy": "http://u:p@live-1:8080"})
+    assert "выключен" not in before["proxies-rows"]
+    r = panel.client.post("/admin/ui/proxies/set", follow_redirects=False,
+                          data={"_csrf": csrf, "proxy": "http://u:p@live-1:8080",
+                                "enabled": "0"})
     assert r.status_code == 303
     after = panel.client.get("/admin/ui/data").json()
-    assert "live-1:8080" not in after["proxies-rows"]
+    assert "live-1:8080" in after["proxies-rows"]
+    assert "выключен" in after["proxies-rows"]
 
 
 def test_keys_data_reflects_added_key_live(panel):
@@ -983,8 +972,8 @@ def test_gateway_envelope_error_surfaced_cleanly(panel):
     """End-to-end: an internal 404 surfaces a clean message, not the envelope."""
     login_ok(panel)
     csrf = panel_csrf(panel)
-    r = panel.client.post("/admin/ui/proxies/delete", follow_redirects=False,
-                          data={"_csrf": csrf, "proxy": "http://nope:1"})
+    r = panel.client.post("/admin/ui/proxies/set", follow_redirects=False,
+                          data={"_csrf": csrf, "proxy": "http://nope:1", "enabled": "1"})
     assert r.status_code == 404
     body = r.json()
     assert body == {"detail": "Proxy not found"}

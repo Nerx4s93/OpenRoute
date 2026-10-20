@@ -10,8 +10,8 @@ quota/abuse parking (``quota_until`` / ``banned_until``) and the non-expiring
 ``permanently_banned`` abusive-traffic verdict. Membership is seeded
 exclusively by ``refresh_proxies`` — there is no manual-add path. The refresh
 only ever UPSERTS fetched proxies (insert new rows with ``enabled = TRUE``;
-never flips an existing row's flag; never deletes). Manual admin actions
-(``set_enabled`` / ``remove``) mutate the same table.
+never flips an existing row's flag; never deletes). The only manual admin
+action is ``set_enabled`` on the same table; deletion is out of scope.
 
 Parking values are wall-clock epochs (``time.time()``); ``permanently_banned``
 never expires. They are written by ``ProxyManager`` and loaded at startup, so a
@@ -136,13 +136,6 @@ class ProxyDB:
             cur = conn.execute(
                 "UPDATE proxies SET enabled = %s WHERE proxy = %s", (enabled, proxy)
             )
-            return cur.rowcount > 0
-
-    def remove(self, proxy: str) -> bool:
-        """True if a row was deleted."""
-        self._ensure()
-        with self._pool.connection() as conn:
-            cur = conn.execute("DELETE FROM proxies WHERE proxy = %s", (proxy,))
             return cur.rowcount > 0
 
     def close(self) -> None:

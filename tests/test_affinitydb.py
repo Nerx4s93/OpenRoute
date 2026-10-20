@@ -29,7 +29,10 @@ def test_session_affinity_ddl_fk_set_null_and_upsert(pg_dsn):
     assert db.load_all() == [("sid:one", proxy, 100.0, 220.0)]
 
     # The FK is ON DELETE SET NULL: removing the proxy unbinds the session.
-    assert pdb.remove(proxy) is True
+    # Admin deletion is out of scope, so simulate an external row removal.
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        cur = conn.execute("DELETE FROM proxies WHERE proxy = %s", (proxy,))
+    assert cur.rowcount == 1
     assert db.load_all() == [("sid:one", None, 100.0, 220.0)]
     db.close()
     pdb.close()
@@ -78,7 +81,7 @@ def test_schema_matches_contract(pg_dsn):
 
 @pytest.mark.asyncio
 async def test_fk_race_stale_batch_keeps_live_bindings(pg_dsn):
-    """An admin delete racing the writer must only unbind the deleted proxy.
+    """An external delete racing the writer must only unbind the deleted proxy.
 
     The FK rejects the whole coalesced batch once the proxy row is gone; the
     row-by-row retry then NULLs the vanished binding and keeps the healthy one
@@ -103,7 +106,9 @@ async def test_fk_race_stale_batch_keeps_live_bindings(pg_dsn):
     assert {r[0]: r[1] for r in db.load_all()} == {"sid:a": a, "sid:b": b}
 
     # Race: the proxy row disappears while both stale snapshots are queued.
-    assert pdb.remove(a) is True
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        cur = conn.execute("DELETE FROM proxies WHERE proxy = %s", (a,))
+    assert cur.rowcount == 1
     s1.proxy = a
     s1.last_used_at = 30.0
     s2.last_used_at = 30.0

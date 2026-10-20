@@ -25,7 +25,7 @@ Data shapes (frozen):
 
 - Proxies: ``status`` = ``ProxyManager.status()``; ``usage_by_proxy`` keys are
   masked proxies (``host:port``, the ``account`` column of the request log).
-  For the enable/disable/delete forms the gateway augments each row with a
+  For the enable/disable form the gateway augments each row with a
   ``real_proxy`` (the full, unmasked proxy URL) — mirroring NVRoute's
   ``real_token`` — so actions can address the row; the table only ever shows
   the masked ``host:port``. A defensive resolver below accepts several spellings
@@ -383,7 +383,7 @@ def _proxy_identity(s: dict) -> str:
 
     Mirrors NVRoute's ``real_token``: the internal API snapshot augments each
     status row with the full, unmasked proxy URL (``real_proxy``) for the
-    enable/disable/delete forms. Restrictive fallbacks keep the UI working if
+    enable/disable form. Restrictive fallbacks keep the UI working if
     the gateway exposes it under another spelling: any candidate that looks like
     a full URL (``scheme://...``) is preferred, because ``ProxyDB`` rows are
     keyed by the full ``"http://user:pass@host:port"`` string.
@@ -442,14 +442,6 @@ def _proxy_rows(proxies: list[dict], usage: dict, csrf: str,
             toggle += '<button class="acc" type="submit">Включить</button></form>'
         else:
             toggle += '<button type="submit">Отключить</button></form>'
-        delete = (
-            f'<form method="post" action="{_PANEL}/proxies/delete" '
-            f'onsubmit="return confirm(\'Удалить прокси {_esc(_proxy_display(s))}?\')">'
-            f'<input type="hidden" name="_csrf" value="{_esc(csrf)}">'
-            f'<input type="hidden" name="period" value="{_esc(period)}">'
-            f'<input type="hidden" name="proxy" value="{real}">'
-            '<button class="danger" type="submit">Удалить</button></form>'
-        )
         rows.append(
             f"<tr{dead_cls}>"
             f'<td class="mono">{_esc(_proxy_display(s))}</td>'
@@ -458,7 +450,7 @@ def _proxy_rows(proxies: list[dict], usage: dict, csrf: str,
             f"<td>{_num(errors)}</td>"
             f"<td>{_num(u.get('tokens', 0))}</td>"
             f'<td class="muted">{_esc(s.get("last_error") or "")}</td>'
-            f'<td class="actions">{toggle}{delete}</td>'
+            f'<td class="actions">{toggle}</td>'
             "</tr>"
         )
     return "\n".join(rows) or '<tr><td colspan="7" class="muted">Прокси нет</td></tr>'

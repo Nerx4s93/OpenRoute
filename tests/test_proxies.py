@@ -819,13 +819,6 @@ def test_apply_proxies_preserves_parking_per_proxy_on_refresh():
     assert groups[1].quota_until == 0.0
     assert groups[2].banned_until == until
 
-    # Removing one URL removes only its own bucket.
-    m.remove_proxy("http://10.0.0.1:1")
-    assert [g.host for g in m.egress_groups()] == [
-        "10.0.0.1:3", "10.0.0.2:2"]
-    m.remove_proxy("http://10.0.0.1:3")
-    assert [g.host for g in m.egress_groups()] == ["10.0.0.2:2"]
-
 
 def test_earliest_ready_seconds_includes_parked_group_even_if_excluded():
     m = mgr(proxies=["http://a:1", "http://b:1"])

@@ -1088,23 +1088,6 @@ async def internal_proxies_set(request: Request) -> dict:
     raise HTTPException(404, "Proxy not found")
 
 
-async def internal_proxies_delete(request: Request) -> dict:
-    """``{"proxy": str}`` — delete a proxy from the pool."""
-    _require_internal(request)
-    data = await _read_json(request)
-    proxy = str(data.get("proxy", ""))
-    db = _require_proxydb()
-    if await asyncio.to_thread(db.remove, proxy):
-        manager.remove_proxy(proxy)
-        if affinity is not None:
-            try:
-                affinity.forget_proxy(proxy)
-            except Exception:
-                logger.exception("Affinity forget_proxy failed for %s", mask_proxy(proxy))
-        return {"ok": True, "message": "Proxy deleted"}
-    raise HTTPException(404, "Proxy not found")
-
-
 async def internal_keys_add(request: Request) -> dict:
     """``{"key": plaintext, "key_id"?, "name"?, "admin"?, "rpm"?, "tpm"?,
     "models"?}``. Plaintext is hashed immediately (keys.py) and never stored."""
@@ -1215,8 +1198,6 @@ def create_app() -> FastAPI:
     application.add_api_route(f"{_INTERNAL_PREFIX}/keys-data", internal_keys_data,
                               methods=["GET"], include_in_schema=False)
     application.add_api_route(f"{_INTERNAL_PREFIX}/proxies/set", internal_proxies_set,
-                              methods=["POST"], include_in_schema=False)
-    application.add_api_route(f"{_INTERNAL_PREFIX}/proxies/delete", internal_proxies_delete,
                               methods=["POST"], include_in_schema=False)
     application.add_api_route(f"{_INTERNAL_PREFIX}/keys/add", internal_keys_add,
                               methods=["POST"], include_in_schema=False)

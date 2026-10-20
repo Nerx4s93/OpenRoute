@@ -250,16 +250,6 @@ def test_disabled_url_rebinds_permanently():
     assert manager.group_of(lease2.state.proxy).proxies[0].enabled
 
 
-def test_runtime_removed_url_rebinds():
-    aff, manager, _ = make_affinity(proxies=("http://a.invalid:1", "http://b.invalid:1"))
-    lease = bind(aff, "ses_one")
-    old = lease.state.proxy
-    manager.remove_proxy(old)
-    lease2 = aff.begin_request(identity("ses_one"))
-    assert lease2.state.proxy != old
-    assert lease2.state.proxy is not None
-
-
 def test_forget_proxy_unbinds_and_next_request_rebinds():
     aff, manager, _ = make_affinity(proxies=("http://a.invalid:1", "http://b.invalid:1"))
     lease = bind(aff, "ses_one")
@@ -268,10 +258,6 @@ def test_forget_proxy_unbinds_and_next_request_rebinds():
     assert lease.state.proxy is None
     lease2 = aff.begin_request(identity("ses_one"))
     assert lease2.state.proxy is not None
-    # A real admin disable/delete also removes or disables the URL.
-    manager.remove_proxy(old)
-    aff.forget_proxy(old)
-    assert aff.begin_request(identity("ses_one")).state.proxy != old
 
 
 def test_temporary_fallback_does_not_change_permanent_binding():

@@ -354,20 +354,6 @@ class ProxyManager:
             return group
         return self._group_by_key.get(canonical_quota_key(raw))
 
-    def remove_proxy(self, proxy: str) -> bool:
-        """Remove from the pool; client is closed in the background."""
-        for i in range(len(self.proxies)):
-            if self.proxies[i].url == proxy:
-                p = self.proxies.pop(i)
-                client, p.client, p._client_proxy = p.client, None, None
-                if client is not None:
-                    self._close_client_soon(client, f"remove_proxy {mask_proxy(proxy)}")
-                n = len(self.proxies)
-                self._rr = self._rr % n if n else 0
-                self._rebuild_groups()
-                return True
-        return False
-
     def set_manually_disabled(self, proxy: str, disabled: bool) -> bool:
         """Manual enable/disable from the admin UI (persisted in ProxyDB)."""
         for p in self.proxies:

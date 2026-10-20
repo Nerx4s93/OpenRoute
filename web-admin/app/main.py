@@ -7,7 +7,6 @@ gateway's frozen internal API:
     GET  /internal/proxies-data        -> snapshot for the "Proxies" page
     GET  /internal/keys-data           -> snapshot for the "Keys" page
     POST /internal/proxies/set         {"proxy": str, "enabled": bool}
-    POST /internal/proxies/delete      {"proxy": str}
     POST /internal/keys/add            {"key", "key_id", "name", "admin", "rpm", "tpm", "models"}
     POST /internal/keys/set            {"key_hash": str, "enabled": bool}
     POST /internal/keys/delete         {"key_hash": str}
@@ -459,15 +458,6 @@ async def admin_ui_set_proxy(request: Request, session: dict = Depends(require_p
         "enabled": form.get("enabled") == "1",
     })
     return _panel_redirect(res.get("message", "Готово"), period=form.get("period", "all"))
-
-
-@app.post(f"{_PANEL}/proxies/delete", include_in_schema=False)
-async def admin_ui_delete_proxy(request: Request, session: dict = Depends(require_panel)) -> RedirectResponse:
-    form = await _read_form(request)
-    _check_csrf(form, session)
-    res = await _api_post("/internal/proxies/delete", {"proxy": form.get("proxy", "")})
-    return _panel_redirect(res.get("message", "Прокси удалён"),
-                           period=form.get("period", "all"))
 
 
 @app.post(f"{_PANEL}/keys/add", include_in_schema=False)
