@@ -58,6 +58,7 @@ import math
 import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from datetime import datetime, timedelta, timezone
 
 import httpx
 from fastapi import Depends, FastAPI, HTTPException, Request
@@ -1081,24 +1082,33 @@ def _json_limit(raw: object, field: str) -> tuple[int | None, str | None]:
     return v, None
 
 
-_PANEL_PERIOD_SECONDS = {
-    "day": 24 * 60 * 60.0,
-    "week": 7 * 24 * 60 * 60.0,
-    "month": 30 * 24 * 60 * 60.0,
-}
+_PANEL_PERIODS = {"day", "week", "month"}
 
 
 def _period_since(period: str) -> float | None:
-    """Rolling-window cutoff for the admin spending filter; ``None`` = all time."""
-    seconds = _PANEL_PERIOD_SECONDS.get((period or "").lower())
-    return None if seconds is None else time.time() - seconds
+    """UTC calendar cutoff for the admin spending filter; ``None`` = all time.
+
+    ``day`` starts at 00:00 UTC today, ``week`` at Monday 00:00 UTC and
+    ``month`` at the 1st 00:00 UTC of the current month.
+    """
+    key = (period or "").lower()
+    if key not in _PANEL_PERIODS:
+        return None
+    start = datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0
+    )
+    if key == "week":
+        start -= timedelta(days=start.weekday())
+    elif key == "month":
+        start = start.replace(day=1)
+    return start.timestamp()
 
 
 async def _proxies_panel_data(period: str = "all") -> dict:
     """Snapshot for the "Proxies" page: awaits first (the pool may change from
     another tab's POST), then ``status()`` and the zip over ``manager.proxies``
     — so the table and counters are consistent. ``period`` filters the request
-    log aggregates (day/week/month = rolling 24h/7d/30d)."""
+    log aggregates (day/week/month = current UTC day/week/month)."""
     since = _period_since(period)
     per_proxy = await reqlog.summary_by_account_async(since)
     usage = await reqlog.summary_async(since)

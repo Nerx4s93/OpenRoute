@@ -1,9 +1,9 @@
 export type Period = "day" | "week" | "month" | "all";
 
 export const PERIODS: ReadonlyArray<{ value: Period; label: string; title: string }> = [
-  { value: "day", label: "День", title: "Последние 24 часа" },
-  { value: "week", label: "Неделя", title: "Последние 7 дней" },
-  { value: "month", label: "Месяц", title: "Последние 30 дней" },
+  { value: "day", label: "День", title: "С начала дня (00:00 UTC)" },
+  { value: "week", label: "Неделя", title: "С начала недели, понедельник (00:00 UTC)" },
+  { value: "month", label: "Месяц", title: "С начала месяца (00:00 UTC)" },
   { value: "all", label: "Всё время", title: "За всё время" },
 ];
 

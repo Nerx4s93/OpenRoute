@@ -1343,54 +1343,83 @@ def test_internal_requires_token(make_gateway):
     assert bad.json()["error"]["message"] == "Invalid internal token"
 
 
-def test_internal_period_filters_usage(make_gateway):
-    """?period=day/week/month selects a rolling request_log window; unknown
-    values behave like all time. The recent-requests feed stays unfiltered."""
+def test_internal_period_filters_usage(make_gateway, monkeypatch):
+    """?period=day/week/month selects UTC calendar windows (today, current
+    Monday-based week, current month); unknown values behave like all time.
+    The recent-requests feed stays unfiltered."""
+    class FrozenDateTime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            fixed = cls(2026, 5, 20, 15, 30, tzinfo=timezone.utc)
+            return fixed.astimezone(tz)
+
+    monkeypatch.setattr(main, "datetime", FrozenDateTime)
     gw = make_gateway()
-    now = time.time()
+
+    def ts(*args) -> float:
+        return datetime(*args, tzinfo=timezone.utc).timestamp()
 
     async def seed():
+        # Previous month.
         old = LogEntry(
-            ts=now - 10 * 24 * 60 * 60, key_id="old", method="POST",
+            ts=ts(2026, 4, 15, 12, 0), key_id="old", method="POST",
             path="chat/completions", model=FREE_MODEL, status=200, latency_ms=10.0,
             stream=True, account="1.2.3.4:8080", prompt_tokens=100,
             completion_tokens=0, error=None,
         )
-        new = LogEntry(
-            ts=now - 60, key_id="default", method="POST", path="chat/completions",
-            model=FREE_MODEL, status=200, latency_ms=20.0, stream=True,
-            account="5.6.7.8:8080", prompt_tokens=7, completion_tokens=3,
-            error=None,
+        # This month, but before the current week.
+        month = LogEntry(
+            ts=ts(2026, 5, 10, 12, 0), key_id="month", method="POST",
+            path="chat/completions", model=FREE_MODEL, status=200, latency_ms=10.0,
+            stream=True, account="2.3.4.5:8080", prompt_tokens=20,
+            completion_tokens=0, error=None,
         )
-        await gw.reqlog.log(old)
-        await gw.reqlog.log(new)
+        # This week, but yesterday: less than 24h before the frozen now, so a
+        # rolling 24h window would include it while today's window must not.
+        prev_day = LogEntry(
+            ts=ts(2026, 5, 19, 20, 0), key_id="prev_day", method="POST",
+            path="chat/completions", model=FREE_MODEL, status=200, latency_ms=10.0,
+            stream=True, account="3.4.5.6:8080", prompt_tokens=5,
+            completion_tokens=0, error=None,
+        )
+        # Today, exactly at the UTC midnight boundary.
+        day = LogEntry(
+            ts=ts(2026, 5, 20, 0, 0), key_id="day", method="POST",
+            path="chat/completions", model=FREE_MODEL, status=200, latency_ms=20.0,
+            stream=True, account="5.6.7.8:8080", prompt_tokens=7,
+            completion_tokens=3, error=None,
+        )
+        for entry in (old, month, prev_day, day):
+            await gw.reqlog.log(entry)
 
     gw._gw_lifespan_client.portal.call(seed)
     h = {"X-Internal-Token": "test-internal-token"}
 
     all_data = gw.internal.get("/internal/proxies-data?period=all", headers=h).json()
-    assert all_data["usage"]["total"]["requests"] == 2
-    assert len(all_data["recent"]) == 2
+    assert all_data["usage"]["total"]["requests"] == 4
+    assert len(all_data["recent"]) == 4
 
     day = gw.internal.get("/internal/proxies-data?period=day", headers=h).json()
     assert day["usage"]["total"]["requests"] == 1
     assert day["usage"]["total"]["tokens"] == 10
     assert set(day["usage_by_proxy"]) == {"5.6.7.8:8080"}
-    # The activity log is not a spending aggregate: it still shows both rows.
-    assert len(day["recent"]) == 2
+    # The activity log is not a spending aggregate: it still shows every row.
+    assert len(day["recent"]) == 4
 
     week = gw.internal.get("/internal/proxies-data?period=week", headers=h).json()
-    assert week["usage"]["total"]["requests"] == 1
+    assert week["usage"]["total"]["requests"] == 2
+    assert week["usage"]["total"]["tokens"] == 15
 
     month = gw.internal.get("/internal/proxies-data?period=month", headers=h).json()
-    assert month["usage"]["total"]["requests"] == 2
+    assert month["usage"]["total"]["requests"] == 3
+    assert month["usage"]["total"]["tokens"] == 35
 
     unknown = gw.internal.get("/internal/proxies-data?period=year", headers=h).json()
-    assert unknown["usage"]["total"]["requests"] == 2
+    assert unknown["usage"]["total"]["requests"] == 4
 
     keys_day = gw.internal.get("/internal/keys-data?period=day", headers=h).json()
     assert keys_day["usage"]["total"]["requests"] == 1
-    assert "old" not in keys_day["usage"]
+    assert set(keys_day["usage"]) == {"day", "total"}
 
 
 def test_internal_disabled_when_token_empty(make_gateway):
