@@ -630,6 +630,59 @@ async def test_refresh_upsert_preserves_manual_disable(pg_dsn):
     await m.aclose()
 
 
+@pytest.mark.asyncio
+async def test_refresh_unlists_missing_proxies_and_restores_parking(pg_dsn):
+    """A proxy missing from PROXIES_URL leaves the live pool but keeps its DB
+    row, manual flag and ban, so it is never used even if it reappears."""
+    import types
+
+    from gateway.proxydb import ProxyDB
+
+    db = ProxyDB(pg_dsn)
+    m = ProxyManager(build_settings(pg_dsn))
+    m.bind_db(db)
+    m._probe_proxy = types.MethodType(_alive_probe, m)
+
+    await _fake_fetch(m, {"proxies": [
+        {"host": "h1", "port": 1},
+        {"host": "h2", "port": 2},
+    ]})
+    assert await m.refresh_proxies() is True
+    assert [p.url for p in m.proxies] == ["http://h1:1", "http://h2:2"]
+
+    assert db.set_enabled("http://h1:1", False) is True
+    h2 = next(g for g in m.egress_groups() if g.host == "h2:2")
+    m.mark_permanently_banned(h2)
+
+    # h2 disappears from the source: not in the runtime pool or all(), but
+    # its row and the permanent ban remain in the table.
+    await _fake_fetch(m, {"proxies": [{"host": "h1", "port": 1}]})
+    assert await m.refresh_proxies() is True
+    assert [p.url for p in m.proxies] == ["http://h1:1"]
+    assert db.all() == [("http://h1:1", False)]
+    assert any(
+        proxy == "http://h2:2" and permanent
+        for proxy, _, _, permanent in db.parking_all()
+    )
+
+    # h2 returns: it is listed again, but the permanent ban is restored from
+    # the DB, so neither h2 (banned) nor h1 (manual off) can be selected.
+    await _fake_fetch(m, {"proxies": [
+        {"host": "h1", "port": 1},
+        {"host": "h2", "port": 2},
+    ]})
+    assert await m.refresh_proxies() is True
+    assert {p.url for p in m.proxies} == {"http://h1:1", "http://h2:2"}
+    assert next(p for p in m.proxies if p.url == "http://h1:1").manually_disabled is True
+    h2 = next(g for g in m.egress_groups() if g.host == "h2:2")
+    assert h2.permanently_banned is True
+    with pytest.raises(NoReadyProxyError):
+        m.next_proxy()
+
+    db.close()
+    await m.aclose()
+
+
 # --- probe: 407/5xx = dead ---
 
 

@@ -47,7 +47,8 @@ SCHEMA: tuple[str, ...] = (
         added_at DOUBLE PRECISION NOT NULL,
         quota_until DOUBLE PRECISION NOT NULL DEFAULT 0,
         banned_until DOUBLE PRECISION NOT NULL DEFAULT 0,
-        permanently_banned BOOLEAN NOT NULL DEFAULT FALSE
+        permanently_banned BOOLEAN NOT NULL DEFAULT FALSE,
+        listed BOOLEAN NOT NULL DEFAULT TRUE
     )
     """,
     # Existing installations have the old table: add the parking columns in
@@ -58,6 +59,11 @@ SCHEMA: tuple[str, ...] = (
     " DOUBLE PRECISION NOT NULL DEFAULT 0",
     "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS permanently_banned"
     " BOOLEAN NOT NULL DEFAULT FALSE",
+    # ``listed`` = present in the latest successful PROXIES_URL fetch. Rows
+    # missing from the source are soft-removed (listed = FALSE) instead of
+    # deleted, so parking and foreign keys survive and a proxy can come back.
+    "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS listed"
+    " BOOLEAN NOT NULL DEFAULT TRUE",
     # Sticky session -> exit proxy binding (affinitydb.py). ``ON DELETE SET
     # NULL`` unbinds a session when its proxy is removed; ``created_at`` is
     # never changed by a move (only ``proxy``/``last_used_at`` are updated).

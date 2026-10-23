@@ -9,9 +9,12 @@ membership, each proxy's manual ``enabled`` flag, and upstream
 quota/abuse parking (``quota_until`` / ``banned_until``) and the non-expiring
 ``permanently_banned`` abusive-traffic verdict. Membership is seeded
 exclusively by ``refresh_proxies`` — there is no manual-add path. The refresh
-only ever UPSERTS fetched proxies (insert new rows with ``enabled = TRUE``;
-never flips an existing row's flag; never deletes). The only manual admin
-action is ``set_enabled`` on the same table; deletion is out of scope.
+synchronises the fetched snapshot: new rows are inserted with
+``enabled = TRUE``, existing flags are preserved, and rows absent from the
+source are soft-removed with ``listed = FALSE``. Soft-removed rows stay in the
+table so parking/affinity survive and a proxy that reappears can be re-listed.
+The only manual admin action is ``set_enabled`` on the same table; physical
+deletion is out of scope.
 
 Parking values are wall-clock epochs (``time.time()``); ``permanently_banned``
 never expires. They are written by ``ProxyManager`` and loaded at startup, so a
@@ -31,14 +34,16 @@ from .pg import ensure_schema, make_pool
 
 class ProxyDB:
     """``proxies(id, proxy UNIQUE, enabled, added_at, quota_until,
-    banned_until, permanently_banned)``.
+    banned_until, permanently_banned, listed)``.
 
     ``enabled = FALSE`` — disabled by hand from the admin UI (persists across
-    restarts, unlike the runtime circuit breaker); ``quota_until`` /
-    ``banned_until`` persist timed upstream parking; ``permanently_banned``
-    persists the abusive-traffic verdict; ``id`` is insertion order (analogue
-    of sqlite rowid) and defines ``all()`` ordering. Lifecycle: after
-    ``close()`` the store never "resurrects"; ``close()`` is idempotent.
+    restarts, unlike the runtime circuit breaker); ``listed = FALSE`` — absent
+    from the latest successful source fetch and therefore not part of the live
+    pool; ``quota_until`` / ``banned_until`` persist timed upstream parking;
+    ``permanently_banned`` persists the abusive-traffic verdict; ``id`` is
+    insertion order (analogue of sqlite rowid) and defines ``all()`` ordering.
+    Lifecycle: after ``close()`` the store never "resurrects"; ``close()`` is
+    idempotent.
     """
 
     def __init__(self, dsn: str) -> None:
@@ -64,20 +69,24 @@ class ProxyDB:
     def is_empty(self) -> bool:
         self._ensure()
         with self._pool.connection() as conn:
-            return not conn.execute("SELECT EXISTS (SELECT 1 FROM proxies)").fetchone()[0]
+            return not conn.execute(
+                "SELECT EXISTS (SELECT 1 FROM proxies WHERE listed)"
+            ).fetchone()[0]
 
     def all(self) -> list[tuple[str, bool]]:
-        """``[(proxy, enabled)]`` in insertion order."""
+        """``[(proxy, enabled)]`` for listed rows, in insertion order."""
         self._ensure()
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT proxy, enabled FROM proxies ORDER BY id"
+                "SELECT proxy, enabled FROM proxies WHERE listed ORDER BY id"
             ).fetchall()
         return [(p, bool(e)) for p, e in rows]
 
     def parking_all(self) -> list[tuple[str, float, float, bool]]:
         """``[(proxy, quota_until, banned_until, permanently_banned)]``.
 
+        Includes soft-removed (``listed = FALSE``) rows: their parking must
+        survive while the proxy is absent and be restored if it reappears.
         Rows are in insertion order. Timed values are wall-clock epochs. The
         manager merges rows that share the same canonical quota key (max epoch
         wins; permanent ban ORs), so duplicated proxy endpoints do not lose the
@@ -127,6 +136,33 @@ class ProxyDB:
                     [(p, time.time()) for p in deduped],
                 )
                 added = cur.rowcount if cur.rowcount is not None else 0
+        return max(0, added)
+
+    def sync_many(self, proxies: Iterable[str]) -> int:
+        """Apply one successful source snapshot and return the number of new rows.
+
+        Inserts new proxies, marks every fetched proxy as ``listed`` and every
+        other row as not listed. Rows are never deleted; ``enabled`` and
+        parking are preserved. The statements run in one transaction so there
+        is no window where the whole pool is unlisted.
+        """
+        self._ensure()
+        deduped = list(dict.fromkeys(p for p in proxies if p))
+        with self._pool.connection() as conn:
+            with conn.cursor() as cur:
+                cur.executemany(
+                    "INSERT INTO proxies (proxy, enabled, added_at, listed)"
+                    " VALUES (%s, TRUE, %s, TRUE)"
+                    " ON CONFLICT (proxy) DO NOTHING",
+                    [(p, time.time()) for p in deduped],
+                )
+                added = cur.rowcount if cur.rowcount is not None else 0
+            if deduped:
+                conn.execute(
+                    "UPDATE proxies SET listed = (proxy = ANY(%s))", (deduped,)
+                )
+            else:
+                conn.execute("UPDATE proxies SET listed = FALSE")
         return max(0, added)
 
     def set_enabled(self, proxy: str, enabled: bool) -> bool:

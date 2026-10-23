@@ -17,9 +17,10 @@ CONTRACT (stable signatures used by ``main.py``):
   call right before sending upstream. Does NOT touch ``proxy.requests``.
 - ``mark_success(proxy)`` / ``mark_failure(proxy, reason, retry_after=None)``
   / ``status() -> dict``.
-- ``refresh_proxies()`` — fetch from ``PROXIES_URL``, upsert into ``ProxyDB``
-  (when bound), health-probe, rebuild the runtime pool. Returns ``True`` on a
-  successful fetch, ``False`` on fetch error (caller retries sooner).
+- ``refresh_proxies()`` — fetch from ``PROXIES_URL``, sync membership into
+  ``ProxyDB`` (when bound; missing rows are soft-removed), health-probe, rebuild
+  the runtime pool. Returns ``True`` on a successful fetch, ``False`` on fetch
+  error (caller retries sooner).
 
 Upstream probe target: ``GET {opencode_models_url}`` (the public catalogue,
 which does not count against the chat quota).
@@ -249,7 +250,7 @@ class ProxyManager:
         self._bg_tasks: set[asyncio.Task] = set()  # strong refs to fire-and-forget tasks
 
     def bind_db(self, db) -> None:
-        """Attach a ``ProxyDB`` so ``refresh_proxies`` can upsert members."""
+        """Attach a ``ProxyDB`` so ``refresh_proxies`` can sync members."""
         self.db = db
 
     # --- pool membership (source of truth: ProxyDB) ---
@@ -258,7 +259,8 @@ class ProxyManager:
         """Sync the runtime pool with ``ProxyDB.all()`` ``[(proxy, enabled)]``.
 
         Existing objects are preserved (runtime counters/breaker survive);
-        rows removed from the DB are dropped and their clients closed.
+        rows no longer listed by the source are dropped from the runtime pool
+        and their clients closed.
         """
         by_url = {p.url: p for p in self.proxies}
         new: list[Proxy] = []
@@ -470,19 +472,27 @@ class ProxyManager:
                 urls.append(u)
         urls = list(dict.fromkeys(urls))  # dedupe by URL
 
-        # Persist membership first (source of truth), then rebuild the pool.
+        # Persist the source snapshot first (source of truth), then rebuild
+        # the pool. Proxies missing from the source are soft-removed in the DB
+        # (listed = FALSE), never deleted.
+        parking = None
         if self.db is not None:
             try:
-                await asyncio.to_thread(self.db.upsert_many, urls)
+                await asyncio.to_thread(self.db.sync_many, urls)
                 rows = await asyncio.to_thread(self.db.all)
+                parking = await asyncio.to_thread(self.db.parking_all)
             except Exception as exc:
-                logger.error("ProxyDB upsert/all failed: %s", exc)
+                logger.error("ProxyDB sync/all failed: %s", exc)
                 rows = [(u, True) for u in urls]
         else:
             rows = [(u, True) for u in urls]
 
         async with self._lock:
             self.apply_proxies(rows)
+            if parking is not None:
+                # Restore parking for a proxy that reappeared after being
+                # unlisted: its DB row (and ban/quota) never went away.
+                self.load_parking(parking)
             snapshot = list(self.proxies)
 
         # Probe live members concurrently (outside the lock — probes await).
