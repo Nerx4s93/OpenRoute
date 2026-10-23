@@ -69,6 +69,12 @@ class Settings(BaseSettings):
     # deployments can keep the env var (the field set is a frozen contract).
     abusive_ban_seconds: float = 86_400.0
 
+    # --- synthetic client identity per proxy quota bucket ---
+    # One persona (session/project/trace) per bucket, substituted into the
+    # upstream headers after proxy selection; false = forward the client's own
+    # identifiers (legacy behaviour).
+    persona_enabled: bool = True
+
 
 @lru_cache
 def get_settings() -> Settings:

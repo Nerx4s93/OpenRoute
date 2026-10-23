@@ -71,7 +71,15 @@ from .affinitydb import AffinityDB
 from .config import PROVIDER_NAME, get_settings
 from .keydb import KeyDB
 from .keys import AuthError, KeyInfo, KeyStore, RateLimitError, hash_key
-from .proxies import NoReadyProxyError, Proxy, ProxyManager, mask_proxy
+from .personadb import PersonaDB
+from .personas import PersonaStore
+from .proxies import (
+    NoReadyProxyError,
+    Proxy,
+    ProxyManager,
+    canonical_quota_key,
+    mask_proxy,
+)
 from .proxydb import ProxyDB
 from .reqlog import LogEntry, RequestLog
 
@@ -91,6 +99,9 @@ proxydb: ProxyDB | None = None
 keydb: KeyDB | None = None
 affinitydb: AffinityDB | None = None
 affinity: AffinityManager | None = None
+# One synthetic client identity per proxy quota bucket (in-memory hot path;
+# PostgreSQL persistence is fire-and-forget).
+personas: PersonaStore | None = None
 
 # Strong refs to fire-and-forget tasks (log writes): create_task returns a
 # weakref-compatible Future — without a set the task can be GC'd in flight.
@@ -136,7 +147,7 @@ async def refresh_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    global proxydb, keydb, affinitydb, affinity
+    global proxydb, keydb, affinitydb, affinity, personas
     # The proxy pool and client keys live in PostgreSQL and are populated only
     # via the internal API (admin UI). env/files no longer participate.
     proxydb = ProxyDB(settings.postgres_dsn)
@@ -171,6 +182,16 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         logger.exception("Failed to load session affinity; continuing without it")
     logger.info("Session affinity enabled=%s (window=%.0fs)",
                 settings.affinity_enabled, settings.affinity_window_seconds)
+    # Proxy personas: one synthetic session/project/trace identity per quota
+    # bucket. Loading is best-effort; an unreachable DB leaves the store empty
+    # and persistence becomes a no-op (requests never wait on it).
+    if personas is None and settings.persona_enabled:
+        personas = PersonaStore(PersonaDB(settings.postgres_dsn))
+        try:
+            await personas.load()
+        except Exception:
+            logger.exception("Failed to load proxy personas; starting empty")
+    logger.info("Proxy personas enabled=%s", settings.persona_enabled)
     task = asyncio.create_task(refresh_loop())
     logger.info("%s gateway started: upstream=%s, proxies from %s",
                 PROVIDER_NAME, settings.opencode_base_url, settings.proxies_url)
@@ -187,6 +208,9 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     elif affinitydb is not None:
         affinitydb.close()
         affinitydb = None
+    if personas is not None:
+        await personas.close()
+        personas = None
     if keydb is not None:
         keydb.close()
         keydb = None
@@ -273,24 +297,47 @@ def _wants_stream(rest: str, body: bytes) -> bool:
     return False
 
 
-def _upstream_headers(request: Request, session_id: str) -> dict:
+def _upstream_headers(request: Request, session_id: str, *,
+                      project_id: str | None = None,
+                      trace_id: str | None = None) -> dict:
     """Client headers minus hop headers, overlaid with the opencode gate set.
 
     The client's ``Authorization`` is never forwarded; the gate headers always
-    win (they carry ``Authorization: Bearer public`` + ``session_id``).
+    win (they carry ``Authorization: Bearer public`` + ``session_id``). With a
+    persona, its session/project/trace values override whatever the client sent
+    (the caller's copies of those headers are dropped, not merged).
     """
-    gate = opencode.build_gate_headers(session_id)
+    gate = opencode.build_gate_headers(session_id, project_id=project_id)
     gate_names = {name.lower() for name in gate}
     # Drop the caller's copies of any gate header (case-insensitively) so the
     # gate value replaces it instead of colliding: a plain dict with both
     # ``user-agent`` and ``User-Agent`` keys makes httpx comma-join them
     # ("testclient, opencode/..."), which would fail the upstream gate.
+    drop = set(gate_names)
+    if trace_id is not None:
+        drop.update(opencode.TRACE_HEADER_NAMES)
     headers = {
         k: v for k, v in request.headers.items()
-        if k.lower() not in HOP_HEADERS and k.lower() not in gate_names
+        if k.lower() not in HOP_HEADERS and k.lower() not in drop
     }
     headers.update(gate)
+    if trace_id is not None:
+        headers.update(opencode.build_trace_headers(trace_id))
     return headers
+
+
+async def _rotate_persona(proxy: Proxy) -> None:
+    """Rotate the persona of ``proxy``'s quota bucket (never breaks a request)."""
+    if not settings.persona_enabled or personas is None:
+        return
+    try:
+        p = await personas.rotate(canonical_quota_key(proxy))
+    except Exception:
+        logger.exception("Persona rotation failed for %s; request continues",
+                         mask_proxy(proxy.url))
+    else:
+        logger.info("Persona for bucket %s rotated (generation=%d)",
+                    p.quota_key, p.generation)
 
 
 def _resolve_session(request: Request, key: KeyInfo, body: bytes) -> SessionIdentity:
@@ -686,10 +733,24 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                     _raise_no_ready(exc)
             tried.add(proxy.url)
             proxy.requests += 1
+            persona = None
+            if settings.persona_enabled and personas is not None:
+                try:
+                    persona = await personas.get_or_create(
+                        canonical_quota_key(proxy))
+                except Exception:
+                    logger.exception(
+                        "Persona lookup failed for %s; request continues",
+                        mask_proxy(proxy.url))
             client = manager.ensure_client(proxy)
             upstream_req = client.build_request(
                 request.method, f"/{rest}", params=params,
-                headers=_upstream_headers(request, session_id), content=upstream_body,
+                headers=_upstream_headers(
+                    request,
+                    persona.session_id if persona else session_id,
+                    project_id=persona.project_id if persona else None,
+                    trace_id=persona.trace_id if persona else None),
+                content=upstream_body,
             )
             try:
                 # the local RPM slot is burned only on a REAL attempt
@@ -728,6 +789,7 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                                retry_after or 0.0) + settings.quota_reset_margin_seconds
                     until = time.time() + wait
                     group = manager.group_of(proxy)
+                    await _rotate_persona(proxy)
                     if group is not None:
                         parked = False
                         if affinity is not None and settings.affinity_enabled:
@@ -782,6 +844,7 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                     # ever: persist it, evacuate its sessions and retry this
                     # request on a different proxy.
                     group = manager.group_of(proxy)
+                    await _rotate_persona(proxy)
                     if group is not None:
                         banned = False
                         if affinity is not None and settings.affinity_enabled:

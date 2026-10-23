@@ -34,6 +34,7 @@ from gateway.affinitydb import AffinityDB  # noqa: E402
 from gateway.config import Settings  # noqa: E402
 from gateway.keydb import KeyDB  # noqa: E402
 from gateway.keys import KeyStore, hash_key  # noqa: E402
+from gateway.personas import PersonaStore  # noqa: E402
 from gateway.proxies import ProxyManager  # noqa: E402
 from gateway.proxydb import ProxyDB  # noqa: E402
 from gateway.reqlog import RequestLog  # noqa: E402
@@ -205,6 +206,9 @@ class Gateway:
         self.keystore = KeyStore()
         self.keystore.load(key_rows)
         self.reqlog = RequestLog(self.settings.postgres_dsn)
+        # Memory-only persona store: the lifespan reuses it (``if personas is
+        # None``), so the tests never write proxy_personas to PostgreSQL.
+        self.personas = PersonaStore(None)
         self.sleeps: list[float] = []
         self._mp = monkeypatch
         monkeypatch.setattr(main, "settings", self.settings)
@@ -213,6 +217,7 @@ class Gateway:
         monkeypatch.setattr(main, "reqlog", self.reqlog)
         monkeypatch.setattr(main, "affinity", self.affinity)
         monkeypatch.setattr(main, "affinitydb", self.affinitydb)
+        monkeypatch.setattr(main, "personas", self.personas)
         monkeypatch.setattr(main, "refresh_loop", _quiet_refresh_loop)
         monkeypatch.setattr(main, "asyncio", _AsyncioShim(self.sleeps))
         # Reset the model catalogue cache between gateways.

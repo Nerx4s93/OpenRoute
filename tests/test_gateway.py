@@ -9,6 +9,7 @@ gateway converts to a standard OpenAI non-stream ``chat.completion`` object.
 
 import gzip
 import json
+import re
 import time
 from datetime import datetime, timedelta, timezone
 from email.utils import format_datetime
@@ -19,12 +20,15 @@ import pytest
 import gateway.main as main
 import gateway.proxies as prox
 from gateway.reqlog import LogEntry
+from starlette.requests import Request
 
 from gw import TrackingStream
 
 AUTH = {"Authorization": "Bearer test-key"}
 SSE_HEADERS = {"content-type": "text/event-stream"}
 FREE_MODEL = "deepseek-v4.1-flash-free"
+TRACEPARENT_RE = re.compile(r"^00-([0-9a-f]{32})-([0-9a-f]{16})-01$")
+B3_RE = re.compile(r"^([0-9a-f]{32})-([0-9a-f]{16})-1$")
 
 # A two-chunk SSE completion with usage in the final chunk.
 SSE_CHUNKS = [
@@ -165,8 +169,8 @@ def test_gate_injection_preserves_caller_system(make_gateway):
 # --- upstream session identity ---
 
 
-def test_gate_forwards_caller_session_id(make_gateway):
-    gw = make_gateway()
+def test_gate_replaces_caller_session_id(make_gateway):
+    gw = make_gateway(proxies=("http://proxy-a.invalid:8080",))
     tr = gw.script_upstream(lambda req: sse_response())
     sid = "ses_0123456789ab" + "A" * 14
 
@@ -174,8 +178,13 @@ def test_gate_forwards_caller_session_id(make_gateway):
                        headers={**AUTH, "x-opencode-session": sid})
     assert r.status_code == 200
     sent = tr.requests[0]
+    persona = gw.personas.get_cached(
+        prox.canonical_quota_key("http://proxy-a.invalid:8080"))
+    assert persona is not None
+    assert persona.session_id != sid
+    assert main.opencode.is_session_id(persona.session_id)
     for name in main.opencode.SESSION_HEADER_NAMES:
-        assert sent.headers[name] == sid
+        assert sent.headers[name] == persona.session_id
 
 
 def test_gate_reuses_session_across_turns(make_gateway):
@@ -196,22 +205,40 @@ def test_gate_reuses_session_across_turns(make_gateway):
         tr.requests[1].headers["x-opencode-session"]
 
 
-def test_gate_new_conversation_gets_new_session(make_gateway):
-    gw = make_gateway()
+def test_gate_persona_shared_by_conversations_on_same_proxy(make_gateway):
+    """Different conversations share the bucket's persona upstream.
+
+    The client-side affinity guarantee (different fingerprints -> different
+    session keys) still holds and is asserted at the resolution level.
+    """
+    gw = make_gateway(proxies=("http://proxy-a.invalid:8080",))
     tr = gw.script_upstream(lambda req: sse_response())
-    gw.client.post(
-        "/v1/chat/completions",
-        json=body(messages=[{"role": "user", "content": "a"}]), headers=AUTH,
-    )
-    gw.client.post(
-        "/v1/chat/completions",
-        json=body(messages=[{"role": "user", "content": "b"}]), headers=AUTH,
-    )
-    assert tr.requests[0].headers["x-opencode-session"] != \
-        tr.requests[1].headers["x-opencode-session"]
+    a = body(messages=[{"role": "user", "content": "a"}])
+    b = body(messages=[{"role": "user", "content": "b"}])
+    assert gw.client.post("/v1/chat/completions", json=a,
+                          headers=AUTH).status_code == 200
+    assert gw.client.post("/v1/chat/completions", json=b,
+                          headers=AUTH).status_code == 200
+
+    sent_a = tr.requests[0].headers["x-opencode-session"]
+    sent_b = tr.requests[1].headers["x-opencode-session"]
+    assert sent_a == sent_b  # one persona for the bucket
+    assert main.opencode.is_session_id(sent_a)
+
+    # Affinity is still per conversation, not per persona.
+    key = gw.keystore.authenticate("Bearer test-key")
+
+    def resolved(payload):
+        req = Request({"type": "http",
+                       "headers": [(b"authorization", b"Bearer test-key")]})
+        return main._resolve_session(req, key, json.dumps(payload).encode())
+
+    first, second = resolved(a), resolved(b)
+    assert first.key != second.key
+    assert first.key.startswith("fp:") and second.key.startswith("fp:")
 
 
-def test_gate_retry_reuses_session(make_gateway):
+def test_gate_retry_uses_other_bucket_persona(make_gateway):
     gw = make_gateway()
     calls = {"n": 0}
 
@@ -225,8 +252,93 @@ def test_gate_retry_reuses_session(make_gateway):
     assert gw.client.post("/v1/chat/completions", json=body(),
                           headers=AUTH).status_code == 200
     assert len(tr.requests) == 2
-    assert tr.requests[0].headers["x-opencode-session"] == \
-        tr.requests[1].headers["x-opencode-session"]
+    sessions = [r.headers["x-opencode-session"] for r in tr.requests]
+    assert all(main.opencode.is_session_id(s) for s in sessions)
+    assert sessions[0] != sessions[1]  # A and B are different buckets
+    # Every attempt is internally consistent across all four carriers.
+    for req in tr.requests:
+        values = {req.headers[name] for name in main.opencode.SESSION_HEADER_NAMES}
+        assert len(values) == 1
+    # A plain 500 is not a quota/ban verdict: neither bucket rotates.
+    for url in ("http://proxy-a.invalid:8080", "http://proxy-b.invalid:8080"):
+        persona = gw.personas.get_cached(prox.canonical_quota_key(url))
+        assert persona is not None and persona.generation == 0
+
+
+# --- persona headers ---
+
+
+def test_gate_persona_headers_are_valid(make_gateway):
+    gw = make_gateway(proxies=("http://proxy-a.invalid:8080",))
+    tr = gw.script_upstream(lambda req: sse_response())
+
+    r = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
+    assert r.status_code == 200
+    sent = tr.requests[0]
+    project = sent.headers["x-opencode-project"]
+    session = sent.headers["x-opencode-session"]
+    traceparent = sent.headers["traceparent"]
+    b3 = sent.headers["b3"]
+
+    assert main.opencode.is_project_id(project)
+    assert main.opencode.is_session_id(session)
+    tp = TRACEPARENT_RE.fullmatch(traceparent)
+    b3m = B3_RE.fullmatch(b3)
+    assert tp is not None and b3m is not None
+    assert tp.group(1) == b3m.group(1)  # same trace
+    assert tp.group(2) == b3m.group(2)  # same span
+    assert main.opencode.is_trace_id(tp.group(1))
+    for name in main.opencode.SESSION_HEADER_NAMES:
+        assert sent.headers[name] == session
+
+
+def test_gate_persona_is_stable_and_span_changes_per_request(make_gateway):
+    gw = make_gateway(proxies=("http://proxy-a.invalid:8080",))
+    tr = gw.script_upstream(lambda req: sse_response())
+
+    for _ in range(2):
+        assert gw.client.post("/v1/chat/completions", json=body(),
+                              headers=AUTH).status_code == 200
+    first, second = tr.requests[0].headers, tr.requests[1].headers
+    assert first["x-opencode-session"] == second["x-opencode-session"]
+    assert first["x-opencode-project"] == second["x-opencode-project"]
+
+    tp1 = TRACEPARENT_RE.fullmatch(first["traceparent"])
+    tp2 = TRACEPARENT_RE.fullmatch(second["traceparent"])
+    assert tp1 is not None and tp2 is not None
+    assert tp1.group(1) == tp2.group(1)  # stable trace id
+    assert tp1.group(2) != tp2.group(2)  # fresh span per request
+
+
+def test_gate_persona_overrides_client_trace_and_project(make_gateway):
+    gw = make_gateway(proxies=("http://proxy-a.invalid:8080",))
+    tr = gw.script_upstream(lambda req: sse_response())
+    caller = {
+        **AUTH,
+        "x-opencode-session": "ses_0123456789ab" + "D" * 14,
+        "x-opencode-project": "client-project",
+        "traceparent": "00-" + "a" * 32 + "-" + "b" * 16 + "-01",
+        "b3": "a" * 32 + "-" + "b" * 16 + "-1",
+        "tracestate": "caller=1",
+        "x-b3-traceid": "a" * 32,
+        "x-b3-spanid": "b" * 16,
+        "x-b3-sampled": "1",
+    }
+    r = gw.client.post("/v1/chat/completions", json=body(), headers=caller)
+    assert r.status_code == 200
+    sent = tr.requests[0]
+    persona = gw.personas.get_cached(
+        prox.canonical_quota_key("http://proxy-a.invalid:8080"))
+    assert persona is not None
+    assert sent.headers["x-opencode-project"] == persona.project_id
+    assert sent.headers["x-opencode-session"] == persona.session_id
+    assert "a" * 32 not in sent.headers["traceparent"]
+    assert sent.headers["traceparent"].endswith("-01")
+    assert sent.headers["traceparent"].split("-")[1] == persona.trace_id
+    assert sent.headers["b3"].split("-")[0] == persona.trace_id
+    assert "tracestate" not in sent.headers
+    for name in ("x-b3-traceid", "x-b3-spanid", "x-b3-sampled"):
+        assert name not in sent.headers
 
 
 def test_gate_replaces_invalid_caller_session_id(make_gateway):
@@ -361,6 +473,123 @@ def test_generic_429_passthrough_no_cooldown_no_rotation(make_gateway):
                and not g.permanently_banned
                for g in gw.manager.egress_groups())
     assert gw.sleeps == []
+
+
+# --- persona rotation ------------------------------------------------------
+
+
+def test_generic_429_keeps_persona(make_gateway):
+    url = "http://proxy-a.invalid:8080"
+    gw = make_gateway(proxies=(url,))
+    calls = {"n": 0}
+
+    def router(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return sse_response()
+        return httpx.Response(429, json={
+            "error": {"type": "RateLimitError", "message": "provider rate"}})
+
+    tr = gw.script_upstream(router)
+    key = prox.canonical_quota_key(url)
+    assert gw.client.post("/v1/chat/completions", json=body(),
+                          headers=AUTH).status_code == 200
+    before = gw.personas.get_cached(key)
+    assert before is not None
+
+    r = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
+    assert r.status_code == 429
+    assert len(tr.requests) == 2
+    after = gw.personas.get_cached(key)
+    assert after is not None
+    assert after.generation == before.generation
+    assert after.session_id == before.session_id
+
+
+def test_free_usage_limit_rotates_persona(make_gateway):
+    url = "http://proxy-a.invalid:8080"
+    gw = make_gateway(proxies=(url,))
+    calls = {"n": 0}
+
+    def router(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return sse_response()
+        return httpx.Response(429, json={
+            "type": "error",
+            "error": {"type": "FreeUsageLimitError", "message": "daily limit"},
+        })
+
+    gw.script_upstream(router)
+    key = prox.canonical_quota_key(url)
+    assert gw.client.post("/v1/chat/completions", json=body(),
+                          headers=AUTH).status_code == 200
+    before = gw.personas.get_cached(key)
+    assert before is not None
+
+    # The only bucket is parked after the 429; the client gets "no ready
+    # proxy", but the persona must already be rotated.
+    r = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
+    assert r.status_code in (429, 502, 503)
+    after = gw.personas.get_cached(key)
+    assert after is not None
+    assert after.generation == before.generation + 1
+    assert after.session_id != before.session_id
+    assert after.project_id != before.project_id
+    assert after.trace_id != before.trace_id
+
+
+def test_abusive_traffic_403_rotates_persona(make_gateway):
+    url = "http://proxy-a.invalid:8080"
+    gw = make_gateway(proxies=(url,))
+    calls = {"n": 0}
+
+    def router(req):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return sse_response()
+        return httpx.Response(403, content=b"Access denied: Abusive Traffic")
+
+    gw.script_upstream(router)
+    key = prox.canonical_quota_key(url)
+    assert gw.client.post("/v1/chat/completions", json=body(),
+                          headers=AUTH).status_code == 200
+    before = gw.personas.get_cached(key)
+    assert before is not None
+
+    r = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
+    assert r.status_code in (429, 502, 503)
+    after = gw.personas.get_cached(key)
+    assert after is not None
+    assert after.generation == before.generation + 1
+    assert after.session_id != before.session_id
+
+
+def test_persona_disabled_forwards_caller_session(make_gateway):
+    gw = make_gateway(proxies=("http://proxy-a.invalid:8080",),
+                      settings_over={"persona_enabled": False})
+    tr = gw.script_upstream(lambda req: sse_response())
+    sid = "ses_0123456789ab" + "F" * 14
+    traceparent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    b3 = "a" * 32 + "-" + "b" * 16 + "-1"
+    caller = {
+        **AUTH,
+        "x-opencode-session": sid,
+        "x-opencode-project": "client-project",
+        "traceparent": traceparent,
+        "b3": b3,
+        "tracestate": "caller=1",
+    }
+
+    r = gw.client.post("/v1/chat/completions", json=body(), headers=caller)
+    assert r.status_code == 200
+    sent = tr.requests[0]
+    assert sent.headers["x-opencode-project"] == "client-project"
+    assert sent.headers["traceparent"] == traceparent
+    assert sent.headers["b3"] == b3
+    assert sent.headers["tracestate"] == "caller=1"
+    for name in main.opencode.SESSION_HEADER_NAMES:
+        assert sent.headers[name] == sid
 
 
 def test_429_garbage_retry_after_and_unknown_body_pass_through(make_gateway):
@@ -534,6 +763,10 @@ def test_upstream_401_failure_and_retries(make_gateway):
     assert a.errors == 1 and "HTTP 401" in (a.last_error or "")
     assert a.disabled is False  # proxies are never permanently dead
     assert gw.proxy("http://proxy-b.invalid:8080").requests == 1
+    # A plain 401 is not a quota/ban verdict: no persona rotation.
+    for url in (a.url, "http://proxy-b.invalid:8080"):
+        persona = gw.personas.get_cached(prox.canonical_quota_key(url))
+        assert persona is not None and persona.generation == 0
 
 
 def test_upstream_free_tier_403_passthrough(make_gateway):
@@ -553,6 +786,10 @@ def test_upstream_free_tier_403_passthrough(make_gateway):
     a = gw.proxy("http://proxy-a.invalid:8080")
     assert a.errors == 0 and a.cooldown_until == 0.0  # pool stays healthy
     assert gw.sleeps == []
+    # FreeTierError is not a quota/ban verdict: the persona is not rotated.
+    chosen = next(p for p in gw.manager.proxies if p.requests == 1)
+    persona = gw.personas.get_cached(prox.canonical_quota_key(chosen))
+    assert persona is not None and persona.generation == 0
 
 
 def test_upstream_403_non_free_tier_still_fails_over(make_gateway):

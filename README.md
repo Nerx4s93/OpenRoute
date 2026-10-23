@@ -16,6 +16,9 @@ OpenAI-совместимый API-шлюз, который балансируе�
 - **Sticky-сессии**: задача (`x-opencode-session`, либо fingerprint диалога)
   закрепляется за одним прокси-URL — все её реплики идут через один и тот же
   выходной адрес, а новые задачи балансируются по score (сессии/запросы/токены).
+- **Persona прокси**: у каждого прокси-URL своя синтетическая личность
+  (session/project/trace), которая подставляется в upstream-заголовки; при
+  исчерпании квоты или abusive-бане персона перегенерируется.
 - **`429 FreeUsageLimitError`** (дневная квота) паркует только этот прокси-URL
   до ближайшей полуночи UTC; сессии эвакуируются на другие прокси. Любой другой
   429 — прозрачный passthrough без cooldown и ротации: лимиты провайдера/ключа
@@ -74,7 +77,7 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
                                                                          │
    (web-admin-ui — только статика; браузер сам ходит в /api/admin/* через edge)
    [gateway] ──► [openroute-px6] ──► px6.net       (список прокси, descr=OPENROUTE)
-   [gateway] ──► [PostgreSQL]                       (request_log + proxies + keys + session_affinity)
+   [gateway] ──► [PostgreSQL]                       (request_log + proxies + keys + session_affinity + proxy_personas)
    [gateway] ──► opencode.ai                        (free-tier инференс через прокси)
    [web-admin] ──► [Redis]                          (серверные сессии админки)
    [web-admin] ──► [gateway] /internal/*            (X-Internal-Token, только внутри сети)
@@ -94,7 +97,8 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
 - **`px6-service/`** — микросервис списка прокси: обёртка над API px6.net с
   TTL-кэшем, фильтр `descr == "OPENROUTE"`.
 - **`postgres`** — PostgreSQL 17: хранилище шлюза (`request_log`, `proxies`,
-  `keys`, `session_affinity`). Том `pgdata`; порт наружу не публикуется.
+  `keys`, `session_affinity`, `proxy_personas`). Том `pgdata`; порт наружу не
+  публикуется.
 - **`redis`** — Redis 7: сессии админки (том `redisdata`), порт наружу не публикуется.
 
 
@@ -116,6 +120,8 @@ OpenRoute/
 │   ├── sessions.py           # fingerprint диалога -> один upstream session id
 │   ├── affinity.py           # sticky-сессии: привязки, score S/R/T, эвакуация
 │   ├── affinitydb.py         # session_affinity: load/upsert/clear
+│   ├── personas.py           # persona на прокси-bucket: кэш, ротация, retry/reconcile
+│   ├── personadb.py          # proxy_personas: load/upsert с generation-гардом
 │   ├── config.py  proxies.py  proxydb.py  keys.py  keydb.py  reqlog.py  pg.py
 │   └── main.py               # FastAPI: passthrough /v1/*, ретраи, internal API, lifespan
 ├── edge/                     # nginx: nginx.conf, proxy_params_edge.conf, Dockerfile
@@ -154,15 +160,16 @@ OpenRoute/
   (60 → 120 → … → 600 с). Успех сбрасывает счётчик и cooldown.
 - **429 → классификация по телу** (см. «Sticky-сессии» ниже):
   `FreeUsageLimitError` → **парковка этого прокси-URL** до 00:00 UTC +
-  `QUOTA_RESET_MARGIN_SECONDS`, сессии эвакуируются на другие прокси; любой
-  другой 429 — прозрачный passthrough без cooldown, парковки и ротации.
+  `QUOTA_RESET_MARGIN_SECONDS`, сессии эвакуируются на другие прокси, персона
+  bucket ротируется; любой другой 429 — прозрачный passthrough без cooldown,
+  парковки и ротации.
   Механика cooldown/парковки отдельного прокси (`mark_failure` с 429,
   `ACCOUNT_THROTTLE_*`) сохранена для внутренних путей, но HTTP-обработчик
   её больше не вызывает.
 - **403 `abusive traffic`** (case-insensitive поиск в теле) → **постоянный
   бан** этого прокси-URL (`permanently_banned = TRUE` в БД) с эвакуацией;
-  `FreeTierError` — passthrough; прочие 403 — обычный failover
-  (`mark_failure` + следующая попытка).
+  персона bucket ротируется; `FreeTierError` — passthrough; прочие 403 —
+  обычный failover (`mark_failure` + следующая попытка).
 - **Ретраи**: 5xx/сетевые — повтор на следующем прокси с экспоненциальным
   backoff от `RETRY_BACKOFF_BASE_SECONDS`, суммарно не дольше
   `RETRY_BUDGET_SECONDS` (исчерпан → 504).
@@ -206,6 +213,35 @@ OpenRoute/
   `AFFINITY_WEIGHT_TOKENS`, `QUOTA_RESET_MARGIN_SECONDS`. Abusive-бан не имеет
   настройки срока: он постоянный. В `/admin/status` — блок `affinity`
   (host-only), в `/health` — счётчики `egress_groups_*` и `sessions_*`.
+
+---
+
+## Persona прокси
+
+- Одна персона на bucket `canonical_quota_key` (тот же bucket, что у парковки
+  квоты; он же `manager.group_of(proxy).host`): валидные `session_id`
+  (`ses_...`), `project_id` (40 hex), `trace_id` (32 hex) и `generation`.
+- На каждом запросе через bucket клиентские `x-opencode-project`,
+  `x-opencode-session`, `x-session-affinity`, `x-session-id`,
+  `x-opencode-session-id`, `traceparent` и `b3` заменяются значениями
+  персоны; клиентские `tracestate` и `x-b3-*` вычищаются. `traceparent` и
+  `b3` пересобираются на каждый запрос: trace id — из персоны, span id —
+  свежий. Multi-header B3 (`x-b3-*`) не синтезируется: только `traceparent`
+  и одиночный `b3`.
+- Разные диалоги и клиенты через один прокси делят один upstream session id,
+  но affinity и балансировка не меняются: привязка по-прежнему ключуется
+  клиентской сессией/fingerprint, персона применяется после выбора прокси.
+- Ротация (generation + 1, новые id) — только при `429 FreeUsageLimitError`
+  и `403 abusive traffic`. Обычный 429, `FreeTierError`, 401, 5xx и сетевые
+  ошибки персону не ротируют.
+- Персона хранится в PostgreSQL (`proxy_personas`, создаётся существующей
+  схемой) и переживает рестарт; generation-гард не даёт старой записи
+  перетереть новую. Запись — фоновая (fire-and-forget): при недоступной БД
+  запросы не ждут и не ломаются, персона живёт в памяти, запись повторяется,
+  а при расхождении стор примиряется с более новой строкой БД. Загрузка
+  валидирует идентификаторы и заменяет битую строку валидной персоной.
+- Переменная `PERSONA_ENABLED` (по умолчанию `true`); `false` — полный откат
+  к прежнему форвардингу клиентских заголовков.
 
 ---
 
@@ -311,12 +347,12 @@ uvicorn gateway.main:app --host 127.0.0.1 --port 8000   # шлюз: /v1/*, /admi
 
 | Компонент | Статус |
 |---|---|
-| `gateway/` (шлюз: `main`, `config`, `proxies`, `proxydb`, `affinity`, `affinitydb`, `keys`, `keydb`, `reqlog`, `pg`, `opencode`) | **реализовано** |
+| `gateway/` (шлюз: `main`, `config`, `proxies`, `proxydb`, `affinity`, `affinitydb`, `personas`, `personadb`, `keys`, `keydb`, `reqlog`, `pg`, `opencode`) | **реализовано** |
 | `web-admin/` (JSON API: `config`, `sessions`, `auth`, `gateway`, `schemas`, `main`) | **реализовано** |
 | `web-admin-ui/` (React SPA: Vite, React Router, TanStack Query, SSE) | **реализовано** |
 | `px6-service/` | **реализовано** (px6.net → `descr=OPENROUTE`) |
 | edge / compose / Dockerfile / requirements / .env.example | **готово** |
-| `tests/` (`test_gateway`, `test_proxies`, `test_affinity`, `test_affinitydb`, `test_keys`, `test_reqlog`, `test_admin_api`, `test_opencode`) | **реализовано** |
+| `tests/` (`test_gateway`, `test_proxies`, `test_affinity`, `test_affinitydb`, `test_persona`, `test_personadb`, `test_keys`, `test_reqlog`, `test_admin_api`, `test_opencode`) | **реализовано** |
 
 ## Тесты
 
@@ -332,11 +368,14 @@ npm run typecheck
 
 `tests/test_opencode.py` — чистые юнит-тесты интеграции с opencode.ai (не
 требуют сети/БД); `tests/test_affinity.py` — unit-тесты привязок, score и
-эвакуации (без БД); `tests/test_admin_api.py` — герметичные тесты JSON API
-админки (fake gateway + in-memory sessions, без Redis/PostgreSQL). Остальные
-наборы (`test_gateway`, `test_proxies`, `test_affinitydb`, `test_keys`,
-`test_reqlog`) работают герметично: upstream и админка подменяются, а живой
-PostgreSQL для хранилищ шлюза (включая `session_affinity`) поднимается из
+эвакуации (без БД); `tests/test_persona.py` — unit-тесты персоны (кэш,
+ротация, retry/reconcile, fail-open, без БД); `tests/test_admin_api.py` —
+герметичные тесты JSON API админки (fake gateway + in-memory sessions, без
+Redis/PostgreSQL). Остальные наборы (`test_gateway`, `test_proxies`,
+`test_affinitydb`, `test_personadb`, `test_keys`, `test_reqlog`) работают
+герметично: upstream и админка подменяются, а живой PostgreSQL для хранилищ
+шлюза (включая `session_affinity` и `proxy_personas`) поднимается из
 `docker-compose.test.yml` (`127.0.0.1:55433`), DSN переопределяется
-`OPENROUTE_TEST_DSN`. Фронтенд-тесты (`web-admin-ui`) — Vitest + Testing Library,
+`OPENROUTE_TEST_DSN`. `test_personadb` проверяет generation-гард и загрузку
+после рестарта. Фронтенд-тесты (`web-admin-ui`) — Vitest + Testing Library,
 без сети и без backend.

@@ -37,6 +37,30 @@ def test_is_session_id_shape():
         assert not opencode.is_session_id(bad)
 
 
+# --- project / trace ids ---------------------------------------------------
+
+
+def test_project_id_shape():
+    pid = opencode.new_project_id()
+    assert len(pid) == 40
+    assert re.fullmatch(r"[0-9a-f]{40}", pid)
+    assert opencode.is_project_id(pid)
+    assert not opencode.is_project_id(pid.upper())
+    assert not opencode.is_project_id(pid[:-1])
+    assert not opencode.is_project_id(None)
+
+
+def test_trace_and_span_id_shape():
+    tid = opencode.new_trace_id()
+    span = opencode.new_span_id()
+    assert re.fullmatch(r"[0-9a-f]{32}", tid) and opencode.is_trace_id(tid)
+    assert re.fullmatch(r"[0-9a-f]{16}", span)
+    assert not opencode.is_trace_id(tid.upper())
+    assert not opencode.is_trace_id(span)
+    assert not opencode.is_trace_id(None)
+    assert len({opencode.new_trace_id() for _ in range(50)}) == 50
+
+
 # --- conversation fingerprint ---------------------------------------------
 
 
@@ -91,6 +115,45 @@ def test_gate_headers_complete():
         assert h[name] == sid
     # All four affinity carriers present.
     assert len(opencode.SESSION_HEADER_NAMES) == 4
+
+
+def test_gate_headers_with_project_id():
+    sid = opencode.new_session_id()
+    pid = opencode.new_project_id()
+    h = opencode.build_gate_headers(sid, project_id=pid)
+    assert h["x-opencode-project"] == pid
+    assert "x-opencode-project" not in opencode.build_gate_headers(sid)
+
+
+# --- trace headers ---------------------------------------------------------
+
+
+def test_build_trace_headers_format():
+    tid = opencode.new_trace_id()
+    h = opencode.build_trace_headers(tid)
+    span = h["traceparent"].split("-")[2]
+    assert h["traceparent"] == f"00-{tid}-{span}-01"
+    assert h["b3"] == f"{tid}-{span}-1"
+    assert re.fullmatch(r"[0-9a-f]{32}-[0-9a-f]{16}-1", h["b3"])
+    assert opencode.is_trace_id(tid)
+
+
+def test_build_trace_headers_keeps_valid_trace_and_regenerates_span():
+    tid = opencode.new_trace_id()
+    first = opencode.build_trace_headers(tid)
+    second = opencode.build_trace_headers(tid)
+    assert first["traceparent"].split("-")[1] == tid
+    assert second["traceparent"].split("-")[1] == tid
+    assert first["traceparent"].split("-")[2] != second["traceparent"].split("-")[2]
+    assert first["b3"].split("-")[1] != second["b3"].split("-")[1]
+
+
+def test_build_trace_headers_generates_valid_trace_when_missing_or_invalid():
+    for value in (None, "", "abc", "A" * 32, "0" * 31):
+        h = opencode.build_trace_headers(value)
+        tid = h["traceparent"].split("-")[1]
+        assert opencode.is_trace_id(tid)
+        assert h["b3"].startswith(tid + "-")
 
 
 # --- system message --------------------------------------------------------

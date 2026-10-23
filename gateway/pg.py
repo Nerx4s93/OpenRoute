@@ -92,6 +92,19 @@ SCHEMA: tuple[str, ...] = (
         added_at DOUBLE PRECISION NOT NULL
     )
     """,
+    # One synthetic "persona" (session/project/trace ids) per proxy quota
+    # bucket. It survives a restart; ``generation`` orders rotations so a
+    # stale fire-and-forget write can never overwrite a newer persona.
+    """
+    CREATE TABLE IF NOT EXISTS proxy_personas (
+        quota_key TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL,
+        project_id TEXT NOT NULL,
+        trace_id TEXT NOT NULL,
+        created_at DOUBLE PRECISION NOT NULL,
+        generation INTEGER NOT NULL DEFAULT 0
+    )
+    """,
 )
 
 

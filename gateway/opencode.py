@@ -128,6 +128,52 @@ def is_session_id(value: str | None) -> bool:
     return isinstance(value, str) and SESSION_ID_RE.fullmatch(value) is not None
 
 
+#: opencode project id: 40 lowercase hex chars (a 20-byte identifier).
+PROJECT_ID_RE = re.compile(r"^[0-9a-f]{40}$")
+
+
+def is_project_id(value: str | None) -> bool:
+    """True when ``value`` has the exact opencode ProjectID wire shape."""
+    return isinstance(value, str) and PROJECT_ID_RE.fullmatch(value) is not None
+
+
+def new_project_id() -> str:
+    """Generate an opencode-shaped project id (40 lowercase hex chars)."""
+    return secrets.token_hex(20)
+
+
+#: W3C trace id: 32 lowercase hex chars (16 bytes).
+TRACE_ID_RE = re.compile(r"^[0-9a-f]{32}$")
+
+
+def is_trace_id(value: str | None) -> bool:
+    """True when ``value`` has the exact W3C ``trace-id`` wire shape."""
+    return isinstance(value, str) and TRACE_ID_RE.fullmatch(value) is not None
+
+
+def new_trace_id() -> str:
+    """Generate a W3C trace id (32 lowercase hex chars)."""
+    return secrets.token_hex(16)
+
+
+def new_span_id() -> str:
+    """Generate a W3C span id (16 lowercase hex chars)."""
+    return secrets.token_hex(8)
+
+
+#: Client trace headers that a persona must fully replace upstream.
+TRACE_HEADER_NAMES: tuple[str, ...] = (
+    "traceparent",
+    "tracestate",
+    "b3",
+    "x-b3-traceid",
+    "x-b3-spanid",
+    "x-b3-parentspanid",
+    "x-b3-sampled",
+    "x-b3-flags",
+)
+
+
 def conversation_fingerprint(
     raw_body: bytes | str | None, *, key_id: str, project: str | None
 ) -> str | None:
@@ -177,11 +223,13 @@ def _message_text(content: Any) -> str | None:
 # --- headers ---------------------------------------------------------------
 
 
-def build_gate_headers(session_id: str, *, user_agent: str = OPENCODE_UA) -> dict[str, str]:
+def build_gate_headers(session_id: str, *, user_agent: str = OPENCODE_UA,
+                       project_id: str | None = None) -> dict[str, str]:
     """Return the full verified client-header set the free-tier gate demands.
 
     ``session_id`` must come from :func:`new_session_id` (or an already valid
-    id); the same value is echoed into all four affinity headers.
+    id); the same value is echoed into all four affinity headers. When
+    ``project_id`` is given it is advertised as ``x-opencode-project``.
     """
     headers = {
         "Authorization": OPENCODE_AUTHORIZATION,
@@ -191,7 +239,26 @@ def build_gate_headers(session_id: str, *, user_agent: str = OPENCODE_UA) -> dic
     }
     for name in SESSION_HEADER_NAMES:
         headers[name] = session_id
+    if project_id is not None:
+        headers["x-opencode-project"] = project_id
     return headers
+
+
+def build_trace_headers(trace_id: str | None = None) -> dict[str, str]:
+    """Return W3C ``traceparent`` + B3 headers for one upstream request.
+
+    ``trace_id`` is reused when valid (a stable per-persona trace); invalid or
+    missing values produce a fresh trace id. A fresh span id is generated on
+    every call, so each request gets its own span inside the persona's trace.
+    Multi-header B3 variants (``x-b3-*``) are dropped and not synthesized:
+    only ``traceparent`` and the single ``b3`` header are emitted.
+    """
+    tid = trace_id if is_trace_id(trace_id) else new_trace_id()
+    span = new_span_id()
+    return {
+        "traceparent": f"00-{tid}-{span}-01",
+        "b3": f"{tid}-{span}-1",
+    }
 
 
 # --- system message --------------------------------------------------------
