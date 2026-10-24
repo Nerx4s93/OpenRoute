@@ -1,5 +1,10 @@
 fastapi==0.142.2
 uvicorn[standard]==0.54.0
 httpx==0.28.1
+# brotli+zstandard: with these installed httpx advertises (and decodes)
+# `accept-encoding: gzip, deflate, br, zstd` — exactly the set the real
+# OpenCode client sends to opencode.ai.
+brotli==1.1.0
+zstandard==0.23.0
 pydantic-settings==2.15.0
 psycopg[binary,pool]==3.2.9

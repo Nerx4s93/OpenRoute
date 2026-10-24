@@ -178,6 +178,18 @@ def test_gate_defaults_max_completion_tokens_but_keeps_caller_value(make_gateway
     assert up["max_completion_tokens"] == 4096  # never overwritten
 
 
+def test_caller_user_field_never_forwarded(make_gateway):
+    """The OpenAI ``user`` end-user identifier must not leak upstream: the
+    real OpenCode body never carries it, and it is a stable caller identity."""
+    gw = make_gateway()
+    tr = gw.script_upstream(lambda req: sse_response())
+    r = gw.client.post("/v1/chat/completions",
+                       json=body(user="combain-user-42"), headers=AUTH)
+    assert r.status_code == 200
+    up = upstream_json(tr)
+    assert "user" not in up
+
+
 # --- upstream session identity ---
 
 
@@ -1139,21 +1151,56 @@ def test_stream_gzip_decompressed_and_header_dropped(make_gateway):
 
 
 def test_upstream_headers_hygiene(make_gateway):
+    """Strict allowlist: the upstream request carries EXACTLY the header set
+    of the real OpenCode client — nothing the caller sent is merged in."""
     gw = make_gateway()
     tr = gw.script_upstream(lambda req: sse_response())
     r = gw.client.post(
         "/v1/chat/completions", json=body(),
         headers={**AUTH, "x-forwarded-for": "9.9.9.9", "cookie": "session=1",
-                 "x-api-key": "leak-me", "x-real-ip": "8.8.8.8"},
+                 "x-api-key": "leak-me", "x-real-ip": "8.8.8.8",
+                 "x-stainless-lang": "python", "x-stainless-os": "Linux",
+                 "x-stainless-runtime": "CPython",
+                 "x-request-id": "req-1", "baggage": "session=user-42",
+                 "origin": "https://combain.example",
+                 "referer": "https://combain.example/chat",
+                 "accept-language": "ru-RU", "sec-fetch-site": "same-origin",
+                 "sec-ch-ua": '"Chromium"', "x-custom-user-id": "user-42"},
     )
     assert r.status_code == 200
     sent = tr.requests[0]
     assert sent.headers["authorization"] == "Bearer public"  # client key never forwarded
-    for h in ("x-forwarded-for", "cookie", "x-api-key", "x-real-ip"):
+    for h in ("x-forwarded-for", "cookie", "x-api-key", "x-real-ip",
+              "x-stainless-lang", "x-stainless-os", "x-stainless-runtime",
+              "x-request-id", "baggage", "origin", "referer",
+              "accept-language", "sec-fetch-site", "sec-ch-ua",
+              "x-custom-user-id"):
         assert h not in sent.headers
+    # The exact allowlist: nothing beyond the real client's header set and
+    # the transport headers httpx itself manages (host/accept-encoding/
+    # connection/content-length) ever reaches the upstream.
+    gate_and_trace = {
+        "authorization", "content-type", "accept", "user-agent",
+        "x-opencode-client", "x-opencode-project", "x-opencode-session",
+        "x-opencode-session-id", "x-session-affinity", "x-session-id",
+        "traceparent", "b3",
+    }
+    transport_managed = {
+        "host", "accept-encoding", "connection", "content-length",
+    }
+    got = {k.lower() for k in sent.headers.keys()}
+    assert got - transport_managed == gate_and_trace
+    # ...and the identity values are the persona's, not the caller's.
+    persona = gw.personas.get_cached(
+        prox.canonical_quota_key("http://proxy-a.invalid:8080"))
+    assert persona is not None
+    assert sent.headers["x-opencode-session"] == persona.session_id
+    assert sent.headers["x-opencode-project"] == persona.project_id
 
 
-def test_repeated_query_params_forwarded(make_gateway):
+def test_chat_query_params_never_forwarded(make_gateway):
+    """Real OpenCode calls chat/completions with NO query string: caller
+    params (e.g. "?api_key=...") must not leak into the upstream URL."""
     gw = make_gateway()
     seen = {}
 
@@ -1162,7 +1209,25 @@ def test_repeated_query_params_forwarded(make_gateway):
         return sse_response()
 
     gw.script_upstream(router)
-    r = gw.client.post("/v1/chat/completions?a=1&a=2&b=3", json=body(), headers=AUTH)
+    r = gw.client.post("/v1/chat/completions?api_key=sk-leak&a=1&a=2&b=3",
+                       json=body(), headers=AUTH)
+    assert r.status_code == 200
+    assert "?" not in seen["url"]
+    assert seen["url"].endswith("/chat/completions")
+
+
+def test_nonchat_query_params_still_forwarded(make_gateway):
+    """Non-chat passthrough keeps its query params (only chat is normalised
+    to the real OpenCode wire shape)."""
+    gw = make_gateway()
+    seen = {}
+
+    def router(req):
+        seen["url"] = str(req.url)
+        return ok_response()
+
+    gw.script_upstream(router)
+    r = gw.client.get("/v1/probe?a=1&a=2&b=3", headers=AUTH)
     assert r.status_code == 200
     assert seen["url"].endswith("?a=1&a=2&b=3")
 

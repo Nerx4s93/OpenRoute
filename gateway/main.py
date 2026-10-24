@@ -6,9 +6,12 @@ round-robins the request across a pool of HTTP(S) proxies
 inference. The differences from ``NVRoute/app/main.py``:
 
 - the upstream is opencode.ai: the gate headers + gated system message come
-  from :mod:`gateway.opencode`; the client's ``Authorization`` is NOT forwarded —
-  the gate always carries ``Bearer public`` + a session id (the caller's own
-  affinity when it sends one, otherwise one id per conversation),
+  from :mod:`gateway.opencode`; upstream headers are a strict ALLOWLIST (exactly
+  the set the real OpenCode client sends) — the client's ``Authorization`` and
+  every other client header (``x-stainless-*``, ``origin``/``referer``,
+  ``baggage``, custom identifiers, ...) never reach the upstream. The gate
+  always carries ``Bearer public`` + a session id (the caller's own affinity
+  when it sends one, otherwise one id per conversation),
 - the pool is proxies (no tokens): ``ProxyManager`` instead of
   ``AccountManager``; ``LogEntry.account`` carries the masked proxy,
 - the gate **forces upstream streaming**: upstream always answers SSE. If the
@@ -108,15 +111,9 @@ personas: PersonaStore | None = None
 # weakref-compatible Future — without a set the task can be GC'd in flight.
 _bg_tasks: set[asyncio.Task] = set()
 
-# Headers never forwarded to the upstream. x-forwarded-*/x-real-ip (client
-# topology), cookie and x-api-key must never reach the upstream.
-HOP_HEADERS = {
-    "host", "authorization", "content-length", "connection", "keep-alive",
-    "transfer-encoding", "te", "trailer", "upgrade", "proxy-authorization",
-    "proxy-connection", "accept-encoding",
-    "x-forwarded-for", "x-forwarded-host", "x-forwarded-proto",
-    "x-forwarded-port", "x-real-ip", "cookie", "x-api-key",
-}
+# Upstream request headers need no drop list: the request is built from a
+# strict ALLOWLIST (see ``_upstream_headers``) and nothing from the client is
+# ever merged in. The RESPONSE direction needs its own drop set:
 # content-encoding is dropped because the stream is read via aiter_bytes():
 # httpx decompresses the body itself and the client gets decoded bytes.
 RESP_DROP_HEADERS = {"content-encoding", "content-length", "transfer-encoding", "connection"}
@@ -301,29 +298,36 @@ def _wants_stream(rest: str, body: bytes) -> bool:
 def _upstream_headers(request: Request, session_id: str, *,
                       project_id: str | None = None,
                       trace_id: str | None = None) -> dict:
-    """Client headers minus hop headers, overlaid with the opencode gate set.
+    """EXACTLY the header set the real OpenCode client sends — nothing else.
 
-    The client's ``Authorization`` is never forwarded; the gate headers always
-    win (they carry ``Authorization: Bearer public`` + ``session_id``). With a
-    persona, its session/project/trace values override whatever the client sent
-    (the caller's copies of those headers are dropped, not merged).
+    Strict ALLOWLIST, not a blacklist: no client header is ever merged into
+    the upstream request. A blacklist leaks — an OpenAI SDK client injects
+    ``x-stainless-*``, browsers inject ``origin``/``referer``/``sec-*``, and
+    aggregators inject ``baggage``/``x-request-id``/custom identifiers; any of
+    them lets the upstream correlate ALL gateway traffic into one identity
+    (one shared quota bucket). The real client sends exactly the gate set
+    (``Authorization``/``Content-Type``/``Accept``/``User-Agent``/
+    ``x-opencode-client`` + the four session carriers [+ ``x-opencode-project``
+    with a persona]) plus trace headers — so that is all we send.
+
+    With a persona (``trace_id`` given): project + a rebuilt
+    ``traceparent``/``b3`` pair from the persona's trace, and the caller's
+    trace context is fully replaced.
+
+    Legacy rollback (``PERSONA_ENABLED=false`` → ``trace_id is None``): the
+    caller's own identity headers — ``x-opencode-project`` and the trace set
+    (``traceparent``/``tracestate``/``b3``/``x-b3-*``) — are forwarded
+    verbatim instead of the persona values; still allowlisted, so no other
+    client header leaks in this mode either.
     """
-    gate = opencode.build_gate_headers(session_id, project_id=project_id)
-    gate_names = {name.lower() for name in gate}
-    # Drop the caller's copies of any gate header (case-insensitively) so the
-    # gate value replaces it instead of colliding: a plain dict with both
-    # ``user-agent`` and ``User-Agent`` keys makes httpx comma-join them
-    # ("testclient, opencode/..."), which would fail the upstream gate.
-    drop = set(gate_names)
-    if trace_id is not None:
-        drop.update(opencode.TRACE_HEADER_NAMES)
-    headers = {
-        k: v for k, v in request.headers.items()
-        if k.lower() not in HOP_HEADERS and k.lower() not in drop
-    }
-    headers.update(gate)
+    headers = opencode.build_gate_headers(session_id, project_id=project_id)
     if trace_id is not None:
         headers.update(opencode.build_trace_headers(trace_id))
+    else:
+        for name in ("x-opencode-project", *opencode.TRACE_HEADER_NAMES):
+            value = request.headers.get(name)
+            if value:
+                headers[name] = value
     return headers
 
 
@@ -694,7 +698,10 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
         # burn the client's quota. RateLimitError -> global handler -> 429.
         keystore.check_rate(key)
         keystore.check_tpm(key)
-        params = list(request.query_params.multi_items())
+        # Real OpenCode calls chat/completions with NO query string; caller
+        # params (e.g. "?api_key=...") must never reach the upstream URL.
+        # Non-chat passthrough keeps its params.
+        params = [] if chat else list(request.query_params.multi_items())
         stream = _wants_stream(rest, body)
         identity = _resolve_session(request, key, body)
         session_id = identity.session_id

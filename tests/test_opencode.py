@@ -173,6 +173,17 @@ def test_build_system_message_contains_both_quotes_and_neutralizer():
     assert msg.index(opencode.KEY1) < msg.index("Answer in French.")
 
 
+def test_neutralizer_is_not_a_self_identifying_marker():
+    """The neutraliser is a constant in every gated request: it must not name
+    the gateway/product or otherwise give the upstream a literal marker to
+    correlate all gateway traffic into one identity."""
+    lowered = opencode.NEUTRALIZE.lower()
+    for word in ("gateway", "opencode", "proxy", "compat"):
+        assert word not in lowered
+    # Still actually neutralises: it says the quotes do not apply.
+    assert "do not apply" in lowered
+
+
 def test_build_system_message_default_tail_when_no_user_system():
     for empty in (None, ""):
         msg = opencode.build_system_message(empty)
@@ -240,6 +251,18 @@ def test_prepare_body_does_not_overwrite_caller_max_completion_tokens():
         }).encode()
         out = json.loads(opencode.prepare_body(raw, "m"))
         assert out["max_completion_tokens"] == value
+
+
+def test_prepare_body_strips_user_identifier():
+    """The OpenAI ``user`` field (end-user identifier) never goes upstream:
+    the real OpenCode body does not carry it."""
+    raw = json.dumps({
+        "model": "m",
+        "messages": [{"role": "user", "content": "hi"}],
+        "user": "combain-user-42",
+    }).encode()
+    out = json.loads(opencode.prepare_body(raw, "m"))
+    assert "user" not in out
 
 
 def test_prepare_body_tools_skip_gate_injection():
