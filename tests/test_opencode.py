@@ -109,7 +109,8 @@ def test_gate_headers_complete():
     h = opencode.build_gate_headers(sid)
     assert h["Authorization"] == "Bearer public"
     assert h["Content-Type"] == "application/json"
-    assert h["User-Agent"].startswith("opencode/")
+    assert h["Accept"] == "*/*"
+    assert h["User-Agent"] == "opencode/latest/2.1.3/cli"
     assert h["x-opencode-client"] == "cli"
     for name in opencode.SESSION_HEADER_NAMES:
         assert h[name] == sid
@@ -132,9 +133,11 @@ def test_build_trace_headers_format():
     tid = opencode.new_trace_id()
     h = opencode.build_trace_headers(tid)
     span = h["traceparent"].split("-")[2]
+    parent = h["b3"].split("-")[3]
     assert h["traceparent"] == f"00-{tid}-{span}-01"
-    assert h["b3"] == f"{tid}-{span}-1"
-    assert re.fullmatch(r"[0-9a-f]{32}-[0-9a-f]{16}-1", h["b3"])
+    assert h["b3"] == f"{tid}-{span}-1-{parent}"
+    assert re.fullmatch(r"[0-9a-f]{32}-[0-9a-f]{16}-1-[0-9a-f]{16}", h["b3"])
+    assert span != parent
     assert opencode.is_trace_id(tid)
 
 
@@ -146,6 +149,7 @@ def test_build_trace_headers_keeps_valid_trace_and_regenerates_span():
     assert second["traceparent"].split("-")[1] == tid
     assert first["traceparent"].split("-")[2] != second["traceparent"].split("-")[2]
     assert first["b3"].split("-")[1] != second["b3"].split("-")[1]
+    assert first["b3"].split("-")[3] != second["b3"].split("-")[3]
 
 
 def test_build_trace_headers_generates_valid_trace_when_missing_or_invalid():
@@ -210,6 +214,7 @@ def test_prepare_body_forces_stream_and_usage_and_model():
     }).encode()
     out = json.loads(opencode.prepare_body(raw, "deepseek-v4.1-flash-free"))
     assert out["model"] == "deepseek-v4.1-flash-free"
+    assert out["max_completion_tokens"] == 32000
     assert out["stream"] is True
     assert out["stream_options"] == {"include_usage": True}
     sys_msg = out["messages"][0]
@@ -221,8 +226,20 @@ def test_prepare_body_forces_stream_and_usage_and_model():
 def test_prepare_body_handles_garbage_and_missing_messages():
     out = json.loads(opencode.prepare_body(b"not json", "m"))
     assert out["model"] == "m"
+    assert out["max_completion_tokens"] == 32000
     assert out["messages"][0]["role"] == "system"
     assert opencode.KEY2 in out["messages"][0]["content"]
+
+
+def test_prepare_body_does_not_overwrite_caller_max_completion_tokens():
+    for value in (4096, 0, None, "8192"):
+        raw = json.dumps({
+            "model": "m",
+            "messages": [{"role": "user", "content": "hi"}],
+            "max_completion_tokens": value,
+        }).encode()
+        out = json.loads(opencode.prepare_body(raw, "m"))
+        assert out["max_completion_tokens"] == value
 
 
 def test_prepare_body_tools_skip_gate_injection():

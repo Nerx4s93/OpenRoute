@@ -28,7 +28,7 @@ AUTH = {"Authorization": "Bearer test-key"}
 SSE_HEADERS = {"content-type": "text/event-stream"}
 FREE_MODEL = "deepseek-v4.1-flash-free"
 TRACEPARENT_RE = re.compile(r"^00-([0-9a-f]{32})-([0-9a-f]{16})-01$")
-B3_RE = re.compile(r"^([0-9a-f]{32})-([0-9a-f]{16})-1$")
+B3_RE = re.compile(r"^([0-9a-f]{32})-([0-9a-f]{16})-1-([0-9a-f]{16})$")
 
 # A two-chunk SSE completion with usage in the final chunk.
 SSE_CHUNKS = [
@@ -134,7 +134,8 @@ def test_nonstream_chat_is_converted_from_sse(make_gateway):
     sent = tr.requests[0]
     assert sent.headers["authorization"] == "Bearer public"
     assert sent.headers["x-opencode-client"] == "cli"
-    assert sent.headers["user-agent"].startswith("opencode/")
+    assert sent.headers["user-agent"] == "opencode/latest/2.1.3/cli"
+    assert sent.headers["accept"] == "*/*"
     sid = sent.headers["x-opencode-session"]
     for h in ("x-session-affinity", "x-session-id", "x-opencode-session-id"):
         assert sent.headers[h] == sid
@@ -142,6 +143,7 @@ def test_nonstream_chat_is_converted_from_sse(make_gateway):
     assert up["model"] == FREE_MODEL
     assert up["stream"] is True
     assert up["stream_options"] == {"include_usage": True}
+    assert up["max_completion_tokens"] == 32000
     assert up["messages"][0]["role"] == "system"
     assert main.opencode.KEY1 in up["messages"][0]["content"]
     assert up["messages"][-1] == {"role": "user", "content": "ping"}
@@ -164,6 +166,16 @@ def test_gate_injection_preserves_caller_system(make_gateway):
     # exactly one system message, caller messages preserved in order
     assert sum(1 for m in up["messages"] if m["role"] == "system") == 1
     assert up["messages"][1] == {"role": "user", "content": "salut"}
+
+
+def test_gate_defaults_max_completion_tokens_but_keeps_caller_value(make_gateway):
+    gw = make_gateway()
+    tr = gw.script_upstream(lambda req: sse_response())
+    r = gw.client.post("/v1/chat/completions",
+                       json=body(max_completion_tokens=4096), headers=AUTH)
+    assert r.status_code == 200
+    up = upstream_json(tr)
+    assert up["max_completion_tokens"] == 4096  # never overwritten
 
 
 # --- upstream session identity ---
@@ -287,6 +299,7 @@ def test_gate_persona_headers_are_valid(make_gateway):
     assert tp is not None and b3m is not None
     assert tp.group(1) == b3m.group(1)  # same trace
     assert tp.group(2) == b3m.group(2)  # same span
+    assert b3m.group(3) != b3m.group(2)  # separate parent span
     assert main.opencode.is_trace_id(tp.group(1))
     for name in main.opencode.SESSION_HEADER_NAMES:
         assert sent.headers[name] == session
@@ -308,6 +321,10 @@ def test_gate_persona_is_stable_and_span_changes_per_request(make_gateway):
     assert tp1 is not None and tp2 is not None
     assert tp1.group(1) == tp2.group(1)  # stable trace id
     assert tp1.group(2) != tp2.group(2)  # fresh span per request
+    b31 = B3_RE.fullmatch(first["b3"])
+    b32 = B3_RE.fullmatch(second["b3"])
+    assert b31 is not None and b32 is not None
+    assert b31.group(3) != b32.group(3)  # fresh B3 parent per request
 
 
 def test_gate_persona_overrides_client_trace_and_project(make_gateway):
@@ -323,6 +340,7 @@ def test_gate_persona_overrides_client_trace_and_project(make_gateway):
         "x-b3-traceid": "a" * 32,
         "x-b3-spanid": "b" * 16,
         "x-b3-sampled": "1",
+        "x-b3-parentspanid": "c" * 16,
     }
     r = gw.client.post("/v1/chat/completions", json=body(), headers=caller)
     assert r.status_code == 200
@@ -336,8 +354,10 @@ def test_gate_persona_overrides_client_trace_and_project(make_gateway):
     assert sent.headers["traceparent"].endswith("-01")
     assert sent.headers["traceparent"].split("-")[1] == persona.trace_id
     assert sent.headers["b3"].split("-")[0] == persona.trace_id
+    assert B3_RE.fullmatch(sent.headers["b3"]) is not None
     assert "tracestate" not in sent.headers
-    for name in ("x-b3-traceid", "x-b3-spanid", "x-b3-sampled"):
+    for name in ("x-b3-traceid", "x-b3-spanid", "x-b3-sampled",
+                 "x-b3-parentspanid"):
         assert name not in sent.headers
 
 

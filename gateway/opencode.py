@@ -85,8 +85,19 @@ NEUTRALIZE = (
 #: Appended after the gate block when the caller supplied no system message.
 DEFAULT_SYSTEM = "You are a helpful assistant. Answer the user's questions in their language."
 
-#: User-Agent advertised by the client (spoofs the opencode CLI).
-OPENCODE_UA = "opencode/latest/2.0.26/cli"
+#: User-Agent advertised by the client (spoofs the opencode CLI). The captured
+#: real client (2026-10-24) is 2.1.3; keep this in sync with the OpenCode
+#: release used for reference captures.
+OPENCODE_UA = "opencode/latest/2.1.3/cli"
+
+#: ``Accept`` sent by the real OpenCode client for inference requests.
+OPENCODE_ACCEPT = "*/*"
+
+#: ``max_completion_tokens`` used by the real OpenCode agent request. Titles
+#: keep the provider default, but the gateway cannot distinguish a title call
+#: from a normal chat, so this is a default for every chat body and is never
+#: written over a caller-supplied value.
+OPENCODE_MAX_COMPLETION_TOKENS = 32000
 
 #: ``Authorization`` used by the free tier ("public" is the anonymous token).
 OPENCODE_AUTHORIZATION = "Bearer public"
@@ -234,6 +245,7 @@ def build_gate_headers(session_id: str, *, user_agent: str = OPENCODE_UA,
     headers = {
         "Authorization": OPENCODE_AUTHORIZATION,
         "Content-Type": "application/json",
+        "Accept": OPENCODE_ACCEPT,
         "User-Agent": user_agent,
         "x-opencode-client": "cli",
     }
@@ -250,14 +262,17 @@ def build_trace_headers(trace_id: str | None = None) -> dict[str, str]:
     ``trace_id`` is reused when valid (a stable per-persona trace); invalid or
     missing values produce a fresh trace id. A fresh span id is generated on
     every call, so each request gets its own span inside the persona's trace.
-    Multi-header B3 variants (``x-b3-*``) are dropped and not synthesized:
-    only ``traceparent`` and the single ``b3`` header are emitted.
+    The single ``b3`` header has the four components the real OpenCode client
+    sends (``trace-span-sampled-parentspan``); the parent span is fresh per
+    request as well. Multi-header B3 variants (``x-b3-*``) are dropped and not
+    synthesized: only ``traceparent`` and the single ``b3`` header are emitted.
     """
     tid = trace_id if is_trace_id(trace_id) else new_trace_id()
     span = new_span_id()
+    parent = new_span_id()
     return {
         "traceparent": f"00-{tid}-{span}-01",
-        "b3": f"{tid}-{span}-1",
+        "b3": f"{tid}-{span}-1-{parent}",
     }
 
 
@@ -341,6 +356,8 @@ def prepare_body(raw_body: bytes | str | None, model: str) -> bytes:
     - sets ``model`` to ``model`` (caller value or gateway default),
     - injects/normalises the system message via :func:`inject_gate_into_messages`,
       UNLESS the caller supplied tool definitions (see below),
+    - defaults ``max_completion_tokens`` to
+      :data:`OPENCODE_MAX_COMPLETION_TOKENS` when the caller omitted it,
     - forces ``stream = True`` and ``stream_options = {"include_usage": True}``.
 
     ``messages`` that is missing or not a list is replaced by an empty list
@@ -367,6 +384,7 @@ def prepare_body(raw_body: bytes | str | None, model: str) -> bytes:
         data["messages"] = messages
     else:
         data["messages"] = inject_gate_into_messages(messages)
+    data.setdefault("max_completion_tokens", OPENCODE_MAX_COMPLETION_TOKENS)
     data["stream"] = True
     data["stream_options"] = {"include_usage": True}
     return json.dumps(data, ensure_ascii=False, separators=(",", ":")).encode("utf-8")

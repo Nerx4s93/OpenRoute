@@ -228,9 +228,16 @@ OpenRoute/
   `x-opencode-session`, `x-session-affinity`, `x-session-id`,
   `x-opencode-session-id`, `traceparent` и `b3` заменяются значениями
   персоны; клиентские `tracestate` и `x-b3-*` вычищаются. `traceparent` и
-  `b3` пересобираются на каждый запрос: trace id — из персоны, span id —
-  свежий. Multi-header B3 (`x-b3-*`) не синтезируется: только `traceparent`
+  `b3` пересобираются на каждый запрос: trace id — из персоны, span id и
+  parent span id (4-й компонент `b3`, как у реального клиента) — свежие.
+  Multi-header B3 (`x-b3-*`) не синтезируется: только `traceparent`
   и одиночный `b3`.
+- Заголовки соответствуют перехваченному реальному OpenCode CLI:
+  `User-Agent: opencode/latest/2.1.3/cli`, `Accept: */*`,
+  `x-opencode-client: cli`, `Authorization: Bearer public`.
+- Тело chat-запроса тоже приводится к виду реального клиента:
+  `stream: true`, `stream_options.include_usage: true` и дефолтный
+  `max_completion_tokens: 32000` (клиентское значение не перетирается).
 - Разные диалоги и клиенты через один прокси делят один upstream session id,
   но affinity и балансировка не меняются: привязка по-прежнему ключуется
   клиентской сессией/fingerprint, персона применяется после выбора прокси.
