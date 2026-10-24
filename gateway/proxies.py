@@ -40,6 +40,7 @@ from urllib.parse import quote
 import httpx
 
 from .config import PROVIDER_NAME, Settings
+from .curlclient import UpstreamClient
 
 logger = logging.getLogger(__name__)
 
@@ -135,7 +136,8 @@ class Proxy:
     """One pool member: an HTTP(S) proxy URL ``http://user:pass@host:port``."""
 
     url: str
-    client: Optional[httpx.AsyncClient] = None
+    # httpx.AsyncClient (test harness' scripted transports) | UpstreamClient
+    client: Optional[httpx.AsyncClient | UpstreamClient] = None
     requests: int = 0
     errors: int = 0
     consecutive_errors: int = 0
@@ -550,10 +552,16 @@ class ProxyManager:
     async def _probe_proxy(self, proxy_url: str) -> bool:
         """Proxy alive iff ``GET {opencode_models_url}`` returns status < 500
         and != 407 (Proxy Authentication Required). Any transport error = dead.
+
+        The probe goes through the SAME fingerprinted transport as chat
+        requests (UpstreamClient): a plain httpx/OpenSSL ClientHello to
+        opencode.ai is recognizable as automation and would risk poisoning
+        the proxy's exit IP for every client, the genuine CLI included
+        (see ``gateway/curlclient.py``).
         """
         hostport = self._proxy_hostport(proxy_url)
         try:
-            async with httpx.AsyncClient(
+            async with UpstreamClient(
                 proxy=proxy_url,
                 timeout=httpx.Timeout(self._s.health_check_timeout, connect=5.0),
             ) as client:
@@ -568,8 +576,14 @@ class ProxyManager:
 
     # --- upstream clients ---
 
-    def ensure_client(self, proxy: Proxy) -> httpx.AsyncClient:
-        """Lazily build/cache the ``httpx.AsyncClient`` bound to ``proxy.url``.
+    def ensure_client(self, proxy: Proxy) -> UpstreamClient:
+        """Lazily build/cache the upstream client bound to ``proxy.url``.
+
+        The client is the curl_cffi transport with the byte-matched opencode
+        TLS fingerprint (see :mod:`gateway.curlclient`); it exposes exactly
+        the httpx.AsyncClient API the request path uses, and its transport
+        failures surface as ``httpx.TransportError`` so the retry/parking
+        logic in ``main.py`` is unchanged.
 
         After ``aclose()`` the manager never resurrects clients: it raises
         ``RuntimeError`` (otherwise a new client would silently appear for a
@@ -580,7 +594,7 @@ class ProxyManager:
         if proxy.client is not None and proxy._client_proxy == proxy.url:
             return proxy.client
         old = proxy.client
-        proxy.client = httpx.AsyncClient(
+        proxy.client = UpstreamClient(
             base_url=self._s.opencode_base_url.rstrip("/"),
             proxy=proxy.url,
             timeout=httpx.Timeout(self._s.upstream_timeout, connect=self._s.connect_timeout),
@@ -590,7 +604,7 @@ class ProxyManager:
             self._close_client_soon(old, f"client rebuilt for {mask_proxy(proxy.url)}")
         return proxy.client
 
-    def _close_client_soon(self, client: httpx.AsyncClient, why: str) -> None:
+    def _close_client_soon(self, client: httpx.AsyncClient | UpstreamClient, why: str) -> None:
         """Close an httpx client "in the background", holding a STRONG ref to
         the task (``create_task`` returns a weakref-compatible Future: without a
         strong ref the task can be GC'd before it completes). With a running

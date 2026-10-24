@@ -21,6 +21,20 @@ SIMULTANEOUSLY:
    neutralise their effect with ``NEUTRALIZE``, then append the caller's own
    system instructions.
 
+3. **TLS client fingerprint** (observed 2026-10-24) — the upstream
+   fingerprints the TLS ClientHello of the HTTPS connection. Python's
+   ``httpx`` (OpenSSL), ``curl`` (Schannel) and Chrome's fingerprint
+   (curl_cffi ``impersonate="chrome"``) are ALL answered with an instant
+   ``429 FreeUsageLimitError`` — regardless of the request bytes (verified
+   with a byte-identical replay of a real client request) — and the exit IP
+   additionally gets flagged, after which even the GENUINE ``opencode``
+   CLI receives 429 from that IP for the rest of the UTC day. Only the
+   real client's fingerprint (Bun/BoringSSL) passes; it is reproduced
+   byte-exactly by the constants in :data:`OPENCODE_TLS_JA3` +
+   :data:`OPENCODE_TLS_SIGALGS` via curl_cffi (same BoringSSL family) —
+   see :mod:`gateway.curlclient`.
+
+
 Session ids have a strict format (``packages/schema/src/identifier.ts``):
 ``ses_`` + 12 hex chars + 14 base62 chars, where the 12 hex are
 ``~((unix_ms << 12 | counter))`` truncated to 48 bits. A random 26-char token
@@ -104,6 +118,69 @@ OPENCODE_MAX_COMPLETION_TOKENS = 32000
 
 #: ``Authorization`` used by the free tier ("public" is the anonymous token).
 OPENCODE_AUTHORIZATION = "Bearer public"
+
+# --- TLS client fingerprint (verbatim; byte-matched 2026-10-24) --------------
+#
+# Dumped from the genuine opencode CLI (Bun/BoringSSL ClientHello, captured
+# with a blind mitm tunnel before any certificate validation) and reproduced
+# via curl_cffi. The upstream free tier fingerprints the ClientHello:
+# httpx / curl / Chrome impersonation all get an instant 429 FreeUsageLimitError
+# AND poison the exit IP for every other client (even the genuine CLI) for the
+# rest of the UTC day. Only this exact profile gets 200 through a fresh proxy
+# with the ordinary gateway body. Do not "modernise" any value here.
+
+#: JA3 string of the genuine opencode client (curl_cffi ``ja3=`` format):
+#: TLS 1.2 record, 17 BoringSSL ciphers, 13 extensions in this exact order,
+#: curves incl. X25519MLKEM768 (0x11ec), uncompressed points only.
+OPENCODE_TLS_JA3 = (
+    "771,4865-4866-4867-49195-49199-49196-49200-52393-52392-"
+    "49161-49171-49162-49172-156-157-47-53,"
+    "0-23-65281-10-11-35-16-5-13-18-51-45-43,"
+    "4588-29-23-24,0"
+)
+
+#: Full 11-entry signature_algorithms list of the genuine client (curl_cffi
+#: does not derive it from JA3; BoringSSL's default is 8 entries — the missing
+#: three are ed25519, ecdsa_secp521r1_sha512 and the legacy rsa_pkcs1_sha1).
+OPENCODE_TLS_SIGALGS: tuple[str, ...] = (
+    "ecdsa_secp256r1_sha256",
+    "rsa_pss_rsae_sha256",
+    "rsa_pkcs1_sha256",
+    "ecdsa_secp384r1_sha384",
+    "rsa_pss_rsae_sha384",
+    "rsa_pkcs1_sha384",
+    "rsa_pss_rsae_sha512",
+    "rsa_pkcs1_sha512",
+    "ed25519",
+    "ecdsa_secp521r1_sha512",
+    "rsa_pkcs1_sha1",
+)
+
+#: ALPN: the genuine client offers http/1.1 ONLY (never h2), so the upstream
+#: transport must force HTTP/1.1 or the ClientHello diverges at the ALPN layer.
+#: Kept here as documentation; enforced by :mod:`gateway.curlclient`.
+
+#: ``Accept-Encoding`` the genuine client sends (Bun with zstd support).
+OPENCODE_ACCEPT_ENCODING = "gzip, deflate, br, zstd"
+
+#: Header order of the real client's chat request (mitm capture 2026-10-24).
+#: curl_cffi emits custom headers in insertion order and appends its own
+#: transport headers (Accept, Accept-Encoding, Host, Content-Length) at the
+#: tail — the same layout the genuine client produces.
+OPENCODE_HEADER_ORDER: tuple[str, ...] = (
+    "authorization",
+    "content-type",
+    "user-agent",
+    "b3",
+    "traceparent",
+    "x-opencode-client",
+    "x-opencode-project",
+    "x-opencode-session",
+    "x-opencode-session-id",
+    "x-session-affinity",
+    "x-session-id",
+)
+
 
 #: Session header names that carry the affinity value (all get the session id).
 SESSION_HEADER_NAMES: tuple[str, ...] = (

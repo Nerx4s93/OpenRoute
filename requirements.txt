@@ -6,5 +6,12 @@ httpx==0.28.1
 # OpenCode client sends to opencode.ai.
 brotli==1.1.0
 zstandard==0.23.0
+# curl_cffi: the upstream free tier fingerprints the TLS ClientHello; httpx
+# (OpenSSL) hellos are detected as automation and answered with an instant
+# 429 FreeUsageLimitError + the exit IP gets poisoned. curl_cffi (BoringSSL,
+# same TLS family as the real Bun-based client) reproduces the genuine hello
+# byte-exactly (ja3 + 11 sigalgs via gateway/curlclient.py). Pinned to the
+# version the fingerprint was verified against live (2026-10-24).
+curl_cffi==0.15.0
 pydantic-settings==2.15.0
 psycopg[binary,pool]==3.2.9

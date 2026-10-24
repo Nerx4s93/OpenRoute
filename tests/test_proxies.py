@@ -707,7 +707,7 @@ async def test_probe_proxy_407_5xx_and_network_errors_mean_dead(monkeypatch, cap
                 raise httpx.ConnectError("refused")
             return _StatusResp(made["status"])
 
-    monkeypatch.setattr(prox.httpx, "AsyncClient", ProbeClient)
+    monkeypatch.setattr(prox, "UpstreamClient", ProbeClient)
 
     made["status"] = 200
     assert await m._probe_proxy("http://p:1") is True

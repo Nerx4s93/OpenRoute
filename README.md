@@ -240,9 +240,9 @@ OpenRoute/
   «учётку» с общей квотой.
 - Заголовки соответствуют перехваченному реальному OpenCode CLI:
   `User-Agent: opencode/latest/2.1.3/cli`, `Accept: */*`,
-  `x-opencode-client: cli`, `Authorization: Bearer public`;
-  `accept-encoding` добавляет httpx (с brotli/zstandard в образе —
-  `gzip, deflate, br, zstd`, как у реального клиента).
+  `x-opencode-client: cli`, `Authorization: Bearer public`; порядок заголовков
+  нормализуется под порядок реального клиента (см. ниже),
+  `accept-encoding: gzip, deflate, br, zstd` задаёт curl-транспорт.
 - Тело chat-запроса тоже приводится к виду реального клиента:
   `stream: true`, `stream_options.include_usage: true` и дефолтный
   `max_completion_tokens: 32000` (клиентское значение не перетирается).
@@ -265,6 +265,36 @@ OpenRoute/
   клиентские identity-заголовки (`x-opencode-project`, `traceparent`,
   `tracestate`, `b3`, `x-b3-*`) вместо значений персоны; все прочие клиентские
   заголовки при этом всё равно не форвардятся (allowlist действует всегда).
+
+---
+
+## TLS-фингерпринт апстрима
+
+Апстрим (opencode.ai) снимает фингерпринт TLS ClientHello (замер 2026-10-24):
+
+- `httpx` (OpenSSL), `curl` (Schannel) и имперсонация Chrome (curl_cffi
+  `impersonate="chrome"`) получают **мгновенный `429 FreeUsageLimitError`**
+  независимо от байтов запроса (проверено и побайтовым реплеем настоящего
+  клиента);
+- выходной IP при этом **помечается**: после ~7 «синтетических» запросов с
+  /64 даже **настоящий** opencode CLI получает оттуда 429 до конца UTC-дня;
+- проходит только подлинный отпечаток реального клиента (Bun/BoringSSL).
+
+Поэтому upstream-транспорт — не httpx, а `gateway/curlclient.py`:
+httpx-совместимый фасад над `curl_cffi` (BoringSSL, то же семейство TLS),
+воспроизводящий ClientHello реального клиента **байт-в-поле**: JA3 с
+X25519MLKEM768, полный список из 11 signature_algorithms (включая ed25519
+и legacy SHA-1), ALPN `http/1.1` без h2. Константы — в
+`gateway/opencode.py` (`OPENCODE_TLS_JA3`, `OPENCODE_TLS_SIGALGS`,
+`OPENCODE_ACCEPT_ENCODING`, `OPENCODE_HEADER_ORDER`), применяются к КАЖДОМУ
+запросу, включая health-пробу (неотличима от запроса реального клиента).
+`curl_cffi` запинован в requirements к версии, на которой отпечаток
+сверялся с подлинным живым ClientHello.
+
+Фасад повторяет используемую шлюзом часть API `httpx.AsyncClient`
+(`build_request`/`send`/`aread`/`aiter_bytes`/`aclose`), ошибки транспорта
+пробрасывает как `httpx.TransportError` — вся логика retry/парковки в
+`main.py` и скриптованные транспорты тестов не изменились.
 
 ---
 
