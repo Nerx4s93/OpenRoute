@@ -96,7 +96,7 @@ export function KeySecretDialog({
           </div>
           <p className="secret-warning">
             Восстановить ключ нельзя. Если он потеряется, останется только
-            перевыпустить его — старый сразу перестанет работать.
+            перевыпустить его.
           </p>
         </div>
         <div className="modal-actions">

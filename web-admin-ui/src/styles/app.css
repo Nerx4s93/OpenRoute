@@ -241,6 +241,7 @@ form.add select:disabled { opacity: .6; }
 form.add select option { background: #0d1720; color: var(--text); }
 .form-footer { grid-column: 1 / -1; display: flex; align-items: center;
   justify-content: space-between; gap: 16px; padding-top: 5px; }
+.key-form-footer { justify-content: flex-end; }
 form.add button, .login-box button[type=submit] { padding: 10px 18px;
   background: var(--mint); border-color: var(--mint); color: #092322; font-size: 12px; font-weight: 800; }
 form.add button:hover, .login-box button[type=submit]:hover {

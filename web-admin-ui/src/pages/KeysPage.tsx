@@ -162,11 +162,7 @@ export function KeysPage() {
                 onChange={(event) => update("models", event.target.value)}
               />
             </div>
-            <div className="form-footer">
-              <span className="form-hint">
-                Ключ доступа с префиксом openroute- создастся автоматически
-                и будет показан один раз.
-              </span>
+            <div className="form-footer key-form-footer">
               <button type="submit" disabled={addKey.isPending}>
                 {addKey.isPending ? "Создание…" : "＋   Создать ключ"}
               </button>
@@ -316,10 +312,7 @@ export function KeysPage() {
           });
         }}
       >
-        <p>
-          Старый ключ сразу перестанет работать. Лимиты, модели и Key ID
-          сохранятся, а новый ключ будет показан только один раз.
-        </p>
+        <p>Старый ключ сразу перестанет работать.</p>
       </ConfirmDialog>
 
       <ConfirmDialog
