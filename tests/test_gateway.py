@@ -1756,9 +1756,9 @@ def test_internal_stats_data_auth_and_days_clamp(make_gateway):
     assert big["dates"] == sorted(big["dates"])
     assert big["dates"][-1] == _today_utc().strftime("%Y-%m-%d")
     assert len(big["series_total"]["requests"]) == 365
-    assert {row["proxy"] for row in big["proxies"]} == {
-        "proxy-a.invalid:8080", "proxy-b.invalid:8080"}
-    assert all(row["in_pool"] and row["tokens_total"] == 0 for row in big["proxies"])
+    # No requests in the window -> no proxies leak in from the pool/history.
+    assert big["proxies"] == []
+    assert big["series_by_proxy"] == {}
 
 
 def test_internal_stats_data_totals_and_archived(make_gateway):
@@ -1805,10 +1805,9 @@ def test_internal_stats_data_totals_and_archived(make_gateway):
     }
 
     by_name = {row["proxy"]: row for row in data["proxies"]}
-    assert set(by_name) == {prox, archived, "proxy-b.invalid:8080"}
+    assert set(by_name) == {prox, archived}
     # In-pool proxies first, then archived; each group by tokens_total DESC.
-    assert [row["proxy"] for row in data["proxies"]] == [
-        prox, "proxy-b.invalid:8080", archived]
+    assert [row["proxy"] for row in data["proxies"]] == [prox, archived]
 
     a = by_name[prox]
     assert a["in_pool"] is True
@@ -1819,9 +1818,6 @@ def test_internal_stats_data_totals_and_archived(make_gateway):
     assert old["in_pool"] is False
     assert old["tokens_total"] == 5
     assert old["requests_total"] == 1 and old["errors_total"] == 1
-
-    idle = by_name["proxy-b.invalid:8080"]
-    assert idle["in_pool"] is True and idle["tokens_total"] == 0
 
     assert set(data["series_by_proxy"]) == set(by_name)
     for series in data["series_by_proxy"].values():
@@ -1841,6 +1837,11 @@ def test_internal_stats_data_totals_and_archived(make_gateway):
     assert day["series_total"] == {
         "tokens": [15], "requests": [2], "errors": [1],
     }
+    day_by_name = {row["proxy"]: row for row in day["proxies"]}
+    assert set(day_by_name) == {prox, archived}
+    assert day_by_name[prox]["tokens_total"] == 10
+    assert day_by_name[archived]["tokens_total"] == 5
+    assert set(day["series_by_proxy"]) == {prox, archived}
 
     for period, count in (
         ("1d", 1), ("3d", 3), ("7d", 7), ("30d", 30), ("90d", 90),
@@ -1871,6 +1872,51 @@ def test_internal_stats_data_totals_and_archived(make_gateway):
         "requests": [1, 0, 0, 0, 2],
         "errors": [0, 0, 0, 0, 1],
     }
+
+
+def test_internal_stats_data_scopes_proxies_to_selected_period(make_gateway):
+    """A proxy used only before the window must not appear or affect totals."""
+    gw = make_gateway()
+    today = _today_utc()
+    current = "proxy-a.invalid:8080"
+    old = "7.7.7.7:7000"
+
+    async def seed():
+        rows = [
+            LogEntry(ts=(today - timedelta(days=10)).timestamp() + 3600,
+                     key_id="k1", method="POST", path="chat/completions",
+                     model=FREE_MODEL, status=200, latency_ms=1.0, stream=True,
+                     account=old, prompt_tokens=100, completion_tokens=0,
+                     error=None),
+            LogEntry(ts=today.timestamp() + 3600, key_id="k1", method="POST",
+                     path="chat/completions", model=FREE_MODEL, status=200,
+                     latency_ms=1.0, stream=True, account=current,
+                     prompt_tokens=7, completion_tokens=3, error=None),
+        ]
+        for row in rows:
+            await gw.reqlog.log(row)
+
+    gw._gw_lifespan_client.portal.call(seed)
+    h = {"X-Internal-Token": "test-internal-token"}
+
+    day = gw.internal.get("/internal/stats-data?period=1d", headers=h).json()
+    assert [row["proxy"] for row in day["proxies"]] == [current]
+    assert day["proxies"][0]["tokens_total"] == 10
+    assert day["totals"]["tokens_total"] == 10
+    assert set(day["series_by_proxy"]) == {current}
+    assert old not in day["series_by_proxy"]
+
+    all_time = gw.internal.get(
+        "/internal/stats-data?period=all", headers=h
+    ).json()
+    by_name = {row["proxy"]: row for row in all_time["proxies"]}
+    assert set(by_name) == {current, old}
+    # In-pool first even though the archived proxy spent more.
+    assert [row["proxy"] for row in all_time["proxies"]] == [current, old]
+    assert by_name[current]["in_pool"] is True
+    assert by_name[current]["tokens_total"] == 10
+    assert by_name[old]["in_pool"] is False
+    assert by_name[old]["tokens_total"] == 100
 
 
 def test_internal_stats_data_fail_soft(make_gateway, monkeypatch):

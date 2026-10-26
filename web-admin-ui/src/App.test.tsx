@@ -182,7 +182,9 @@ describe("App", () => {
     expect(screen.getByText("Прокси в ротации")).toBeInTheDocument();
     expect(screen.queryByText("Токенов за всё время")).not.toBeInTheDocument();
     expect(screen.getByText("Вне пула")).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Всего токенов" })).toBeInTheDocument();
+    expect(
+      screen.getByRole("columnheader", { name: "Токенов за период" }),
+    ).toBeInTheDocument();
     expect(screen.getAllByRole("columnheader", { name: "Токены" })).toHaveLength(1);
     expect(screen.queryByRole("columnheader", { name: "Действия" })).not.toBeInTheDocument();
     expect(
@@ -225,6 +227,7 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: "7д" }));
 
+    expect(await screen.findByText("За 7 дней")).toBeInTheDocument();
     await waitFor(() => {
       expect(
         fetchMock.mock.calls.some(([url]) =>

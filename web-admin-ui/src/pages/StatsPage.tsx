@@ -1,4 +1,4 @@
-import { PERIOD_CAPTIONS } from "../api/types";
+import { PERIOD_CAPTIONS, PERIOD_SECTIONS } from "../api/types";
 import { EmptyRow, ErrorBanner, LoadingRows } from "../components/Feedback";
 import { PeriodTabs } from "../components/PeriodTabs";
 import { ProxyStatsPanel } from "../components/ProxyStatsPanel";
@@ -61,6 +61,7 @@ export function StatsPage() {
       <ProxyStatsPanel
         rows={statsQuery.data?.proxies ?? []}
         isLoading={statsQuery.isLoading}
+        note={PERIOD_SECTIONS[period]}
       />
 
       <Section id="requests-title" icon="↗" title="Последние запросы" note="Журнал активности">

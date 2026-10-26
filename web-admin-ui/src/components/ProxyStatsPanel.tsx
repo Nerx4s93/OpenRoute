@@ -28,7 +28,7 @@ export function ProxyStatsPanel({
             <tr>
               <th>Прокси</th>
               <th>В пуле</th>
-              <th>Всего токенов</th>
+              <th>Токенов за период</th>
               <th>Запросов</th>
               <th>Ошибок</th>
             </tr>

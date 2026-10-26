@@ -1159,8 +1159,9 @@ async def _stats_panel_data(days: int = 30, period: str | None = None) -> dict:
     as the Proxies page; otherwise the last ``days`` UTC days are used
     (clamped to ``1..365``). ``dates`` always
     covers the whole window, ascending and ending today; every series is
-    aligned to it. Per-proxy lifetime counters come from the request log.
-    Only masked proxy names are exposed.
+    aligned to it. Per-proxy rows and totals are scoped to the same window:
+    proxies with no requests in it are omitted, so lifetime data never leaks
+    into a shorter period. Only masked proxy names are exposed.
 
     Robustness: missing/unreachable stores degrade to zeros and empty series —
     the endpoint still answers 200.
@@ -1185,11 +1186,6 @@ async def _stats_panel_data(days: int = 30, period: str | None = None) -> dict:
         query_since = start.timestamp()
 
     try:
-        stats = await reqlog.proxy_stats_async(ttl_seconds=10.0)
-    except Exception:
-        logger.exception("Failed to load per-proxy statistics")
-        stats = {}
-    try:
         daily = await reqlog.daily_by_account_async(query_since)
     except Exception:
         logger.exception("Failed to load the daily token series")
@@ -1213,49 +1209,46 @@ async def _stats_panel_data(days: int = 30, period: str | None = None) -> dict:
              for i in range(days)]
     day_index = {day: i for i, day in enumerate(dates)}
 
-    # Union: the current pool plus every account seen in the log/history.
-    rows: dict[str, dict] = {}
-    for item in manager.status().get("proxies", []):
-        display = str(item.get("proxy") or "")
-        if not display:
-            continue
-        rows[display] = {"proxy": display, "in_pool": True}
-    seen: list[str] = list(stats) + [str(r.get("account")) for r in daily]
-    for display in seen:
-        if not display or display in rows:
-            continue
-        rows[display] = {
-            "proxy": display,
-            "in_pool": False,  # archived/unknown: no runtime object any more
-        }
-
-    series_by_proxy = {
-        display: {"tokens": [0] * days, "requests": [0] * days,
-                  "errors": [0] * days}
-        for display in rows
-    }
+    # Build rows and series from the window aggregate only. Accounts without
+    # requests in this window are deliberately absent (no lifetime leakage).
+    period_stats: dict[str, dict[str, int]] = {}
+    series_by_proxy: dict[str, dict[str, list[int]]] = {}
     series_total = {"tokens": [0] * days, "requests": [0] * days,
                     "errors": [0] * days}
     for row in daily:
+        display = str(row.get("account") or "")
         idx = day_index.get(str(row.get("day")))
-        target = series_by_proxy.get(str(row.get("account")))
-        if idx is None or target is None:
+        if not display or idx is None:
             continue
+        target = series_by_proxy.setdefault(
+            display,
+            {"tokens": [0] * days, "requests": [0] * days,
+             "errors": [0] * days},
+        )
+        rec = period_stats.setdefault(
+            display, {"tokens": 0, "requests": 0, "errors": 0}
+        )
         for field in ("tokens", "requests", "errors"):
             value = int(row.get(field) or 0)
             target[field][idx] += value
+            rec[field] += value
             series_total[field][idx] += value
 
-    proxies: list[dict] = []
-    for display, base in rows.items():
-        rec = stats.get(display) or {}
-        out = dict(base)
-        out.update({
-            "tokens_total": int(rec.get("tokens") or 0),
-            "requests_total": int(rec.get("requests") or 0),
-            "errors_total": int(rec.get("errors") or 0),
-        })
-        proxies.append(out)
+    pool = {
+        str(item.get("proxy") or "")
+        for item in manager.status().get("proxies", [])
+        if item.get("proxy")
+    }
+    proxies: list[dict] = [
+        {
+            "proxy": display,
+            "in_pool": display in pool,
+            "tokens_total": rec["tokens"],
+            "requests_total": rec["requests"],
+            "errors_total": rec["errors"],
+        }
+        for display, rec in period_stats.items()
+    ]
     # Active pool first, then archived/unknown proxies; each group by spend.
     proxies.sort(
         key=lambda row: (not row["in_pool"], -row["tokens_total"], row["proxy"])
