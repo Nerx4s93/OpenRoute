@@ -169,6 +169,11 @@ describe("App", () => {
     expect(screen.getByRole("link", { name: "Прокси" })).toHaveClass("nav-proxies");
     expect(screen.getByRole("link", { name: "Статистика" })).toHaveClass("nav-stats");
     expect(
+      within(screen.getByRole("banner"))
+        .getAllByRole("link")
+        .map((link) => link.textContent),
+    ).toEqual(["Прокси", "Статистика", "Ключи"]);
+    expect(
       await screen.findByRole("cell", { name: "203.0.113.10:8080" }),
     ).toBeInTheDocument();
     expect(screen.getByText("Прокси в ротации")).toBeInTheDocument();

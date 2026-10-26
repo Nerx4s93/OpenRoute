@@ -50,17 +50,17 @@ function ShellLayout({ children }: { children: ReactNode }) {
         <div className="nav-label">Управление</div>
         <nav>
           <NavLink
+            to={`/admin/ui/proxies${search}`}
+            className={(state) => `nav-proxies ${navClass(state)}`}
+          >
+            Прокси
+          </NavLink>
+          <NavLink
             to={`/admin/ui${search}`}
             end
             className={(state) => `nav-stats ${navClass(state)}`}
           >
             Статистика
-          </NavLink>
-          <NavLink
-            to={`/admin/ui/proxies${search}`}
-            className={(state) => `nav-proxies ${navClass(state)}`}
-          >
-            Прокси
           </NavLink>
           <NavLink
             to={`/admin/ui/keys${search}`}
