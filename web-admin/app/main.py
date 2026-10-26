@@ -39,7 +39,10 @@ gateway = GatewayClient(settings)
 
 _PANEL_API = "/api/admin"
 _SESSION_COOKIE = auth.SESSION_COOKIE
-_PERIODS = {"day", "week", "month", "all"}
+_PERIODS = {
+    "1d", "3d", "7d", "30d", "90d", "all",
+    "day", "week", "month",  # legacy aliases
+}
 _SSE_TICK_SECONDS = 1.0
 _SSE_HEARTBEAT_SECONDS = 15.0
 _SSE_AUTH_CHECK_SECONDS = 30.0
@@ -343,8 +346,14 @@ async def api_proxy_events(request: Request, period: str = "all",
 
 
 @app.get(f"{_PANEL_API}/stats")
-async def api_stats(days: int = 30, session: dict = Depends(require_panel)) -> dict:
-    """Token statistics for the last ``days`` days."""
+async def api_stats(
+    days: int = 30,
+    period: str | None = None,
+    session: dict = Depends(require_panel),
+) -> dict:
+    """Token statistics for ``period`` or the last ``days`` days."""
+    if period is not None:
+        return await gateway.stats_snapshot(period=_normalize_period(period))
     return await gateway.stats_snapshot(_normalize_days(days))
 
 

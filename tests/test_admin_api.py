@@ -114,6 +114,7 @@ class FakeState:
         self.recent: list[dict] = []
         self.stats_payload: dict = _stats_payload()  # /internal/stats-data
         self.stats_days: int | None = None  # last ?days= forwarded
+        self.stats_period: str | None = None  # last ?period= forwarded
 
 
 def _stats(d: dict[str, dict]) -> dict:
@@ -222,10 +223,18 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
     @app.get("/internal/stats-data")
     async def stats_data(req: Request) -> dict:
         require(req)
-        state.stats_days = int(req.query_params.get("days", "30"))
+        state.stats_period = req.query_params.get("period")
+        if state.stats_period is None:
+            state.stats_days = int(req.query_params.get("days", "30"))
+        else:
+            state.stats_days = None
         payload = dict(state.stats_payload)
         payload.setdefault("server_time", STATS_SERVER_TIME)
-        payload["days"] = state.stats_days
+        payload["days"] = (
+            state.stats_days
+            if state.stats_days is not None
+            else len(payload.get("dates") or [])
+        )
         return payload
 
     @app.post("/internal/proxies/set")
@@ -574,9 +583,9 @@ def test_proxies_snapshot_and_period(panel):
         "error": "upstream http://user:secret@10.0.0.1:3128 failed",
     }]
 
-    response = panel.client.get("/api/admin/proxies?period=week")
+    response = panel.client.get("/api/admin/proxies?period=90d")
     assert response.status_code == 200
-    assert panel.state.last_period == "week"
+    assert panel.state.last_period == "90d"
     body = response.json()
     assert body["server_time"]
     assert body["summary"] == {
@@ -809,6 +818,19 @@ def test_stats_days_clamped(panel):
         assert panel.state.stats_days == expected
 
 
+def test_stats_period_forwarded(panel):
+    panel.login_ok()
+    response = panel.client.get("/api/admin/stats?period=7d")
+    assert response.status_code == 200, response.text
+    assert panel.state.stats_period == "7d"
+    assert panel.state.stats_days is None
+    assert response.json()["days"] == len(STATS_DATES)
+
+    response = panel.client.get("/api/admin/stats?period=quarter")
+    assert response.status_code == 200, response.text
+    assert panel.state.stats_period == "all"
+
+
 # --- key management ---------------------------------------------------------
 
 
@@ -816,8 +838,8 @@ def test_keys_snapshot_and_stats(panel):
     panel.login_ok()
     panel.state.usage_by_key["default"] = {"requests": 2, "errors": 0, "tokens": 110}
     panel.state.usage_by_key["gone"] = {"requests": 1, "errors": 0, "tokens": 5}
-    body = panel.client.get("/api/admin/keys?period=month").json()
-    assert panel.state.last_period == "month"
+    body = panel.client.get("/api/admin/keys?period=30d").json()
+    assert panel.state.last_period == "30d"
     assert body["keys"][0]["key_id"] == "default"
     stats = {row["key_id"]: row for row in body["stats"]}
     assert stats["default"]["state"] == "active"

@@ -22,17 +22,19 @@ Backend админки OpenRoute (control plane). Отдаёт **только JS
 | GET | `/api/admin/proxies/events?period=` | SSE с JSON-снапшотами прокси |
 | POST | `/api/admin/proxies/set` | включить/отключить прокси по `proxy_id` (CSRF) |
 | POST | `/api/admin/proxies/refresh` | принудительно обновить список из px6 со сбросом TTL-кэша (CSRF) |
-| GET | `/api/admin/stats?days=` | токены по прокси и UTC-дням за 1..365 дней (по умолчанию 30; сессия, no-store) |
+| GET | `/api/admin/stats` (`days` / `period`) | токены по прокси и UTC-дням: 1..365 дней (по умолчанию 30) или окно `period` (сессия, no-store) |
 | GET | `/api/admin/keys?period=` | ключи + статистика по `key_id` |
 | GET | `/api/admin/keys/events?period=` | SSE с JSON-снапшотами ключей |
 | POST | `/api/admin/keys/add` | добавить ключ (CSRF) |
 | POST | `/api/admin/keys/set` | включить/отозвать ключ (CSRF) |
 | POST | `/api/admin/keys/delete` | удалить ключ (CSRF) |
 
-`period` — `day`, `week`, `month` или `all` (неизвестное значение → `all`).
-Границы календарные по UTC: `day` — с 00:00 текущего дня, `week` — с
-понедельника 00:00 текущей недели, `month` — с 1-го числа 00:00 текущего месяца.
-`days` зажимается в `1..365`, по умолчанию 30.
+`period` — `1d`, `3d`, `7d`, `30d`, `90d` или `all` (неизвестное значение →
+`all`). Окна 1–90 дней скользящие по UTC: включают сегодня и предыдущие
+N−1 дней, начиная с 00:00. Старые `day`, `week`, `month` сохранены как
+календарные алиасы (`day` — с 00:00 сегодня, `week` — с понедельника,
+`month` — с 1-го числа). Для `/api/admin/stats` `period` задаёт окно графика
+на странице «Статистика»; `days` зажимается в `1..365`, по умолчанию 30.
 
 ### Формат данных
 

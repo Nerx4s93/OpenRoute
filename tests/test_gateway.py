@@ -1431,8 +1431,8 @@ def test_internal_requires_token(make_gateway):
 
 
 def test_internal_period_filters_usage(make_gateway, monkeypatch):
-    """?period=day/week/month selects UTC calendar windows (today, current
-    Monday-based week, current month); unknown values behave like all time.
+    """?period selects UTC windows: rolling 1d/3d/7d/30d/90d and the legacy
+    day/week/month calendar aliases; unknown values behave like all time.
     The recent-requests feed stays unfiltered."""
     class FrozenDateTime(datetime):
         @classmethod
@@ -1501,12 +1501,29 @@ def test_internal_period_filters_usage(make_gateway, monkeypatch):
     assert month["usage"]["total"]["requests"] == 3
     assert month["usage"]["total"]["tokens"] == 35
 
+    for period, requests, tokens in (
+        ("1d", 1, 10),
+        ("3d", 2, 15),
+        ("7d", 2, 15),
+        ("30d", 3, 35),
+        ("90d", 4, 135),
+    ):
+        rolling = gw.internal.get(
+            f"/internal/proxies-data?period={period}", headers=h
+        ).json()
+        assert rolling["usage"]["total"]["requests"] == requests
+        assert rolling["usage"]["total"]["tokens"] == tokens
+
     unknown = gw.internal.get("/internal/proxies-data?period=year", headers=h).json()
     assert unknown["usage"]["total"]["requests"] == 4
 
     keys_day = gw.internal.get("/internal/keys-data?period=day", headers=h).json()
     assert keys_day["usage"]["total"]["requests"] == 1
     assert set(keys_day["usage"]) == {"day", "total"}
+
+    keys_7d = gw.internal.get("/internal/keys-data?period=7d", headers=h).json()
+    assert keys_7d["usage"]["total"]["requests"] == 2
+    assert set(keys_7d["usage"]) == {"prev_day", "day", "total"}
 
 
 def test_internal_disabled_when_token_empty(make_gateway):
@@ -1714,6 +1731,44 @@ def test_internal_stats_data_totals_and_archived(make_gateway):
     assert total["errors"][-1] == 1
     assert total["tokens"][2] == 100  # 4 days ago (index 2 in a 7-day window)
     assert sum(total["tokens"]) == 115
+
+    # Windows used by the Proxies page: rolling days and all time.
+    today_str = today.strftime("%Y-%m-%d")
+    day = gw.internal.get("/internal/stats-data?period=day", headers=h).json()
+    assert day["dates"] == [today_str]
+    assert day["series_total"] == {
+        "tokens": [15], "requests": [2], "errors": [1],
+    }
+
+    for period, count in (
+        ("1d", 1), ("3d", 3), ("7d", 7), ("30d", 30), ("90d", 90),
+    ):
+        window = gw.internal.get(
+            f"/internal/stats-data?period={period}", headers=h
+        ).json()
+        assert window["days"] == count
+        assert len(window["dates"]) == count
+        assert window["dates"][-1] == today_str
+        assert sum(window["series_total"]["tokens"]) == (
+            115 if count >= 7 else 15
+        )
+
+    all_time = gw.internal.get(
+        "/internal/stats-data?period=all", headers=h
+    ).json()
+    assert all_time["days"] == 5
+    assert all_time["dates"] == [
+        (today - timedelta(days=4)).strftime("%Y-%m-%d"),
+        (today - timedelta(days=3)).strftime("%Y-%m-%d"),
+        (today - timedelta(days=2)).strftime("%Y-%m-%d"),
+        (today - timedelta(days=1)).strftime("%Y-%m-%d"),
+        today.strftime("%Y-%m-%d"),
+    ]
+    assert all_time["series_total"] == {
+        "tokens": [100, 0, 0, 0, 15],
+        "requests": [1, 0, 0, 0, 2],
+        "errors": [0, 0, 0, 0, 1],
+    }
 
 
 def test_internal_stats_data_fail_soft(make_gateway, monkeypatch):

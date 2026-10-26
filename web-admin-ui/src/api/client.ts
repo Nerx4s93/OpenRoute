@@ -120,6 +120,9 @@ export const api = {
   stats: (days: number) =>
     apiRequest<StatsSnapshot>(`/api/admin/stats?days=${days}`),
 
+  statsPeriod: (period: Period) =>
+    apiRequest<StatsSnapshot>(`/api/admin/stats?period=${period}`),
+
   setProxy: (proxyId: string, enabled: boolean) =>
     apiRequest<ApiMessage>("/api/admin/proxies/set", {
       method: "POST",

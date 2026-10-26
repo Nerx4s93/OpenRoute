@@ -1089,14 +1089,19 @@ def _json_limit(raw: object, field: str) -> tuple[int | None, str | None]:
     return v, None
 
 
-_PANEL_PERIODS = {"day", "week", "month"}
+_ROLLING_PERIOD_DAYS = {"1d": 1, "3d": 3, "7d": 7, "30d": 30, "90d": 90}
+# Legacy day/week/month stay accepted for existing API clients.
+_PANEL_PERIODS = {"day", "week", "month"} | set(_ROLLING_PERIOD_DAYS)
+_STATS_PERIODS = _PANEL_PERIODS | {"all"}
 
 
 def _period_since(period: str) -> float | None:
-    """UTC calendar cutoff for the admin spending filter; ``None`` = all time.
+    """UTC cutoff for the admin spending filter; ``None`` = all time.
 
     ``day`` starts at 00:00 UTC today, ``week`` at Monday 00:00 UTC and
-    ``month`` at the 1st 00:00 UTC of the current month.
+    ``month`` at the 1st 00:00 UTC of the current month. The rolling
+    ``1d``/``3d``/``7d``/``30d``/``90d`` windows include today and the
+    preceding N-1 UTC days. Unknown values mean all time.
     """
     key = (period or "").lower()
     if key not in _PANEL_PERIODS:
@@ -1108,6 +1113,8 @@ def _period_since(period: str) -> float | None:
         start -= timedelta(days=start.weekday())
     elif key == "month":
         start = start.replace(day=1)
+    elif key in _ROLLING_PERIOD_DAYS:
+        start -= timedelta(days=_ROLLING_PERIOD_DAYS[key] - 1)
     return start.timestamp()
 
 
@@ -1169,26 +1176,38 @@ async def _keys_panel_data(period: str = "all") -> dict:
     return {"keys": keys_rows, "usage": usage}
 
 
-async def _stats_panel_data(days: int) -> dict:
-    """Compact token statistics for the admin "Statistics" page.
+async def _stats_panel_data(days: int = 30, period: str | None = None) -> dict:
+    """Compact token statistics for the admin panel.
 
-    ``days`` is clamped to ``1..365``. ``dates`` always has exactly ``days``
-    UTC calendar days, ascending and ending today; every series is aligned to
-    it. Per-proxy lifetime counters come from the request log. Only masked
-    proxy names are exposed.
+    With ``period`` (``1d``/``3d``/``7d``/``30d``/``90d``/``all``, plus the
+    legacy ``day``/``week``/``month``) the series follows the same UTC window
+    as the Proxies page; otherwise the last ``days`` UTC days are used
+    (clamped to ``1..365``). ``dates`` always
+    covers the whole window, ascending and ending today; every series is
+    aligned to it. Per-proxy lifetime counters come from the request log.
+    Only masked proxy names are exposed.
 
     Robustness: missing/unreachable stores degrade to zeros and empty series —
     the endpoint still answers 200.
     """
-    days = max(1, min(365, int(days)))
     today = datetime.now(timezone.utc).replace(
         hour=0, minute=0, second=0, microsecond=0
     )
-    start = today - timedelta(days=days - 1)
-    since = start.timestamp()
-    dates = [(start + timedelta(days=i)).strftime("%Y-%m-%d")
-             for i in range(days)]
-    day_index = {day: i for i, day in enumerate(dates)}
+    since: float | None = None
+    if period is not None:
+        key = (period or "all").lower()
+        if key not in _STATS_PERIODS:
+            key = "all"
+        since = _period_since(key)
+        query_since = 0.0 if since is None else since
+        start = (
+            datetime.fromtimestamp(since, tz=timezone.utc)
+            if since is not None else None
+        )
+    else:
+        days = max(1, min(365, int(days)))
+        start = today - timedelta(days=days - 1)
+        query_since = start.timestamp()
 
     try:
         stats = await reqlog.proxy_stats_async(ttl_seconds=10.0)
@@ -1196,10 +1215,28 @@ async def _stats_panel_data(days: int) -> dict:
         logger.exception("Failed to load per-proxy statistics")
         stats = {}
     try:
-        daily = await reqlog.daily_by_account_async(since)
+        daily = await reqlog.daily_by_account_async(query_since)
     except Exception:
         logger.exception("Failed to load the daily token series")
         daily = []
+
+    if period is not None and since is None:
+        observed = sorted({
+            str(row.get("day")) for row in daily if row.get("day")
+        })
+        start = (
+            datetime.strptime(observed[0], "%Y-%m-%d").replace(
+                tzinfo=timezone.utc)
+            if observed else today
+        )
+    if start is None:
+        start = today
+    if start > today:
+        start = today
+    days = (today - start).days + 1
+    dates = [(start + timedelta(days=i)).strftime("%Y-%m-%d")
+             for i in range(days)]
+    day_index = {day: i for i, day in enumerate(dates)}
 
     # Union: the current pool plus every account seen in the log/history.
     rows: dict[str, dict] = {}
@@ -1274,10 +1311,17 @@ async def internal_keys_data(request: Request, period: str = "all") -> dict:
     return await _keys_panel_data(period)
 
 
-async def internal_stats_data(request: Request, days: int = 30) -> dict:
-    """GET ``/internal/stats-data?days=...`` — compact token statistics."""
+async def internal_stats_data(
+    request: Request, days: int = 30, period: str | None = None
+) -> dict:
+    """GET ``/internal/stats-data`` — compact token statistics.
+
+    Either ``?days=N`` (rolling window) or
+    ``?period=1d|3d|7d|30d|90d|all`` (window shared with the Proxies page;
+    legacy ``day``/``week``/``month`` are still accepted).
+    """
     _require_internal(request)
-    return await _stats_panel_data(days)
+    return await _stats_panel_data(days, period)
 
 
 async def internal_proxies_refresh(request: Request) -> dict:

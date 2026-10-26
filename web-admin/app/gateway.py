@@ -330,14 +330,19 @@ class GatewayClient:
             "recent": _sanitize_recent(data.get("recent")),
         }
 
-    async def stats_snapshot(self, days: int = 30) -> dict:
-        """Token statistics for the last ``days`` days.
+    async def stats_snapshot(
+        self, days: int = 30, period: str | None = None
+    ) -> dict:
+        """Token statistics for a rolling or calendar window.
 
-        The gateway sends an epoch ``server_time`` and parallel per-day arrays;
-        the browser gets an ISO-8601 UTC clock label, masked proxy names and
-        normalized counters. Unknown gateway keys never pass through.
+        With ``period`` the window follows the Proxies page (day/week/month/all);
+        otherwise the last ``days`` days are used. The gateway sends an epoch
+        ``server_time`` and parallel per-day arrays; the browser gets an
+        ISO-8601 UTC clock label, masked proxy names and normalized counters.
+        Unknown gateway keys never pass through.
         """
-        data = await self._get(f"/internal/stats-data?days={days}")
+        query = f"period={period}" if period else f"days={days}"
+        data = await self._get(f"/internal/stats-data?{query}")
 
         raw_dates = data.get("dates")
         dates: list[str] = []

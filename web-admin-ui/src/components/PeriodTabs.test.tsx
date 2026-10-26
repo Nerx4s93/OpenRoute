@@ -12,12 +12,12 @@ describe("PeriodTabs", () => {
       "aria-pressed",
       "true",
     );
-    expect(screen.getByRole("button", { name: "Неделя" })).toHaveAttribute(
+    expect(screen.getByRole("button", { name: "7д" })).toHaveAttribute(
       "aria-pressed",
       "false",
     );
 
-    await userEvent.click(screen.getByRole("button", { name: "Неделя" }));
-    expect(onChange).toHaveBeenCalledWith("week");
+    await userEvent.click(screen.getByRole("button", { name: "7д" }));
+    expect(onChange).toHaveBeenCalledWith("7d");
   });
 });

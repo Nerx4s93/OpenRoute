@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen } from "@testing-library/react";
+import { render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -147,7 +147,7 @@ describe("App", () => {
     expect(screen.getByLabelText("Пароль")).toBeInTheDocument();
   });
 
-  it("renders the proxies page for an authenticated session", async () => {
+  it("renders the statistics page for an authenticated session", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -156,6 +156,7 @@ describe("App", () => {
           return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
         }
         if (url.includes("/api/admin/proxies")) return json(proxies);
+        if (url.includes("/api/admin/stats")) return json(stats);
         return json({});
       }),
     );
@@ -163,12 +164,66 @@ describe("App", () => {
     renderApp("/admin/ui");
 
     expect(
-      await screen.findByRole("heading", { name: "Пул прокси", level: 1 }),
+      await screen.findByRole("heading", { name: "Статистика", level: 1 }),
     ).toBeInTheDocument();
-    expect(await screen.findByText("203.0.113.10:8080")).toBeInTheDocument();
+    expect(screen.queryByRole("link", { name: "Прокси" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Статистика" })).toHaveClass("nav-stats");
+    expect(
+      await screen.findByRole("cell", { name: "203.0.113.10:8080" }),
+    ).toBeInTheDocument();
     expect(screen.getByText("Прокси в ротации")).toBeInTheDocument();
     expect(screen.queryByText("Токенов за всё время")).not.toBeInTheDocument();
-    expect(screen.getAllByRole("columnheader", { name: "Токены" })).toHaveLength(2);
+    expect(screen.getByText("Вне пула")).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Всего токенов" })).toBeInTheDocument();
+    expect(screen.getAllByRole("columnheader", { name: "Токены" })).toHaveLength(1);
+    expect(screen.queryByRole("columnheader", { name: "Действия" })).not.toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Токены по дням" }),
+    ).toBeInTheDocument();
+    const sectionTitles = screen
+      .getAllByRole("heading", { level: 2 })
+      .map((node) => node.textContent);
+    expect(sectionTitles.indexOf("Прокси")).toBe(
+      sectionTitles.indexOf("Токены по дням") + 1,
+    );
+    for (const label of ["1д", "3д", "7д", "30д", "90д", "Всё время"]) {
+      expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
+    }
+  });
+
+  it("requests token statistics for the selected statistics period", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/admin/session")) {
+        return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
+      }
+      if (url.includes("/api/admin/proxies")) return json(proxies);
+      if (url.includes("/api/admin/stats")) return json(stats);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderApp("/admin/ui");
+
+    await screen.findByRole("heading", { name: "Токены по дням" });
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("/api/admin/stats?period=all"),
+        ),
+      ).toBe(true);
+    });
+
+    await user.click(screen.getByRole("button", { name: "7д" }));
+
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("/api/admin/stats?period=7d"),
+        ),
+      ).toBe(true);
+    });
   });
 
   it("refreshes the proxy list on demand", async () => {
@@ -221,7 +276,7 @@ describe("App", () => {
     expect(screen.getByLabelText("Ключ доступа")).toBeInTheDocument();
   });
 
-  it("renders the stats page for an authenticated session", async () => {
+  it("redirects the legacy stats route to the statistics page", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -229,6 +284,7 @@ describe("App", () => {
         if (url.includes("/api/admin/session")) {
           return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
         }
+        if (url.includes("/api/admin/proxies")) return json(proxies);
         if (url.includes("/api/admin/stats")) return json(stats);
         return json({});
       }),
@@ -239,19 +295,19 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { name: "Статистика", level: 1 }),
     ).toBeInTheDocument();
-    expect(await screen.findByRole("cell", { name: "203.0.113.10:8080" })).toBeInTheDocument();
-    expect(screen.getByText("Ошибок за всё время")).toBeInTheDocument();
-    expect(screen.getByText("Вне пула")).toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "Токены по дням" })).toBeInTheDocument();
-    expect(screen.getByRole("columnheader", { name: "Всего токенов" })).toBeInTheDocument();
+    expect(
+      await screen.findByRole("heading", { name: "Токены по дням" }),
+    ).toBeInTheDocument();
+    expect(screen.queryByText("Токенов за всё время")).not.toBeInTheDocument();
   });
 
-  it("navigates to stats from the sidebar", async () => {
+  it("navigates to statistics from the sidebar", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
       const url = String(input);
       if (url.includes("/api/admin/session")) {
         return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
       }
+      if (url.includes("/api/admin/keys")) return json(keys);
       if (url.includes("/api/admin/stats")) return json(stats);
       if (url.includes("/api/admin/proxies")) return json(proxies);
       return json({});
@@ -259,15 +315,20 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
 
-    renderApp("/admin/ui");
+    renderApp("/admin/ui/keys");
 
-    await user.click(await screen.findByRole("link", { name: "Статистика" }));
+    await screen.findByRole("heading", { name: "Клиентские ключи", level: 1 });
+    await user.click(screen.getByRole("link", { name: "Статистика" }));
 
     expect(
       await screen.findByRole("heading", { name: "Статистика", level: 1 }),
     ).toBeInTheDocument();
-    expect(
-      fetchMock.mock.calls.some(([url]) => String(url).includes("/api/admin/stats?days=30")),
-    ).toBe(true);
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("/api/admin/stats?period=all"),
+        ),
+      ).toBe(true);
+    });
   });
 });

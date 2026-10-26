@@ -26,9 +26,7 @@ function ShellLayout({ children }: { children: ReactNode }) {
   const location = useLocation();
   const pageTitle = location.pathname.startsWith("/admin/ui/keys")
     ? "Ключи"
-    : location.pathname.startsWith("/admin/ui/stats")
-      ? "Статистика"
-      : "Прокси";
+    : "Статистика";
   const search = period === "all" ? "" : `?period=${period}`;
 
   const onLogout = () => {
@@ -52,12 +50,6 @@ function ShellLayout({ children }: { children: ReactNode }) {
           <NavLink
             to={`/admin/ui${search}`}
             end
-            className={(state) => `nav-proxies ${navClass(state)}`}
-          >
-            Прокси
-          </NavLink>
-          <NavLink
-            to={`/admin/ui/stats${search}`}
             className={(state) => `nav-stats ${navClass(state)}`}
           >
             Статистика
