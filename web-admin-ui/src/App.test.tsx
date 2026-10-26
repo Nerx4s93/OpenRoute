@@ -6,15 +6,16 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { AuthProvider } from "./auth/AuthProvider";
 import { ToastProvider } from "./components/Toast";
-import type { KeysSnapshot, ProxiesSnapshot } from "./api/types";
+import type { KeysSnapshot, ProxiesSnapshot, StatsSnapshot } from "./api/types";
 
 const proxies: ProxiesSnapshot = {
   server_time: "2026-10-20T10:00:00+00:00",
   summary: { requests: 12, errors: 1, tokens: 340, proxies_ready: 1, proxies_total: 1 },
+  totals: { tokens_total: 3400, tokens_since_limit: 1200, limits_total: 1 },
   proxies: [
     {
       id: "proxy-1",
-      display: "10.0.0.1:8080",
+      display: "203.0.113.10:8080",
       enabled: true,
       manual: false,
       disabled: false,
@@ -25,9 +26,81 @@ const proxies: ProxiesSnapshot = {
       rpm_capped: false,
       last_error: null,
       usage: { requests: 12, errors: 1, tokens: 340 },
+      lifetime: {
+        tokens_total: 3400,
+        tokens_since_limit: 1200,
+        last_limit_at: 1_760_000_000,
+        limits_total: 1,
+      },
     },
   ],
   recent: [],
+};
+
+const stats: StatsSnapshot = {
+  server_time: "2026-10-20T10:00:00+00:00",
+  days: 7,
+  dates: [
+    "2026-10-14",
+    "2026-10-15",
+    "2026-10-16",
+    "2026-10-17",
+    "2026-10-18",
+    "2026-10-19",
+    "2026-10-20",
+  ],
+  totals: {
+    tokens_total: 3500,
+    tokens_since_limit: 1200,
+    requests_total: 36,
+    errors_total: 2,
+    limits_total: 2,
+  },
+  proxies: [
+    {
+      proxy: "203.0.113.10:8080",
+      in_pool: true,
+      enabled: true,
+      banned: false,
+      quota_seconds_left: 0,
+      tokens_total: 3400,
+      tokens_since_limit: 1200,
+      requests_total: 34,
+      errors_total: 2,
+      last_limit_at: 1_760_000_000,
+      limits_total: 2,
+    },
+    {
+      proxy: "203.0.113.7:8080",
+      in_pool: false,
+      enabled: false,
+      banned: false,
+      quota_seconds_left: 0,
+      tokens_total: 100,
+      tokens_since_limit: null,
+      requests_total: 2,
+      errors_total: 0,
+      last_limit_at: null,
+      limits_total: 0,
+    },
+  ],
+  series_total: {
+    tokens: [100, 200, 400, 500, 600, 700, 1000],
+    requests: [1, 2, 4, 5, 6, 7, 11],
+    errors: [0, 0, 0, 0, 1, 0, 1],
+  },
+  series_by_proxy: {
+    "203.0.113.10:8080": {
+      tokens: [100, 200, 400, 500, 600, 700, 900],
+      requests: [1, 2, 4, 5, 6, 7, 9],
+      errors: [0, 0, 0, 0, 1, 0, 1],
+    },
+    "203.0.113.7:8080": {
+      tokens: [0, 0, 0, 0, 0, 0, 100],
+      requests: [0, 0, 0, 0, 0, 0, 2],
+      errors: [0, 0, 0, 0, 0, 0, 0],
+    },
+  },
 };
 
 const keys: KeysSnapshot = {
@@ -112,8 +185,10 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { name: "Пул прокси", level: 1 }),
     ).toBeInTheDocument();
-    expect(await screen.findByText("10.0.0.1:8080")).toBeInTheDocument();
+    expect(await screen.findByText("203.0.113.10:8080")).toBeInTheDocument();
     expect(screen.getByText("Прокси в ротации")).toBeInTheDocument();
+    expect(screen.getByText("Токенов за всё время")).toBeInTheDocument();
+    expect(screen.getByText("После лимита")).toBeInTheDocument();
   });
 
   it("refreshes the proxy list on demand", async () => {
@@ -164,5 +239,55 @@ describe("App", () => {
     ).toBeInTheDocument();
     expect(await screen.findByText("Default")).toBeInTheDocument();
     expect(screen.getByLabelText("Ключ доступа")).toBeInTheDocument();
+  });
+
+  it("renders the stats page for an authenticated session", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/admin/session")) {
+          return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
+        }
+        if (url.includes("/api/admin/stats")) return json(stats);
+        return json({});
+      }),
+    );
+
+    renderApp("/admin/ui/stats");
+
+    expect(
+      await screen.findByRole("heading", { name: "Статистика", level: 1 }),
+    ).toBeInTheDocument();
+    expect(await screen.findByRole("cell", { name: "203.0.113.10:8080" })).toBeInTheDocument();
+    expect(screen.getByText("Прокси с лимитом")).toBeInTheDocument();
+    expect(screen.getByText("1/2")).toBeInTheDocument();
+    expect(screen.getByText("Вне пула")).toBeInTheDocument();
+    expect(screen.getByRole("heading", { name: "Токены по дням" })).toBeInTheDocument();
+  });
+
+  it("navigates to stats from the sidebar", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/admin/session")) {
+        return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
+      }
+      if (url.includes("/api/admin/stats")) return json(stats);
+      if (url.includes("/api/admin/proxies")) return json(proxies);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderApp("/admin/ui");
+
+    await user.click(await screen.findByRole("link", { name: "Статистика" }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Статистика", level: 1 }),
+    ).toBeInTheDocument();
+    expect(
+      fetchMock.mock.calls.some(([url]) => String(url).includes("/api/admin/stats?days=30")),
+    ).toBe(true);
   });
 });

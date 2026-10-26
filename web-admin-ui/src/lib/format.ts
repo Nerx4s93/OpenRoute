@@ -1,7 +1,15 @@
 const numberFormatter = new Intl.NumberFormat("ru-RU");
+const compactFormatter = new Intl.NumberFormat("ru-RU", {
+  notation: "compact",
+  maximumFractionDigits: 1,
+});
 
 export function formatNumber(value: number): string {
   return numberFormatter.format(value);
+}
+
+export function formatCompact(value: number): string {
+  return compactFormatter.format(value);
 }
 
 export function formatLimit(value: number | null | undefined): string {

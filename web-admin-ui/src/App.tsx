@@ -6,6 +6,7 @@ import { DisabledPage, FullPageError, FullPageLoader } from "./components/FullPa
 import { KeysPage } from "./pages/KeysPage";
 import { LoginPage } from "./pages/LoginPage";
 import { ProxiesPage } from "./pages/ProxiesPage";
+import { StatsPage } from "./pages/StatsPage";
 
 function ProtectedRoute({ children }: { children: ReactNode }) {
   const { session, loading, error, disabled, retrySession } = useAuth();
@@ -56,6 +57,16 @@ export default function App() {
           <ProtectedRoute>
             <AppShell>
               <KeysPage />
+            </AppShell>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin/ui/stats"
+        element={
+          <ProtectedRoute>
+            <AppShell>
+              <StatsPage />
             </AppShell>
           </ProtectedRoute>
         }

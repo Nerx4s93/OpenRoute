@@ -5,6 +5,7 @@ import type {
   Period,
   ProxiesSnapshot,
   SessionInfo,
+  StatsSnapshot,
 } from "./types";
 
 let csrfToken = "";
@@ -115,6 +116,9 @@ export const api = {
 
   proxies: (period: Period) =>
     apiRequest<ProxiesSnapshot>(`/api/admin/proxies?period=${period}`),
+
+  stats: (days: number) =>
+    apiRequest<StatsSnapshot>(`/api/admin/stats?days=${days}`),
 
   setProxy: (proxyId: string, enabled: boolean) =>
     apiRequest<ApiMessage>("/api/admin/proxies/set", {

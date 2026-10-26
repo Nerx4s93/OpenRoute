@@ -51,6 +51,15 @@ def _normalize_period(period: str) -> str:
     return value if value in _PERIODS else "all"
 
 
+def _normalize_days(days: int) -> int:
+    """Clamp the statistics window to a sane range of days."""
+    try:
+        value = int(days)
+    except (TypeError, ValueError):
+        return 30
+    return max(1, min(365, value))
+
+
 def _ensure_enabled() -> None:
     if not settings.admin_password:
         raise HTTPException(404, "Админка выключена (задайте ADMIN_PASSWORD)")
@@ -328,6 +337,15 @@ async def api_proxy_refresh(request: Request, session: dict = Depends(require_pa
 async def api_proxy_events(request: Request, period: str = "all",
                            session: dict = Depends(require_panel)) -> StreamingResponse:
     return _sse_response(request, "proxies", _normalize_period(period), session)
+
+
+# --- routes: statistics ----------------------------------------------------
+
+
+@app.get(f"{_PANEL_API}/stats")
+async def api_stats(days: int = 30, session: dict = Depends(require_panel)) -> dict:
+    """Lifetime / since-limit statistics for the last ``days`` days."""
+    return await gateway.stats_snapshot(_normalize_days(days))
 
 
 # --- routes: keys ----------------------------------------------------------

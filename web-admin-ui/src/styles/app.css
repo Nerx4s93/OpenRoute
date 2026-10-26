@@ -95,7 +95,7 @@ h1 { margin: 7px 0 5px; font-size: clamp(27px, 3vw, 38px); line-height: 1.16;
   box-shadow: inset 0 0 0 1px #88e5cf30; }
 
 /* --- cards --------------------------------------------------------------- */
-.cards { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 13px;
+.cards { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 13px;
   margin: 0 0 28px; }
 .card { position: relative; overflow: hidden; min-height: 136px; padding: 20px 19px 16px;
   background: var(--surface); border: 1px solid var(--line); border-radius: 15px;
@@ -110,7 +110,49 @@ h1 { margin: 7px 0 5px; font-size: clamp(27px, 3vw, 38px); line-height: 1.16;
   font-weight: 750; letter-spacing: -.05em; font-variant-numeric: tabular-nums; }
 .card .lbl { margin-top: 4px; color: var(--muted); font-size: 11px; font-weight: 600; }
 .card:nth-child(1) { --accent: #91e8ce; } .card:nth-child(2) { --accent: #92b9ff; }
-.card:nth-child(3) { --accent: #c9b1ff; }
+.card:nth-child(3) { --accent: #c9b1ff; } .card:nth-child(4) { --accent: #f5c77a; }
+.card:nth-child(5) { --accent: #7fd7e8; }
+.card-hint { margin-top: 8px; color: #6e818e; font-size: 10px; line-height: 1.35; }
+
+/* --- stats / chart ------------------------------------------------------- */
+.stats-toolbar { display: flex; align-items: center; justify-content: flex-end;
+  gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
+.stats-select { display: inline-flex; align-items: center; gap: 8px;
+  color: #8294a0; font-size: 11px; font-weight: 700; }
+.stats-select select { min-width: 190px; padding: 7px 10px; border: 1px solid #344756;
+  border-radius: 8px; background: #0d1720; color: var(--text); font: inherit;
+  font-size: 11px; outline: none; }
+.stats-select select:focus { border-color: #85dfcb; box-shadow: 0 0 0 3px #85dfcb1c; }
+.chart-wrap { padding: 18px 22px 20px; }
+.chart { min-width: 0; }
+.chart-svg { display: block; width: 100%; height: auto; }
+.chart-legend { display: flex; flex-wrap: wrap; gap: 8px 16px; margin: 0 0 14px; }
+.chart-legend-item { display: inline-flex; align-items: center; gap: 7px;
+  color: #a9bac3; font-size: 11px; font-weight: 600; }
+.chart-swatch { width: 10px; height: 10px; border-radius: 3px; flex: none; }
+.chart-empty { display: grid; place-items: center; min-height: 220px;
+  border: 1px dashed var(--line); border-radius: 12px; color: var(--muted);
+  font-size: 12px; }
+.chart-axis { fill: #7d8e9c; font-size: 10px; font-variant-numeric: tabular-nums; }
+.chart-grid-line { stroke: #22303d; stroke-width: 1; }
+.chart-hint { margin: 12px 0 0; color: #6e818e; font-size: 11px; }
+.chart-bar { transition: opacity .2s; }
+.chart-bar:hover { opacity: .82; }
+.chart-c0 { fill: #91e8ce; background: #91e8ce; }
+.chart-c1 { fill: #92b9ff; background: #92b9ff; }
+.chart-c2 { fill: #c9b1ff; background: #c9b1ff; }
+.chart-c3 { fill: #f5c77a; background: #f5c77a; }
+.chart-c4 { fill: #ff9b9b; background: #ff9b9b; }
+.chart-c5 { fill: #7fd7e8; background: #7fd7e8; }
+.chart-c6 { fill: #f6a6d8; background: #f6a6d8; }
+.chart-c7 { fill: #c5e384; background: #c5e384; }
+.chart-c8 { fill: #8d9ca9; background: #8d9ca9; }
+header.top nav a.nav-stats::before { width: 15px; height: 15px; border: 0; border-radius: 2px;
+  background:
+    linear-gradient(currentColor, currentColor) left bottom / 3px 55% no-repeat,
+    linear-gradient(currentColor, currentColor) center bottom / 3px 100% no-repeat,
+    linear-gradient(currentColor, currentColor) right bottom / 3px 35% no-repeat;
+  opacity: .8; }
 
 /* --- sections / tables --------------------------------------------------- */
 .section { margin: 0 0 22px; overflow: hidden; background: var(--surface);
@@ -321,6 +363,13 @@ form.add button:hover, .login-box button[type=submit]:hover {
   .login-statement { padding-top: 24px; }
   .login-statement h2 { font-size: 30px; }
   .login-main { min-height: 390px; padding: 24px; }
+}
+@media (max-width: 650px) {
+  .chart-wrap { padding: 14px 16px 16px; }
+  .stats-toolbar { justify-content: flex-start; }
+  .stats-select { width: 100%; }
+  .stats-select select { flex: 1; min-width: 0; }
+  .chart-empty { min-height: 170px; }
 }
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: .01ms !important;
