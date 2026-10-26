@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  formatCompact,
   formatDuration,
   formatLimit,
   formatModels,
@@ -23,6 +24,14 @@ describe("formatNumber", () => {
     expect(formatNumber(12345)).toMatch(/12\s345/);
     expect(formatLimit(null)).toBe("—");
     expect(formatLimit(0)).toBe("0");
+  });
+});
+
+describe("formatCompact", () => {
+  it("uses short Russian notation", () => {
+    expect(formatCompact(0)).toBe("0");
+    expect(formatCompact(1500)).toMatch(/1,5|тыс/);
+    expect(formatCompact(2_500_000).length).toBeLessThan(formatNumber(2_500_000).length);
   });
 });
 

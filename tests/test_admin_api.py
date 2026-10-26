@@ -17,6 +17,7 @@ import hmac
 import importlib.util
 import json
 import sys
+from datetime import date, timedelta
 from pathlib import Path
 
 import httpx
@@ -59,6 +60,29 @@ admin_main = _load_admin_main()
 PW = "pw-secret"
 DEFAULT_KEY = "test-key"
 
+# Fixed clock for the fake `/internal/stats-data` (2026-01-01T00:00:00Z).
+STATS_SERVER_TIME = 1_767_225_600.0
+STATS_DATES = ["2025-12-30", "2025-12-31", "2026-01-01"]
+
+
+def _stats_payload() -> dict:
+    """Default fake `/internal/stats-data` payload: three days, no proxies."""
+    zeros = [0, 0, 0]
+    return {
+        "days": len(STATS_DATES),
+        "server_time": STATS_SERVER_TIME,
+        "dates": list(STATS_DATES),
+        "totals": {
+            "tokens_total": 0, "tokens_since_limit": 0,
+            "requests_total": 0, "errors_total": 0, "limits_total": 0,
+        },
+        "proxies": [],
+        "series_total": {
+            "tokens": list(zeros), "requests": list(zeros), "errors": list(zeros),
+        },
+        "series_by_proxy": {},
+    }
+
 
 def hash_key(plaintext: str) -> str:
     return hashlib.sha256(plaintext.encode()).hexdigest()
@@ -86,8 +110,12 @@ class FakeState:
         self.refresh_error = False  # make /internal/proxies/refresh fail
         self.keys: dict[str, dict] = {}  # key_hash -> row
         self.usage_by_proxy: dict[str, dict] = {}  # masked -> stats
+        self.usage_by_proxy_lifetime: dict[str, dict] = {}  # masked -> lifetime
+        self.proxy_limits: dict[str, dict] = {}  # masked -> last limit
         self.usage_by_key: dict[str, dict] = {}  # key_id -> stats
         self.recent: list[dict] = []
+        self.stats_payload: dict = _stats_payload()  # /internal/stats-data
+        self.stats_days: int | None = None  # last ?days= forwarded
 
 
 def _stats(d: dict[str, dict]) -> dict:
@@ -189,8 +217,19 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
             "status": proxy_status(),
             "usage": {"total": _stats(state.usage_by_proxy)},
             "usage_by_proxy": state.usage_by_proxy,
+            "usage_by_proxy_lifetime": state.usage_by_proxy_lifetime,
+            "proxy_limits": state.proxy_limits,
             "recent": state.recent,
         }
+
+    @app.get("/internal/stats-data")
+    async def stats_data(req: Request) -> dict:
+        require(req)
+        state.stats_days = int(req.query_params.get("days", "30"))
+        payload = dict(state.stats_payload)
+        payload.setdefault("server_time", STATS_SERVER_TIME)
+        payload["days"] = state.stats_days
+        return payload
 
     @app.post("/internal/proxies/set")
     async def proxies_set(req: Request) -> dict:
@@ -398,6 +437,17 @@ def auth_headers(csrf: str) -> dict[str, str]:
     return {"X-CSRF-Token": csrf}
 
 
+def _series_payload(length: int, last: int = 0) -> dict:
+    """A three-series block aligned to ``length`` days with a spike on the end."""
+    tokens = [0] * length
+    requests = [0] * length
+    errors = [0] * length
+    if length:
+        tokens[-1] = last
+        requests[-1] = 1
+    return {"tokens": tokens, "requests": requests, "errors": errors}
+
+
 # --- service / login / session ---------------------------------------------
 
 
@@ -456,6 +506,7 @@ def test_session_after_login(panel):
 def test_protected_endpoints_require_session(panel):
     for method, path in (
         ("get", "/api/admin/proxies"),
+        ("get", "/api/admin/stats"),
         ("get", "/api/admin/keys"),
         ("get", "/api/admin/proxies/events"),
         ("post", "/api/admin/proxies/set"),
@@ -512,6 +563,12 @@ def test_proxies_snapshot_and_period(panel):
     panel.state.usage_by_proxy["10.0.0.1:3128"] = {
         "requests": 4, "errors": 1, "tokens": 110,
     }
+    panel.state.usage_by_proxy_lifetime["10.0.0.1:3128"] = {
+        "requests": 9, "errors": 2, "tokens": 110, "tokens_since_limit": 60,
+    }
+    panel.state.proxy_limits["10.0.0.1:3128"] = {
+        "last_at": 1_700_000_500.0, "count": 1,
+    }
     panel.state.recent = [{
         "ts": 1_700_000_000.0, "key_id": "default", "method": "POST",
         "path": "/v1/chat/completions", "model": "deepseek-v4.1-flash-free",
@@ -535,6 +592,13 @@ def test_proxies_snapshot_and_period(panel):
     assert [p["display"] for p in body["proxies"]] == ["10.0.0.1:3128", "10.0.0.2:3128"]
     first = body["proxies"][0]
     assert first["usage"] == {"requests": 4, "errors": 1, "tokens": 110}
+    assert first["lifetime"] == {
+        "tokens_total": 110, "tokens_since_limit": 60,
+        "last_limit_at": 1_700_000_500.0, "limits_total": 1,
+    }
+    assert body["totals"] == {
+        "tokens_total": 110, "tokens_since_limit": 60, "limits_total": 1,
+    }
     assert first["id"] and len(first["id"]) == 64
     # The full credentialised URL must never reach the browser.
     assert "secret" not in response.text
@@ -542,6 +606,51 @@ def test_proxies_snapshot_and_period(panel):
     assert body["recent"][0]["account"] == "10.0.0.1:3128"
     assert body["recent"][0]["error"] == "upstream http://***@10.0.0.1:3128 failed"
     assert "url" not in body["recent"][0]
+
+
+def test_proxies_lifetime_and_totals(panel):
+    panel.login_ok()
+    panel.seed_proxy("http://user:secret@10.0.0.1:3128")
+    panel.seed_proxy("http://u:p@10.0.0.2:3128")
+    panel.seed_proxy("http://u:p@10.0.0.3:3128")
+    panel.state.usage_by_proxy_lifetime["10.0.0.1:3128"] = {
+        "requests": 10, "errors": 2, "tokens": 900, "tokens_since_limit": 400,
+    }
+    panel.state.usage_by_proxy_lifetime["10.0.0.2:3128"] = {
+        "requests": 3, "errors": 0, "tokens": 100, "tokens_since_limit": None,
+    }
+    # An archived proxy (not in the pool anymore) still counts in the totals.
+    panel.state.usage_by_proxy_lifetime["archived:8080"] = {
+        "requests": 1, "errors": 0, "tokens": 50, "tokens_since_limit": 25,
+    }
+    panel.state.proxy_limits["10.0.0.1:3128"] = {
+        "last_at": 1_700_000_500.0, "count": 2,
+    }
+    panel.state.proxy_limits["10.0.0.2:3128"] = {"last_at": None, "count": 0}
+
+    response = panel.client.get("/api/admin/proxies")
+    assert response.status_code == 200
+    body = response.json()
+    by_display = {row["display"]: row for row in body["proxies"]}
+    assert by_display["10.0.0.1:3128"]["lifetime"] == {
+        "tokens_total": 900, "tokens_since_limit": 400,
+        "last_limit_at": 1_700_000_500.0, "limits_total": 2,
+    }
+    # No limit was reached for this proxy: "since limit" stays null, not zero.
+    assert by_display["10.0.0.2:3128"]["lifetime"] == {
+        "tokens_total": 100, "tokens_since_limit": None,
+        "last_limit_at": None, "limits_total": 0,
+    }
+    # No lifetime counters at all -> zeros, but still null "since limit".
+    assert by_display["10.0.0.3:3128"]["lifetime"] == {
+        "tokens_total": 0, "tokens_since_limit": None,
+        "last_limit_at": None, "limits_total": 0,
+    }
+    assert body["totals"] == {
+        "tokens_total": 1050, "tokens_since_limit": 425, "limits_total": 2,
+    }
+    assert "secret" not in response.text
+    assert "real_proxy" not in response.text
 
 
 def test_proxy_toggle_by_opaque_id(panel):
@@ -634,6 +743,114 @@ def test_proxy_state_fields(panel):
     assert by_display["quota:8080"]["quota_seconds_left"] == pytest.approx(7200)
     assert by_display["banned:8080"]["banned_seconds_left"] == pytest.approx(125)
     assert body["summary"]["proxies_ready"] == 0
+
+
+# --- statistics --------------------------------------------------------------
+
+
+def test_stats_snapshot_normalized(panel):
+    panel.login_ok()
+    days = 90
+    dates = [(date(2025, 10, 1) + timedelta(days=i)).isoformat() for i in range(days)]
+    series = _series_payload(days, 700)
+    panel.state.stats_payload.update({
+        "days": days,
+        "server_time": STATS_SERVER_TIME,
+        "dates": dates,
+        "totals": {
+            "tokens_total": 700, "tokens_since_limit": 250,
+            "requests_total": 2, "errors_total": 1, "limits_total": 3,
+        },
+        "proxies": [
+            {
+                "proxy": "http://user:secret@10.0.0.1:3128",
+                "in_pool": True, "enabled": True, "banned": False,
+                "quota_seconds_left": 0.0,
+                "tokens_total": 500, "tokens_since_limit": 250,
+                "requests_total": 2, "errors_total": 1,
+                "last_limit_at": 1_700_000_500.0, "limits_total": 3,
+            },
+            {
+                "proxy": "old:8080",
+                "in_pool": False, "enabled": False, "banned": True,
+                "quota_seconds_left": 12.5,
+                "tokens_total": 200, "tokens_since_limit": None,
+                "requests_total": 1, "errors_total": 0,
+                "last_limit_at": None, "limits_total": 0,
+                # Unknown gateway fields must never reach the browser.
+                "real_proxy": "http://user:secret@old:8080",
+            },
+        ],
+        "series_total": series,
+        "series_by_proxy": {
+            "http://user:secret@10.0.0.1:3128": series,
+            "old:8080": _series_payload(days),
+            "broken": "not-an-object",
+        },
+    })
+
+    response = panel.client.get(f"/api/admin/stats?days={days}")
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert panel.state.stats_days == days
+    body = response.json()
+    assert body["days"] == days
+    assert body["server_time"] == "2026-01-01T00:00:00+00:00"
+    assert body["dates"] == dates
+    assert body["totals"] == {
+        "tokens_total": 700, "tokens_since_limit": 250,
+        "requests_total": 2, "errors_total": 1, "limits_total": 3,
+    }
+    assert [row["proxy"] for row in body["proxies"]] == ["10.0.0.1:3128", "old:8080"]
+    live, archived = body["proxies"]
+    assert set(live) == {
+        "proxy", "in_pool", "enabled", "banned", "quota_seconds_left",
+        "tokens_total", "tokens_since_limit", "requests_total",
+        "errors_total", "last_limit_at", "limits_total",
+    }
+    assert live["in_pool"] is True and live["enabled"] is True
+    assert live["tokens_since_limit"] == 250
+    assert live["last_limit_at"] == 1_700_000_500.0
+    # Archived proxies stay visible but out of the pool; nulls are preserved.
+    assert archived["in_pool"] is False and archived["banned"] is True
+    assert archived["tokens_since_limit"] is None
+    assert archived["last_limit_at"] is None
+    assert archived["quota_seconds_left"] == pytest.approx(12.5)
+    assert len(body["series_total"]["tokens"]) == days
+    assert body["series_total"]["tokens"][-1] == 700
+    assert len(body["series_total"]["errors"]) == days
+    assert set(body["series_by_proxy"]) == {"10.0.0.1:3128", "old:8080"}
+    assert len(body["series_by_proxy"]["old:8080"]["tokens"]) == days
+    assert "secret" not in response.text
+    assert "real_proxy" not in response.text
+    assert "real_url" not in response.text
+
+
+def test_stats_snapshot_tolerates_missing_fields(panel):
+    panel.login_ok()
+    panel.state.stats_payload = {"server_time": "not-a-number"}
+    response = panel.client.get("/api/admin/stats")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["days"] == 30
+    assert body["dates"] == []
+    assert body["totals"] == {
+        "tokens_total": 0, "tokens_since_limit": 0, "requests_total": 0,
+        "errors_total": 0, "limits_total": 0,
+    }
+    assert body["proxies"] == []
+    assert body["series_total"] == {"tokens": [], "requests": [], "errors": []}
+    assert body["series_by_proxy"] == {}
+    # An unusable gateway clock falls back to the current UTC time.
+    assert body["server_time"].endswith("+00:00")
+
+
+def test_stats_days_clamped(panel):
+    panel.login_ok()
+    for requested, expected in ((0, 1), (-5, 1), (9999, 365)):
+        response = panel.client.get(f"/api/admin/stats?days={requested}")
+        assert response.status_code == 200, response.text
+        assert panel.state.stats_days == expected
 
 
 # --- key management ---------------------------------------------------------
@@ -794,6 +1011,25 @@ def test_gateway_unreachable_502(panel, monkeypatch):
         admin_main.GatewayClient(panel.settings, client),
     )
     response = panel.client.get("/api/admin/proxies")
+    assert response.status_code == 502
+    assert response.json()["detail"] == "Внутренний API шлюза недоступен"
+
+
+def test_stats_gateway_unreachable_502(panel, monkeypatch):
+    panel.login_ok()
+
+    def boom(request):
+        raise httpx.ConnectError("no route", request=request)
+
+    client = httpx.AsyncClient(
+        base_url="http://gateway.internal",
+        transport=httpx.MockTransport(boom),
+    )
+    monkeypatch.setattr(
+        admin_main, "gateway",
+        admin_main.GatewayClient(panel.settings, client),
+    )
+    response = panel.client.get("/api/admin/stats")
     assert response.status_code == 502
     assert response.json()["detail"] == "Внутренний API шлюза недоступен"
 

@@ -24,7 +24,11 @@ function ShellLayout({ children }: { children: ReactNode }) {
   const { serverTime, connected } = useLiveStatus();
   const toast = useToast();
   const location = useLocation();
-  const isKeys = location.pathname.startsWith("/admin/ui/keys");
+  const pageTitle = location.pathname.startsWith("/admin/ui/keys")
+    ? "Ключи"
+    : location.pathname.startsWith("/admin/ui/stats")
+      ? "Статистика"
+      : "Прокси";
   const search = period === "all" ? "" : `?period=${period}`;
 
   const onLogout = () => {
@@ -58,6 +62,12 @@ function ShellLayout({ children }: { children: ReactNode }) {
           >
             Ключи
           </NavLink>
+          <NavLink
+            to={`/admin/ui/stats${search}`}
+            className={(state) => `nav-stats ${navClass(state)}`}
+          >
+            Статистика
+          </NavLink>
         </nav>
         <div className="sidebar-bottom">
           <button type="button" onClick={onLogout} disabled={logout.isPending}>
@@ -72,7 +82,7 @@ function ShellLayout({ children }: { children: ReactNode }) {
         <div className="topline">
           <div className="breadcrumb">
             <span className="crumb-root">Панель управления &nbsp;/&nbsp;</span>
-            <strong>{isKeys ? "Ключи" : "Прокси"}</strong>
+            <strong>{pageTitle}</strong>
           </div>
           <div className="top-meta">
             <span className={`live-dot ${connected ? "" : "off"}`} aria-hidden="true" />

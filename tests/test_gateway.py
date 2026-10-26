@@ -657,7 +657,9 @@ def test_429_http_date_is_passed_through(make_gateway):
 
 def test_cooldown_proxy_is_skipped_then_reused_after_expiry(make_gateway, monkeypatch):
     """Manual/breaker cooldown still gates the pool (one-shot non-chat calls)."""
-    gw = make_gateway()
+    # Affinity off: this test targets the pool's cooldown round-robin, while
+    # session scoring may legitimately keep preferring the other proxy.
+    gw = make_gateway(settings_over={"affinity_enabled": False})
     clock = {"now": 10_000.0}
     monkeypatch.setattr(prox.time, "monotonic", lambda: clock["now"])
 
@@ -1600,6 +1602,210 @@ def test_internal_bad_json_body_400(make_gateway):
     r = gw.internal.post("/internal/keys/add", content=b"not-json",
                          headers={**h, "content-type": "application/json"})
     assert r.status_code == 400
+
+
+# --- internal API: token statistics ----------------------------------------
+
+
+def _today_utc() -> datetime:
+    return datetime.now(timezone.utc).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+
+
+def test_internal_stats_data_auth_and_days_clamp(make_gateway):
+    gw = make_gateway()
+    h = {"X-Internal-Token": "test-internal-token"}
+
+    assert gw.client.get("/internal/stats-data").status_code == 404  # edge hides it
+    assert gw.internal.get("/internal/stats-data").status_code == 403
+    assert gw.internal.get(
+        "/internal/stats-data", headers={"X-Internal-Token": "nope"}
+    ).status_code == 403
+
+    one = gw.internal.get("/internal/stats-data?days=0", headers=h).json()
+    assert one["days"] == 1
+    assert len(one["dates"]) == 1
+    assert len(one["series_total"]["tokens"]) == 1
+    assert one["dates"][-1] == _today_utc().strftime("%Y-%m-%d")
+    assert one["totals"] == {
+        "tokens_total": 0, "tokens_since_limit": 0, "requests_total": 0,
+        "errors_total": 0, "limits_total": 0,
+    }
+
+    big = gw.internal.get("/internal/stats-data?days=9999", headers=h).json()
+    assert big["days"] == 365
+    assert len(big["dates"]) == 365
+    assert big["dates"] == sorted(big["dates"])
+    assert big["dates"][-1] == _today_utc().strftime("%Y-%m-%d")
+    assert len(big["series_total"]["requests"]) == 365
+    assert {row["proxy"] for row in big["proxies"]} == {
+        "proxy-a.invalid:8080", "proxy-b.invalid:8080"}
+    assert all(row["in_pool"] and row["tokens_total"] == 0 for row in big["proxies"])
+
+
+def test_internal_stats_data_totals_split_and_archived(make_gateway):
+    """Per-proxy all-time vs since-last-limit tokens, archived accounts marked
+    out of the pool, and zero-filled day series aligned to ``dates``."""
+    gw = make_gateway()
+    today = _today_utc()
+
+    def at(days_ago: int) -> float:
+        return (today - timedelta(days=days_ago)).timestamp() + 12 * 3600
+
+    hit_at = at(3)
+    prox = "proxy-a.invalid:8080"
+    archived = "9.9.9.9:9000"
+
+    async def seed():
+        main.proxydb.record_quota_event(prox, hit_at, hit_at + 86400)
+        rows = [
+            LogEntry(ts=at(4), key_id="k1", method="POST",
+                     path="chat/completions", model=FREE_MODEL, status=200,
+                     latency_ms=1.0, stream=True, account=prox,
+                     prompt_tokens=100, completion_tokens=0, error=None),
+            LogEntry(ts=at(0), key_id="k1", method="POST",
+                     path="chat/completions", model=FREE_MODEL, status=200,
+                     latency_ms=1.0, stream=True, account=prox,
+                     prompt_tokens=7, completion_tokens=3, error=None),
+            LogEntry(ts=at(0), key_id="k1", method="POST",
+                     path="chat/completions", model=FREE_MODEL, status=500,
+                     latency_ms=1.0, stream=True, account=archived,
+                     prompt_tokens=5, completion_tokens=0, error="boom"),
+        ]
+        for row in rows:
+            await gw.reqlog.log(row)
+
+    gw._gw_lifespan_client.portal.call(seed)
+    h = {"X-Internal-Token": "test-internal-token"}
+    data = gw.internal.get("/internal/stats-data?days=7", headers=h).json()
+
+    assert data["days"] == 7
+    assert len(data["dates"]) == 7
+    assert data["dates"][-1] == today.strftime("%Y-%m-%d")
+    assert data["totals"] == {
+        "tokens_total": 115,
+        "tokens_since_limit": 10,  # only accounts with a quota event
+        "requests_total": 3,
+        "errors_total": 1,
+        "limits_total": 1,
+    }
+
+    by_name = {row["proxy"]: row for row in data["proxies"]}
+    assert set(by_name) == {prox, archived, "proxy-b.invalid:8080"}
+    # Sorted by tokens_total DESC (then name).
+    assert [row["proxy"] for row in data["proxies"]] == [
+        prox, archived, "proxy-b.invalid:8080"]
+
+    a = by_name[prox]
+    assert a["in_pool"] is True and a["enabled"] is True and a["banned"] is False
+    assert a["tokens_total"] == 110
+    assert a["tokens_since_limit"] == 10  # the 4-days-ago row is before the event
+    assert a["requests_total"] == 2 and a["errors_total"] == 0
+    assert a["last_limit_at"] == hit_at and a["limits_total"] == 1
+
+    old = by_name[archived]
+    assert old["in_pool"] is False and old["enabled"] is False
+    assert old["banned"] is False and old["quota_seconds_left"] == 0.0
+    assert old["tokens_total"] == 5 and old["tokens_since_limit"] is None
+    assert old["requests_total"] == 1 and old["errors_total"] == 1
+    assert old["last_limit_at"] is None and old["limits_total"] == 0
+
+    idle = by_name["proxy-b.invalid:8080"]
+    assert idle["in_pool"] is True and idle["tokens_total"] == 0
+    assert idle["tokens_since_limit"] is None
+
+    assert set(data["series_by_proxy"]) == set(by_name)
+    for series in data["series_by_proxy"].values():
+        assert [len(series[key]) for key in ("tokens", "requests", "errors")] == [7, 7, 7]
+
+    total = data["series_total"]
+    assert len(total["tokens"]) == 7
+    assert total["tokens"][-1] == 15 and total["requests"][-1] == 2
+    assert total["errors"][-1] == 1
+    assert total["tokens"][2] == 100  # 4 days ago (index 2 in a 7-day window)
+    assert sum(total["tokens"]) == 115
+
+
+def test_internal_stats_data_fail_soft(make_gateway, monkeypatch):
+    """Unavailable stores must not turn the stats endpoint into a 500."""
+    gw = make_gateway()
+
+    async def boom(*args, **kwargs):
+        raise RuntimeError("db down")
+
+    monkeypatch.setattr(gw.reqlog, "proxy_stats_async", boom)
+    monkeypatch.setattr(gw.reqlog, "daily_by_account_async", boom)
+    r = gw.internal.get("/internal/stats-data?days=3",
+                        headers={"X-Internal-Token": "test-internal-token"})
+    assert r.status_code == 200
+    data = r.json()
+    assert data["days"] == 3
+    assert data["totals"]["tokens_total"] == 0
+    assert data["series_total"] == {
+        "tokens": [0, 0, 0], "requests": [0, 0, 0], "errors": [0, 0, 0]}
+
+
+def test_internal_proxies_data_adds_lifetime_stats_and_limits(make_gateway):
+    """The SSE snapshot keeps the old keys and adds lifetime counters plus the
+    quota-event history; a pool proxy with no requests gets a zero record
+    (``tokens_since_limit`` None without a limit, 0 with one)."""
+    gw = make_gateway()
+    h = {"X-Internal-Token": "test-internal-token"}
+
+    first = gw.internal.get("/internal/proxies-data", headers=h).json()
+    assert set(first) >= {"status", "usage", "usage_by_proxy", "recent",
+                          "usage_by_proxy_lifetime", "proxy_limits"}
+    assert first["usage"]["total"]["requests"] == 0
+    assert first["usage_by_proxy"] == {}
+    assert first["recent"] == []
+    assert first["proxy_limits"] == {}
+    assert len(first["status"]["proxies"]) == 2
+    for row in first["status"]["proxies"]:
+        assert first["usage_by_proxy_lifetime"][row["proxy"]] == {
+            "requests": 0, "errors": 0, "tokens": 0, "tokens_since_limit": None,
+        }
+
+    prox = "proxy-a.invalid:8080"
+
+    async def seed():
+        now = time.time()
+        main.proxydb.record_quota_event(prox, now - 60, now + 3600)
+
+    gw._gw_lifespan_client.portal.call(seed)
+
+    second = gw.internal.get("/internal/proxies-data", headers=h).json()
+    limits = second["proxy_limits"]
+    assert set(limits) == {prox}
+    assert limits[prox]["count"] == 1
+    records = second["usage_by_proxy_lifetime"]
+    assert records[prox] == {
+        "requests": 0, "errors": 0, "tokens": 0, "tokens_since_limit": 0,
+    }
+    other = next(row["proxy"] for row in second["status"]["proxies"]
+                 if row["proxy"] != prox)
+    assert records[other]["tokens_since_limit"] is None
+
+
+def test_internal_proxies_data_lifetime_tokens(make_gateway):
+    """Lifetime counters follow request_log rows by masked proxy name."""
+    gw = make_gateway()
+
+    async def seed():
+        await gw.reqlog.log(LogEntry(
+            ts=time.time(), key_id="k1", method="POST",
+            path="chat/completions", model=FREE_MODEL, status=200,
+            latency_ms=1.0, stream=True, account="proxy-a.invalid:8080",
+            prompt_tokens=4, completion_tokens=6, error=None))
+
+    gw._gw_lifespan_client.portal.call(seed)
+    data = gw.internal.get("/internal/proxies-data",
+                           headers={"X-Internal-Token": "test-internal-token"}).json()
+    rec = data["usage_by_proxy_lifetime"]["proxy-a.invalid:8080"]
+    assert rec == {"requests": 1, "errors": 0, "tokens": 10,
+                   "tokens_since_limit": None}
+    other = data["usage_by_proxy_lifetime"]["proxy-b.invalid:8080"]
+    assert other == {"requests": 0, "errors": 0, "tokens": 0,
+                     "tokens_since_limit": None}
 
 
 # --- non-chat passthrough ---

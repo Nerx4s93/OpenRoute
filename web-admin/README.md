@@ -22,6 +22,7 @@ Backend админки OpenRoute (control plane). Отдаёт **только JS
 | GET | `/api/admin/proxies/events?period=` | SSE с JSON-снапшотами прокси |
 | POST | `/api/admin/proxies/set` | включить/отключить прокси по `proxy_id` (CSRF) |
 | POST | `/api/admin/proxies/refresh` | принудительно обновить список из px6 со сбросом TTL-кэша (CSRF) |
+| GET | `/api/admin/stats?days=` | токены по прокси и UTC-дням за 1..365 дней (по умолчанию 30; сессия, no-store) |
 | GET | `/api/admin/keys?period=` | ключи + статистика по `key_id` |
 | GET | `/api/admin/keys/events?period=` | SSE с JSON-снапшотами ключей |
 | POST | `/api/admin/keys/add` | добавить ключ (CSRF) |
@@ -31,14 +32,22 @@ Backend админки OpenRoute (control plane). Отдаёт **только JS
 `period` — `day`, `week`, `month` или `all` (неизвестное значение → `all`).
 Границы календарные по UTC: `day` — с 00:00 текущего дня, `week` — с
 понедельника 00:00 текущей недели, `month` — с 1-го числа 00:00 текущего месяца.
+`days` зажимается в `1..365`, по умолчанию 30.
 
 ### Формат данных
 
-- Прокси: `{server_time, summary, proxies[], recent[]}`. У каждой строки есть
-  `display` (`host:port`), `usage`, состояние (`enabled`, `manual`, `disabled`,
-  `banned`, таймеры) и `id` — HMAC от полного URL. **Полный URL с логином и
-  паролем никогда не попадает в браузер**; backend хранит его только в памяти
-  процесса и резолвит `proxy_id` при мутации.
+- Прокси: `{server_time, summary, totals, proxies[], recent[]}`. У каждой строки
+  есть `display` (`host:port`), `usage`, состояние (`enabled`, `manual`,
+  `disabled`, `banned`, таймеры) и `id` — HMAC от полного URL. `totals` —
+  `{tokens_total, tokens_since_limit, limits_total}`, в строке добавлен
+  `lifetime` (`tokens_total`, `tokens_since_limit`, `last_limit_at`,
+  `limits_total`). `summary` и `usage` строки не изменились. **Полный URL с
+  логином и паролем никогда не попадает в браузер**; backend хранит его
+  только в памяти процесса и резолвит `proxy_id` при мутации.
+- Статистика: `{server_time, days, dates[], totals, proxies[], series_total,
+  series_by_proxy}` — `server_time` в ISO-8601 UTC, `dates` — UTC-дни,
+  серии выровнены по `dates`, только masked `host:port`,
+  `tokens_since_limit = null` при отсутствии события квоты.
 - Ключи: `{server_time, keys[], stats[]}`. `keys` — активные записи
   (`key_hash`, `key_id`, лимиты, модели), `stats` — usage из журнала запросов,
   включая `state: "deleted"` для удалённых ключей.

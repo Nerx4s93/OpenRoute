@@ -32,6 +32,7 @@ const AuthContext = createContext<AuthContextValue | null>(null);
 function clearDataQueries(queryClient: ReturnType<typeof useQueryClient>): void {
   queryClient.removeQueries({ queryKey: ["proxies"] });
   queryClient.removeQueries({ queryKey: ["keys"] });
+  queryClient.removeQueries({ queryKey: ["stats"] });
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {

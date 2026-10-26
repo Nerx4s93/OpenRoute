@@ -35,6 +35,27 @@ SCHEMA: tuple[str, ...] = (
     """,
     "CREATE INDEX IF NOT EXISTS idx_request_log_ts ON request_log (ts)",
     "CREATE INDEX IF NOT EXISTS idx_request_log_key ON request_log (key_id)",
+    "CREATE INDEX IF NOT EXISTS idx_request_log_account_ts"
+    " ON request_log (account, ts)",
+    # Quota-event history (proxydb.py): one row per observed upstream quota
+    # reset ("FreeUsageLimitError"), keyed by the masked proxy. ``quota_until``
+    # is the parking epoch that was requested; the unique key makes repeated
+    # marks for the same window idempotent, so restarts/retries do not inflate
+    # the history. Used for per-proxy "tokens since last limit" statistics.
+    """
+    CREATE TABLE IF NOT EXISTS proxy_quota_events (
+        id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+        proxy_key TEXT NOT NULL,
+        kind TEXT NOT NULL DEFAULT 'quota',
+        hit_at DOUBLE PRECISION NOT NULL,
+        quota_until DOUBLE PRECISION NOT NULL,
+        UNIQUE (proxy_key, kind, quota_until)
+    )
+    """,
+    """
+    CREATE INDEX IF NOT EXISTS idx_proxy_quota_events_key_hit
+        ON proxy_quota_events (proxy_key, hit_at DESC)
+    """,
     # Proxy pool (proxydb.py) — replaces NVRoute's ``accounts`` table.
     # quota_until/banned_until persist timed parking; permanently_banned is the
     # non-expiring abusive-traffic verdict, so a gateway restart never forgets

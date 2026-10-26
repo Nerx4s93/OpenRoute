@@ -8,6 +8,7 @@ import { useRefreshProxies, useSetProxy } from "../hooks/useAdminMutations";
 import { useProxiesLive } from "../hooks/useLiveSnapshot";
 import { usePeriod } from "../hooks/usePeriod";
 import {
+  formatLimit,
   formatNumber,
   formatTimestamp,
   requestTokens,
@@ -24,6 +25,7 @@ export function ProxiesPage() {
   const requestsLabel = caption ? `Запросов ${caption}` : "Запросов всего";
   const tokensLabel = caption ? `Токенов ${caption}` : "Токенов потрачено";
   const summary = snapshot?.summary;
+  const totals = snapshot?.totals;
 
   return (
     <>
@@ -66,6 +68,18 @@ export function ProxiesPage() {
           label={tokensLabel}
         />
         <StatCard
+          glyph="Σ"
+          value={formatNumber(totals?.tokens_total ?? 0)}
+          label="Токенов за всё время"
+          title="Суммарный расход токенов по всем прокси за всё время"
+        />
+        <StatCard
+          glyph="↺"
+          value={formatNumber(totals?.tokens_since_limit ?? 0)}
+          label="Токенов после последнего лимита"
+          title="Токены, потраченные после последнего 429 FreeUsageLimitError"
+        />
+        <StatCard
           glyph="◎"
           value={`${summary?.proxies_ready ?? 0}/${summary?.proxies_total ?? 0}`}
           label="Прокси в ротации"
@@ -86,14 +100,15 @@ export function ProxiesPage() {
                 <th>Статус</th>
                 <th>Запросы</th>
                 <th>Ошибки</th>
-                <th>Токены</th>
+                <th>После лимита</th>
+                <th>Последний лимит</th>
                 <th>Последняя ошибка</th>
                 <th>Действия</th>
               </tr>
             </thead>
             <tbody>
               {query.isLoading ? (
-                <LoadingRows colSpan={7} />
+                <LoadingRows colSpan={8} />
               ) : snapshot && snapshot.proxies.length ? (
                 snapshot.proxies.map((proxy) => {
                   const state = proxyState(proxy);
@@ -105,7 +120,12 @@ export function ProxiesPage() {
                       <td><StatusBadge label={state.label} tone={state.tone} /></td>
                       <td>{formatNumber(proxy.usage.requests)}</td>
                       <td>{formatNumber(proxy.usage.errors)}</td>
-                      <td>{formatNumber(proxy.usage.tokens)}</td>
+                      <td>{formatLimit(proxy.lifetime?.tokens_since_limit ?? null)}</td>
+                      <td className="mono muted">
+                        {typeof proxy.lifetime?.last_limit_at === "number"
+                          ? formatTimestamp(proxy.lifetime.last_limit_at)
+                          : "—"}
+                      </td>
                       <td className="muted">{proxy.last_error ?? ""}</td>
                       <td className="actions">
                         <button
@@ -125,7 +145,7 @@ export function ProxiesPage() {
                   );
                 })
               ) : (
-                <EmptyRow colSpan={7}>Прокси нет</EmptyRow>
+                <EmptyRow colSpan={8}>Прокси нет</EmptyRow>
               )}
             </tbody>
           </table>
