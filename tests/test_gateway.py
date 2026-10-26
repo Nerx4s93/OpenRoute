@@ -1416,6 +1416,129 @@ def test_internal_proxies_refresh_failure_is_openai_error(make_gateway, monkeypa
     assert response.json()["error"]["message"] == "Proxy refresh failed"
 
 
+def test_internal_px6_account_countries_and_price(make_gateway, monkeypatch):
+    gw = make_gateway()
+    h = {"X-Internal-Token": "test-internal-token"}
+    calls: list[tuple[str, tuple, dict]] = []
+
+    async def fake_call(action: str, *args, **kwargs):
+        calls.append((action, args, kwargs))
+        if action == "account":
+            return {"user_id": "u1", "balance": 100.5, "currency": "RUB"}
+        if action == "countries":
+            return {"version": args[0], "countries": ["de", "ru"]}
+        if action == "price":
+            return {"price": 12.5, "price_single": 12.5, "period": args[2],
+                    "count": args[1], "version": args[0], "currency": "RUB"}
+        raise AssertionError(action)
+
+    monkeypatch.setattr(main, "_px6_call", fake_call)
+
+    account = gw.internal.get("/internal/px6/account", headers=h)
+    assert account.status_code == 200
+    assert account.json()["balance"] == 100.5
+    countries = gw.internal.get("/internal/px6/countries?version=4", headers=h)
+    assert countries.status_code == 200
+    assert countries.json()["countries"] == ["de", "ru"]
+    price = gw.internal.get(
+        "/internal/px6/price?version=6&count=3&period=7", headers=h,
+    )
+    assert price.status_code == 200
+    assert price.json()["count"] == 3
+    assert calls == [
+        ("account", (), {}),
+        ("countries", (4,), {}),
+        ("price", (6, 3, 7), {}),
+    ]
+
+    bad = gw.internal.get("/internal/px6/countries?version=5", headers=h)
+    assert bad.status_code == 400
+    assert "Unsupported proxy version" in bad.json()["error"]["message"]
+
+
+def test_internal_px6_buy_refreshes_and_keeps_success_on_refresh_failure(
+    make_gateway, monkeypatch,
+):
+    gw = make_gateway()
+    h = {"X-Internal-Token": "test-internal-token"}
+    calls: list[tuple] = []
+    refresh_calls: list[bool] = []
+
+    async def fake_call(action: str, *args, **kwargs):
+        calls.append((action, args, kwargs))
+        return {
+            "order_id": "o1", "count": 2, "price": 25.0,
+            "price_single": 12.5, "period": 30, "country": "ru",
+            "version": 6, "currency": "RUB", "balance": 75.0,
+        }
+
+    async def fake_refresh(bust_cache: bool = False) -> bool:
+        refresh_calls.append(bust_cache)
+        return refresh_calls[-1] is True
+
+    monkeypatch.setattr(main, "_px6_call", fake_call)
+    monkeypatch.setattr(gw.manager, "refresh_proxies", fake_refresh)
+
+    response = gw.internal.post(
+        "/internal/px6/buy",
+        headers=h,
+        json={"count": 2, "period": 30, "country": "RU", "version": 6,
+              "descr": "prod"},
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True and body["refresh_ok"] is True
+    assert body["order_id"] == "o1" and body["balance"] == 75.0
+    assert refresh_calls == [True]
+    assert calls == [("buy", (), {"payload": {
+        "count": 2, "period": 30, "country": "ru", "version": 6,
+        "descr": "prod", "auto_prolong": False,
+    }})]
+
+    # A failed follow-up refresh must not hide a completed purchase.
+    refresh_calls.clear()
+
+    async def failing_refresh(bust_cache: bool = False) -> bool:
+        refresh_calls.append(bust_cache)
+        return False
+
+    monkeypatch.setattr(gw.manager, "refresh_proxies", failing_refresh)
+    second = gw.internal.post(
+        "/internal/px6/buy",
+        headers=h,
+        json={"count": 1, "period": 3, "country": "de", "version": 4},
+    )
+    assert second.status_code == 200
+    assert second.json()["ok"] is True
+    assert second.json()["refresh_ok"] is False
+    assert "purchased" in second.json()["message"].lower()
+    assert refresh_calls == [True]
+
+
+def test_internal_px6_error_is_passed_through(make_gateway, monkeypatch):
+    gw = make_gateway()
+    h = {"X-Internal-Token": "test-internal-token"}
+
+    class FakePx6Client:
+        def __init__(self, settings):
+            self.settings = settings
+
+        async def aclose(self):
+            return None
+
+        async def buy(self, payload):
+            raise main.Px6ServiceError(402, "Insufficient px6.net balance")
+
+    monkeypatch.setattr(main, "Px6ServiceClient", FakePx6Client)
+    response = gw.internal.post(
+        "/internal/px6/buy",
+        headers=h,
+        json={"count": 1, "period": 30, "country": "ru", "version": 6},
+    )
+    assert response.status_code == 402
+    assert response.json()["error"]["message"] == "Insufficient px6.net balance"
+
+
 def test_internal_requires_token(make_gateway):
     gw = make_gateway()
     h = {"X-Internal-Token": "test-internal-token"}

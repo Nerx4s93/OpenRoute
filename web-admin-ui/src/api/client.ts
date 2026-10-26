@@ -4,6 +4,11 @@ import type {
   KeysSnapshot,
   Period,
   ProxiesSnapshot,
+  ProxyBuyPayload,
+  ProxyBuyResult,
+  Px6Account,
+  Px6Countries,
+  Px6Price,
   SessionInfo,
   StatsSnapshot,
 } from "./types";
@@ -131,6 +136,22 @@ export const api = {
 
   refreshProxies: () =>
     apiRequest<ApiMessage>("/api/admin/proxies/refresh", { method: "POST" }),
+
+  px6Account: () => apiRequest<Px6Account>("/api/admin/proxies/account"),
+
+  px6Countries: (version: number) =>
+    apiRequest<Px6Countries>(`/api/admin/proxies/countries?version=${version}`),
+
+  px6Price: (version: number, count: number, period: number) =>
+    apiRequest<Px6Price>(
+      `/api/admin/proxies/price?version=${version}&count=${count}&period=${period}`,
+    ),
+
+  buyProxies: (payload: ProxyBuyPayload) =>
+    apiRequest<ProxyBuyResult>("/api/admin/proxies/buy", {
+      method: "POST",
+      body: jsonBody(payload),
+    }),
 
   keys: (period: Period) =>
     apiRequest<KeysSnapshot>(`/api/admin/keys?period=${period}`),

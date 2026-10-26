@@ -388,7 +388,9 @@ async def test_refresh_proxies_skips_malformed_and_dedups(caplog):
     caplog.set_level(logging.WARNING, logger="gateway.proxies")
     m = mgr()
     payload = {"proxies": [
-        {"host": "h1.internal", "port": 8081, "user": "u1", "password": "p1"},
+        {"host": "h1.internal", "port": 8081, "user": "u1", "password": "p1",
+         "id": "101", "version": "6", "country": "ru",
+         "date_end": "2026-12-01 00:00:00", "descr": "for-tests"},
         {"host": "h1.internal", "port": 8081, "user": "u1", "password": "p1"},  # dup
         {"host": "h2.internal"},                       # no port -> malformed
         "http://u2:p2@h3.internal:8083",                # string with creds
@@ -410,6 +412,16 @@ async def test_refresh_proxies_skips_malformed_and_dedups(caplog):
         "http://u2:p2@h3.internal:8083",
         "http://h4.internal:8084",
     ]
+    first = m.proxies[0]
+    assert (first.px6_id, first.px6_version, first.px6_country) == ("101", "6", "ru")
+    assert first.px6_date_end == "2026-12-01 00:00:00"
+    assert first.px6_descr == "for-tests"
+    row = m.status()["proxies"][0]
+    assert row["px6"] == {
+        "id": "101", "version": "6", "country": "ru",
+        "date_end": "2026-12-01 00:00:00", "descr": "for-tests",
+    }
+    assert "p1" not in str(row)
     assert "Skipping malformed proxy item" in caplog.text
     assert m.last_fetch_status and "3 proxies" in m.last_fetch_status
     await m.aclose()
@@ -429,6 +441,40 @@ async def test_refresh_proxies_bust_cache_adds_refresh_param_only_when_asked():
     # The periodic loop keeps using the cached URL (no ?refresh=true).
     assert await m.refresh_proxies() is True
     assert m._fetcher.url == "http://127.0.0.1:1/proxies"
+    await m.aclose()
+
+
+@pytest.mark.asyncio
+async def test_refresh_db_failure_keeps_known_flags_and_disables_new():
+    import types
+
+    m = mgr(proxies=["http://old-on:1", "http://old-off:2"])
+    m.set_manually_disabled("http://old-off:2", True)
+
+    class BrokenDB:
+        def sync_many(self, urls):
+            raise RuntimeError("db down")
+
+        def all(self):
+            raise AssertionError("all() must not run after sync_many failed")
+
+        def parking_all(self):
+            raise AssertionError("parking_all() must not run after sync_many failed")
+
+    m.bind_db(BrokenDB())
+    await _fake_fetch(m, {"proxies": [
+        {"host": "old-on", "port": 1},
+        {"host": "old-off", "port": 2},
+        {"host": "new", "port": 3},
+    ]})
+    m._probe_proxy = types.MethodType(_alive_probe, m)
+
+    assert await m.refresh_proxies() is True
+    by_url = {p.url: p for p in m.proxies}
+    assert by_url["http://old-on:1"].manually_disabled is False
+    assert by_url["http://old-off:2"].manually_disabled is True
+    assert by_url["http://new:3"].manually_disabled is True
+    assert "1/3 enabled" in (m.last_fetch_status or "")
     await m.aclose()
 
 
@@ -622,10 +668,10 @@ async def test_refresh_upsert_preserves_manual_disable(pg_dsn):
     m._probe_proxy = types.MethodType(_alive_probe, m)
 
     assert await m.refresh_proxies() is True
-    # h1 exists and keeps its disabled flag; h2 is inserted enabled
+    # h1 exists and keeps its disabled flag; h2 is newly inserted disabled too.
     by_url = {p.url: p for p in m.proxies}
     assert by_url["http://h1:1"].manually_disabled is True
-    assert by_url["http://h2:2"].manually_disabled is False
+    assert by_url["http://h2:2"].manually_disabled is True
     db.close()
     await m.aclose()
 

@@ -26,7 +26,14 @@ from pydantic import BaseModel, ValidationError
 from . import auth
 from .config import get_settings
 from .gateway import GatewayClient
-from .schemas import KeyAddBody, KeyDeleteBody, KeySetBody, LoginBody, ProxySetBody
+from .schemas import (
+    KeyAddBody,
+    KeyDeleteBody,
+    KeySetBody,
+    LoginBody,
+    ProxyBuyBody,
+    ProxySetBody,
+)
 from .sessions import RedisSessionStore, SessionUnavailable
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -334,6 +341,36 @@ async def api_proxy_refresh(request: Request, session: dict = Depends(require_pa
     """Force-fetch the proxy list, bypassing the px6-service TTL cache."""
     auth.check_csrf(request, session)
     return await gateway.refresh_proxies()
+
+
+@app.get(f"{_PANEL_API}/proxies/account")
+async def api_proxy_account(session: dict = Depends(require_panel)) -> dict:
+    """px6.net account balance (the API key never leaves the server side)."""
+    return await gateway.px6_account()
+
+
+@app.get(f"{_PANEL_API}/proxies/countries")
+async def api_proxy_countries(version: int = 6,
+                              session: dict = Depends(require_panel)) -> dict:
+    return await gateway.px6_countries(version)
+
+
+@app.get(f"{_PANEL_API}/proxies/price")
+async def api_proxy_price(
+    version: int = 6,
+    count: int = 1,
+    period: int = 30,
+    session: dict = Depends(require_panel),
+) -> dict:
+    return await gateway.px6_price(version, count, period)
+
+
+@app.post(f"{_PANEL_API}/proxies/buy")
+async def api_proxy_buy(request: Request, session: dict = Depends(require_panel)) -> dict:
+    auth.check_csrf(request, session)
+    body = await _json_body(request, ProxyBuyBody)
+    assert isinstance(body, ProxyBuyBody)
+    return await gateway.buy_proxies(body.model_dump())
 
 
 @app.get(f"{_PANEL_API}/proxies/events")

@@ -77,6 +77,7 @@ from .keydb import KeyDB
 from .keys import AuthError, KeyInfo, KeyStore, RateLimitError, hash_key
 from .personadb import PersonaDB
 from .personas import PersonaStore
+from .px6 import Px6ServiceClient, Px6ServiceError
 from .proxies import (
     NoReadyProxyError,
     Proxy,
@@ -1360,6 +1361,113 @@ async def internal_proxies_set(request: Request) -> dict:
     raise HTTPException(404, "Proxy not found")
 
 
+# --- px6 account / purchase (web-admin -> gateway -> px6-service) ----------
+
+
+async def _px6_call(action: str, *args, **kwargs) -> dict:
+    """Call px6-service and translate its errors into gateway HTTP errors."""
+    client = Px6ServiceClient(settings)
+    try:
+        return await getattr(client, action)(*args, **kwargs)
+    except Px6ServiceError as exc:
+        raise HTTPException(exc.status_code, exc.detail) from exc
+    finally:
+        await client.aclose()
+
+
+def _px6_version(version: int) -> int:
+    if version not in (3, 4, 6):
+        raise HTTPException(400, "Unsupported proxy version (allowed: 3, 4, 6)")
+    return version
+
+
+async def internal_px6_account(request: Request) -> dict:
+    """GET ``/internal/px6/account`` — px6.net balance for the admin panel."""
+    _require_internal(request)
+    return await _px6_call("account")
+
+
+async def internal_px6_countries(request: Request, version: int = 6) -> dict:
+    """GET ``/internal/px6/countries?version=`` — available countries."""
+    _require_internal(request)
+    _px6_version(version)
+    return await _px6_call("countries", version)
+
+
+async def internal_px6_price(
+    request: Request, version: int = 6, count: int = 1, period: int = 30
+) -> dict:
+    """GET ``/internal/px6/price?version=&count=&period=`` — price estimate."""
+    _require_internal(request)
+    _px6_version(version)
+    if not (1 <= count <= 1000):
+        raise HTTPException(400, "Count must be between 1 and 1000")
+    if not (1 <= period <= 365):
+        raise HTTPException(400, "Period must be between 1 and 365 days")
+    return await _px6_call("price", version, count, period)
+
+
+async def internal_px6_buy(request: Request) -> dict:
+    """POST ``/internal/px6/buy`` — buy proxies and refresh the pool.
+
+    A successful purchase is never reported as an error just because the
+    follow-up refresh failed: the operator must know that money was spent.
+    The response carries ``refresh_ok`` so the UI can ask them to press
+    «Обновить список» manually.
+    """
+    _require_internal(request)
+    data = await _read_json(request)
+    try:
+        count = int(data.get("count", 1))
+        period = int(data.get("period", 30))
+        version = int(data.get("version", 6))
+    except (TypeError, ValueError):
+        raise HTTPException(400, "Invalid numeric purchase parameter")
+    country = str(data.get("country", "")).strip().lower()
+    descr = str(data.get("descr", "") or "").strip()
+    auto_prolong = data.get("auto_prolong", False)
+    if not isinstance(auto_prolong, bool):
+        raise HTTPException(400, "auto_prolong must be a boolean")
+    _px6_version(version)
+    if not (1 <= count <= 1000):
+        raise HTTPException(400, "Count must be between 1 and 1000")
+    if not (1 <= period <= 365):
+        raise HTTPException(400, "Period must be between 1 and 365 days")
+    if len(country) != 2 or not country.isascii() or not country.isalpha():
+        raise HTTPException(400, "Country must be an ISO2 code")
+    if len(descr) > 50:
+        raise HTTPException(400, "Comment must be at most 50 characters")
+
+    payload = {
+        "count": count,
+        "period": period,
+        "country": country,
+        "version": version,
+        "descr": descr,
+        "auto_prolong": auto_prolong,
+    }
+    purchased = await _px6_call("buy", payload=payload)
+
+    refresh_ok = True
+    try:
+        refresh_ok = await manager.refresh_proxies(bust_cache=True)
+    except Exception:
+        logger.exception("Proxy refresh after purchase crashed")
+        refresh_ok = False
+    if not refresh_ok:
+        logger.warning("Proxy purchase succeeded but the pool refresh failed")
+
+    result = dict(purchased)
+    result["ok"] = True
+    result["refresh_ok"] = refresh_ok
+    result["message"] = (
+        "Proxies purchased and list refreshed"
+        if refresh_ok
+        else "Proxies purchased; list refresh failed"
+    )
+    return result
+
+
 async def internal_keys_add(request: Request) -> dict:
     """``{"key": plaintext, "key_id"?, "name"?, "admin"?, "rpm"?, "tpm"?,
     "models"?}``. Plaintext is hashed immediately (keys.py) and never stored."""
@@ -1474,6 +1582,14 @@ def create_app() -> FastAPI:
     application.add_api_route(f"{_INTERNAL_PREFIX}/proxies/refresh", internal_proxies_refresh,
                               methods=["POST"], include_in_schema=False)
     application.add_api_route(f"{_INTERNAL_PREFIX}/proxies/set", internal_proxies_set,
+                              methods=["POST"], include_in_schema=False)
+    application.add_api_route(f"{_INTERNAL_PREFIX}/px6/account", internal_px6_account,
+                              methods=["GET"], include_in_schema=False)
+    application.add_api_route(f"{_INTERNAL_PREFIX}/px6/countries", internal_px6_countries,
+                              methods=["GET"], include_in_schema=False)
+    application.add_api_route(f"{_INTERNAL_PREFIX}/px6/price", internal_px6_price,
+                              methods=["GET"], include_in_schema=False)
+    application.add_api_route(f"{_INTERNAL_PREFIX}/px6/buy", internal_px6_buy,
                               methods=["POST"], include_in_schema=False)
     application.add_api_route(f"{_INTERNAL_PREFIX}/keys/add", internal_keys_add,
                               methods=["POST"], include_in_schema=False)

@@ -60,6 +60,101 @@ async def test_api_key_never_appears_in_logs(caplog):
     assert API_KEY not in caplog.text
 
 
+@pytest.mark.asyncio
+async def test_account_catalog_and_buy_requests():
+    mod = _load_client()
+    seen: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen.append(request)
+        path = request.url.path
+        if path.endswith("/buy"):
+            return httpx.Response(200, json={
+                "status": "yes", "order_id": "o1", "count": "2",
+                "price": "25.00", "price_single": "12.50",
+                "period": "30", "country": "ru", "currency": "RUB",
+                "balance": "75.00",
+            }, request=request)
+        if path.endswith("/getcountry"):
+            return httpx.Response(200, json={
+                "status": "yes", "list": ["ru", "de"],
+            }, request=request)
+        if path.endswith("/getprice"):
+            return httpx.Response(200, json={
+                "status": "yes", "price": "12.50", "price_single": "12.50",
+                "currency": "RUB", "balance": "100.00", "user_id": "u1",
+            }, request=request)
+        return httpx.Response(200, json={
+            "status": "yes", "user_id": "u1", "balance": "100.00",
+            "currency": "RUB",
+        }, request=request)
+
+    client = mod.Px6Client(api_key=API_KEY, api_base="https://px6.link/api")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(base_url="https://px6.link/api",
+                                       transport=httpx.MockTransport(handler))
+
+    account = await client.account()
+    countries = await client.get_countries(4)
+    price = await client.get_price(6, 2, 30)
+    bought = await client.buy(
+        count=2, period=30, country="ru", version=6, descr="prod",
+    )
+    await client.aclose()
+
+    assert account["balance"] == "100.00"
+    assert countries["list"] == ["ru", "de"]
+    assert price["price"] == "12.50"
+    assert bought["order_id"] == "o1"
+    assert seen[0].url.path == f"/api/{API_KEY}"
+    assert seen[1].url.params["version"] == "4"
+    assert seen[2].url.params["count"] == "2"
+    assert seen[2].url.params["period"] == "30"
+    assert seen[3].url.params["country"] == "ru"
+    assert seen[3].url.params["descr"] == "prod"
+
+
+@pytest.mark.asyncio
+async def test_px6_error_ids_map_to_stable_statuses():
+    mod = _load_client()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json={
+            "status": "no", "error_id": 400, "error": "no money",
+        }, request=request)
+
+    client = mod.Px6Client(api_key=API_KEY, api_base="https://px6.link/api")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(base_url="https://px6.link/api",
+                                       transport=httpx.MockTransport(handler))
+    with pytest.raises(mod.Px6Error) as exc:
+        await client.account()
+    await client.aclose()
+
+    assert exc.value.status_code == 402
+    assert str(exc.value) == "Insufficient px6.net balance"
+    assert "no money" not in str(exc.value)
+
+
+@pytest.mark.asyncio
+async def test_px6_rate_limit_is_429():
+    mod = _load_client()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(429, request=request)
+
+    client = mod.Px6Client(api_key=API_KEY, api_base="https://px6.link/api")
+    await client._client.aclose()
+    client._client = httpx.AsyncClient(base_url="https://px6.link/api",
+                                       transport=httpx.MockTransport(handler))
+    with pytest.raises(mod.Px6Error) as exc:
+        await client.get_proxy()
+    await client.aclose()
+
+    assert exc.value.status_code == 429
+    assert "rate limit" in str(exc.value).lower()
+
+
 def test_redact_url_strips_userinfo_and_secret():
     mod = _load_client()
     assert mod.redact_url("http://user:topsecret@10.0.0.1:3128") == "http://***@10.0.0.1:3128"

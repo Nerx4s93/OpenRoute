@@ -42,6 +42,14 @@ export interface ProxiesTotals {
   tokens_total: number;
 }
 
+export interface Px6ProxyMeta {
+  id: string;
+  version: string;
+  country: string;
+  date_end: string;
+  descr: string;
+}
+
 export interface ProxyRow {
   id: string | null;
   display: string;
@@ -54,6 +62,7 @@ export interface ProxyRow {
   cooldown_seconds_left: number;
   rpm_capped: boolean;
   last_error: string | null;
+  px6?: Px6ProxyMeta;
   usage: Usage;
 }
 
@@ -79,6 +88,7 @@ export interface ProxiesSnapshot {
     errors: number;
     tokens: number;
     proxies_ready: number;
+    proxies_enabled?: number;
     proxies_total: number;
   };
   // Optional for old SSE frames and cached snapshots.
@@ -123,6 +133,49 @@ export interface SessionInfo {
 export interface ApiMessage {
   ok: boolean;
   message: string;
+}
+
+export interface Px6Account {
+  user_id: string;
+  balance: number;
+  currency: string;
+}
+
+export interface Px6Countries {
+  version: number;
+  countries: string[];
+}
+
+export interface Px6Price {
+  user_id: string;
+  balance: number;
+  currency: string;
+  price: number;
+  price_single: number;
+  period: number;
+  count: number;
+  version: number;
+}
+
+export interface ProxyBuyPayload {
+  count: number;
+  period: number;
+  country: string;
+  version: number;
+  descr?: string;
+}
+
+export interface ProxyBuyResult extends ApiMessage {
+  order_id: string;
+  count: number;
+  price: number;
+  price_single: number;
+  period: number;
+  country: string;
+  version: number;
+  currency: string;
+  balance: number;
+  refresh_ok: boolean;
 }
 
 export interface KeyAddPayload {

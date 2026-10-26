@@ -30,6 +30,10 @@ class Settings(BaseSettings):
 
     # --- proxy pool source ---
     proxies_url: str = "http://openroute-px6:8000/proxies"
+    # px6-service base URL for account/price/buy operations. The gateway is the
+    # only component web-admin talks to; px6-service is the only one that knows
+    # the px6.net API key.
+    px6_service_url: str = "http://openroute-px6:8000"
     proxy_refresh_seconds: float = 300.0
     proxy_retry_seconds: float = 10.0
 

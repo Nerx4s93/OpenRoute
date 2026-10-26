@@ -7,16 +7,19 @@ OpenAI-совместимый API-шлюз, который балансируе�
 «ведро» квоты opencode.ai: входной IPv4 не считается выходным IP, потому что
 провайдер может выпускать трафик через IPv6.
 
-- При старте и периодически шлюз забирает список прокси из `px6-service`,
-  который фильтрует их по комментарию **`OPENROUTE`** (аналог `USE_IN_API` в
-  NVRoute) через API [px6.net](https://px6.net).
+- При старте и периодически шлюз забирает **все активные прокси** из
+  `px6-service` (обёртка над API [px6.net](https://px6.net)). Комментарий
+  `descr` больше не фильтруется: новые прокси добавляются в пул **выключенными**,
+  и только явно включённые оператором могут нести трафик.
 - В админке есть кнопка **«Обновить список»**: она заставляет gateway запросить
   `px6-service` с `?refresh=true` (сброс TTL-кэша), сразу обновить пул и
   перепроверить прокси.
-- В админке есть страница **«Статистика»** (`/admin/ui`): карточки, график
-  «Токены по дням», таблица «Прокси» за всё время и последние запросы. Период
-  выбирается кнопками **1д / 3д / 7д / 30д / 90д / Всё время** (см.
-  «Статистика токенов»). Отдельной страницы «Прокси» больше нет.
+- В админке три страницы: **«Статистика»** (`/admin/ui`), **«Прокси»**
+  (`/admin/ui/proxies`) и **«Ключи»** (`/admin/ui/keys`). На странице «Прокси»
+  видны баланс px6.net, каталог и покупка прокси, а также включение/выключение
+  каждого прокси; на «Статистике» — карточки, график «Токены по дням», таблица
+  «Прокси» за всё время и последние запросы. Период выбирается кнопками
+  **1д / 3д / 7д / 30д / 90д / Всё время** (см. «Статистика токенов»).
 - **Sticky-сессии**: задача (`x-opencode-session`, либо fingerprint диалога)
   закрепляется за одним прокси-URL — все её реплики идут через один и тот же
   выходной адрес, а новые задачи балансируются по score (сессии/запросы/токены).
@@ -65,7 +68,7 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
                      ┌───────────────────┐        ┌───────────────────┐
                      │   opencode.ai     │        │      px6.net      │
                      │ (free-tier инференс│        │ (источник прокси, │
-                     │  + каталог моделей)│        │  descr=OPENROUTE) │
+                     │  + каталог моделей)│        │ баланс/покупка)   │
                      └───────────────────┘        └───────────────────┘
 ```
 
@@ -80,7 +83,7 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
                         └─ /api/admin/* ───────────────────────────► [web-admin] (JSON API)
                                                                          │
    (web-admin-ui — только статика; браузер сам ходит в /api/admin/* через edge)
-   [gateway] ──► [openroute-px6] ──► px6.net       (список прокси, descr=OPENROUTE)
+   [gateway] ──► [openroute-px6] ──► px6.net       (каталог, баланс, покупка прокси)
    [gateway] ──► [PostgreSQL]                       (request_log + proxies + keys + session_affinity + proxy_personas)
    [gateway] ──► opencode.ai                        (free-tier инференс через прокси)
    [web-admin] ──► [Redis]                          (серверные сессии админки)
@@ -98,8 +101,9 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
 - **`web-admin-ui/`** — React SPA (React + TypeScript + Vite + React Router +
   TanStack Query) в отдельном контейнере nginx. Секретов не получает; все
   данные — через `/api/admin/*`.
-- **`px6-service/`** — микросервис списка прокси: обёртка над API px6.net с
-  TTL-кэшем, фильтр `descr == "OPENROUTE"`.
+- **`px6-service/`** — микросервис px6.net: обёртка над API с TTL-кэшем;
+  отдаёт все активные прокси, баланс аккаунта, страны, цену и покупку. Это
+  единственный компонент, который знает `PX6_API_KEY`.
 - **`postgres`** — PostgreSQL 17: хранилище шлюза (`request_log`, `proxies`,
   `keys`, `session_affinity`, `proxy_personas`). Том
   `pgdata`; порт наружу не публикуется.
@@ -129,10 +133,10 @@ OpenRoute/
 │   ├── config.py  proxies.py  proxydb.py  keys.py  keydb.py  reqlog.py  pg.py
 │   └── main.py               # FastAPI: passthrough /v1/*, ретраи, internal API, lifespan
 ├── edge/                     # nginx: nginx.conf, proxy_params_edge.conf, Dockerfile
-├── px6-service/              # РЕАЛИЗОВАНО: px6.net → descr=OPENROUTE
+├── px6-service/              # РЕАЛИЗОВАНО: px6.net → все активные прокси, баланс, покупка
 ├── web-admin/                # РЕАЛИЗОВАНО: JSON API (config, sessions, auth, gateway, schemas, main)
 ├── web-admin-ui/             # РЕАЛИЗОВАНО: React SPA (Vite, React Router, TanStack Query)
-└── tests/                    # pytest: шлюз, прокси, ключи, лог, админка, opencode
+└── tests/                    # pytest: шлюз, прокси, ключи, лог, админка, px6, opencode
 ```
 
 ---
@@ -140,17 +144,25 @@ OpenRoute/
 ## Правила пула
 
 - Прокси автоматически подтягиваются из `PROXIES_URL`
-  (`openroute-px6`, `descr=OPENROUTE`) каждые `PROXY_REFRESH_SECONDS`; при
-  неудачном фетче — повтор через `PROXY_RETRY_SECONDS`.
+  (`openroute-px6`) каждые `PROXY_REFRESH_SECONDS`; при неудачном фетче —
+  повтор через `PROXY_RETRY_SECONDS`. `px6-service` возвращает **все активные**
+  прокси без фильтра по комментарию.
+- **Новые прокси добавляются выключенными** (`enabled = FALSE`). Включение —
+  явное действие оператора на странице «Прокси»; только включённые прокси
+  участвуют в балансировке. Ранее включённые прокси сохраняют свой флаг при
+  обновлении списка.
 - Добавить или удалить прокси вручную нельзя: членство в пуле определяется
   **только** фетчем; в админке доступны лишь включить/выключить существующий
-  прокси.
+  прокси и купить новые через px6.net.
 - Список из `PROXIES_URL` синхронизируется с БД: новые прокси добавляются,
   пропавшие из источника помечаются `listed = FALSE` (soft-delete) и
   перестают участвовать в балансировке. Записи физически не удаляются, поэтому
   парковка/баны и привязки сессий переживают временное исчезновение прокси;
   если он снова появится в источнике, он возвращается в пул. Флаг `enabled`
   (ручное вкл/выкл) при синхронизации не сбрасывается.
+- Если PostgreSQL временно недоступен, gateway сохраняет текущие флаги уже
+  известных прокси и оставляет новые выключенными (fail-closed), а не включает
+  весь полученный список.
 - **Квоты**: каждый прокси-URL — отдельное ведро (`canonical_quota_key`).
   Прокси не объединяются по входному IPv4: выход может быть IPv6, и разные
   порты одного входного адреса могут иметь разные выходные адреса.
@@ -301,13 +313,47 @@ OpenRoute/
   `Cache-Control: no-store`) отдаёт те же поля с нормализованным ISO-8601
   `server_time` (UTC).
 - **`GET /api/admin/proxies`** расширен аддитивно: на верхнем уровне появился
-  `totals` (`tokens_total`). Прежние поля не изменились: `summary` и
-  `usage` строки сохраняют контракт.
+  `totals` (`tokens_total`), в `summary` — `proxies_enabled`, а у каждой строки
+  — необязательный объект `px6` (`id`, `version`, `country`, `date_end`,
+  `descr`). Прежние поля не изменились: `summary` и `usage` строки сохраняют
+  контракт. Учётные данные прокси по-прежнему не попадают в браузер.
 - **Устойчивость**: при недоступном PostgreSQL эндпоинты статистики всё равно
   отвечают 200 — нулями и пустыми сериями. Опрос панели
   (`/internal/proxies-data`, ~1 раз в секунду) использует кэш агрегатов
   (TTL ~10 с), а дневные серии формируются для графика на странице
   «Статистика» (обновление ~30 с).
+
+---
+
+## Прокси (px6.net)
+
+- Страница **«Прокси»** (`/admin/ui/proxies`) показывает баланс аккаунта
+  px6.net, форму покупки и таблицу всех прокси. Баланс обновляется раз в 30 с.
+- Покупка: версия **3 — IPv4 Shared**, **4 — IPv4**, **6 — IPv6**; период
+  **3/7/14/30/60/90 дней**; количество, страна (ISO2) и необязательный
+  комментарий до 50 символов. Страна выбирается из `getcountry`, стоимость
+  пересчитывается через `getprice` с задержкой 500 мс (px6.net допускает не
+  более 3 запросов/с). Перед покупкой показывается подтверждение с ценой и
+  остатком баланса; фактическая цена фиксируется px6.net в момент покупки.
+- **Купленные и новые прокси добавляются выключенными.** В таблице их можно
+  включить; только включённые прокси попадают в пул gateway. Комментарий
+  `descr` ни на что не влияет и показывается как справочная информация.
+- После успешной покупки gateway вызывает `px6-service` и сразу обновляет пул
+  с `?refresh=true`. Если покупка прошла, а обновление списка — нет, ответ
+  остаётся успешным (`refresh_ok: false`) с предупреждением: деньги уже
+  списаны, оператору нужно нажать «Обновить список».
+- **Секреты**: `PX6_API_KEY` знает только `px6-service`; логин/пароль прокси
+  хранятся в gateway и никогда не отдаются в браузер. Панель получает
+  masked-имя `host:port`, непрозрачный HMAC-идентификатор прокси и несекретные
+  поля px6 (`id`, `version`, `country`, `date_end`, `descr`).
+- **Внутренние API**: gateway `GET /internal/px6/account`,
+  `GET /internal/px6/countries?version=`, `GET /internal/px6/price?...`,
+  `POST /internal/px6/buy` (все требуют `X-Internal-Token`); web-admin
+  проксирует их в `/api/admin/proxies/{account,countries,price,buy}`, где
+  `buy` защищён CSRF. Наружу `/internal/*` не маршрутизируется.
+- `px6-service` кэширует `/proxies` на `CACHE_HOURS`; покупка инвалидирует
+  кэш. Остальные методы (`/account`, `/countries`, `/price`, `/buy`) ходят в
+  px6.net напрямую.
 
 ---
 
@@ -350,7 +396,7 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 | ANY | `/v1/*` | gateway | Passthrough к opencode.ai (`chat/completions`, `models`, ...); стриминг поддержан |
 | GET | `/` | edge | Редирект 307 на `/login` |
 | GET | `/login` | web-admin-ui | SPA-страница входа (React Router) |
-| GET | `/admin/ui`, `/admin/ui/keys` | web-admin-ui | SPA-страницы «Статистика» и «Ключи» |
+| GET | `/admin/ui`, `/admin/ui/proxies`, `/admin/ui/keys` | web-admin-ui | SPA-страницы «Статистика», «Прокси» и «Ключи» |
 | GET | `/assets/*` | web-admin-ui | Хэшированные статические файлы SPA |
 | GET | `/api/admin/session` | web-admin | Текущая сессия + CSRF-токен (200 и без входа) |
 | POST | `/api/admin/login` | web-admin | Вход по паролю; HttpOnly cookie сессии |
@@ -361,6 +407,10 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 | GET | `/api/admin/{proxies,keys}/events?period=` | web-admin | SSE с JSON-снапшотами (fallback — polling) |
 | POST | `/api/admin/proxies/set` | web-admin | Включить/отключить прокси по `proxy_id` (CSRF) |
 | POST | `/api/admin/proxies/refresh` | web-admin | Принудительно обновить список из px6 со сбросом TTL-кэша (CSRF) |
+| GET | `/api/admin/proxies/account` | web-admin | Баланс и валюта аккаунта px6.net |
+| GET | `/api/admin/proxies/countries?version=` | web-admin | Страны, доступные для покупки (3/4/6) |
+| GET | `/api/admin/proxies/price?version=&count=&period=` | web-admin | Оценка стоимости заказа |
+| POST | `/api/admin/proxies/buy` | web-admin | Купить прокси и обновить пул (CSRF) |
 | POST | `/api/admin/keys/{add,set,delete}` | web-admin | Добавить/отозвать/удалить ключ (CSRF) |
 | GET | `/admin/status` | gateway | Состояние пула: прокси, egress-группы, session affinity, счётчики, usage по ключам |
 | GET | `/admin/logs?limit=N` | gateway | Последние запросы из лога (1..500, по умолчанию 100) |
@@ -429,10 +479,15 @@ docker compose down                          # остановка всего
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-uvicorn gateway.main:app --host 127.0.0.1 --port 8000   # шлюз: /v1/*, /admin/*, /health, /internal/*
+cd px6-service && uvicorn app.main:app --host 127.0.0.1 --port 8001  # PX6_API_KEY=...
+# в соседнем терминале, из корня:
+PROXIES_URL=http://127.0.0.1:8001/proxies \
+PX6_SERVICE_URL=http://127.0.0.1:8001 \
+  uvicorn gateway.main:app --host 127.0.0.1 --port 8000
 ```
 
-Нужен доступный PostgreSQL (по умолчанию
+`PX6_SERVICE_URL` — база px6-service (без `/proxies`) для баланса, стран,
+цены и покупки. Нужен доступный PostgreSQL (по умолчанию
 `POSTGRES_DSN=postgresql://openroute:openroute@localhost:5432/openroute`); схема
 создаётся сама при первом обращении. Без Docker edge нет: backend админки
 запускается отдельно (`web-admin/`), а SPA — через `npm run dev` в
@@ -451,9 +506,9 @@ uvicorn gateway.main:app --host 127.0.0.1 --port 8000   # шлюз: /v1/*, /admi
 | `gateway/` (шлюз: `main`, `config`, `proxies`, `proxydb`, `affinity`, `affinitydb`, `personas`, `personadb`, `keys`, `keydb`, `reqlog`, `pg`, `opencode`) | **реализовано** |
 | `web-admin/` (JSON API: `config`, `sessions`, `auth`, `gateway`, `schemas`, `main`) | **реализовано** |
 | `web-admin-ui/` (React SPA: Vite, React Router, TanStack Query, SSE) | **реализовано** |
-| `px6-service/` | **реализовано** (px6.net → `descr=OPENROUTE`) |
+| `px6-service/` | **реализовано** (все активные прокси, баланс, страны, цена, покупка) |
 | edge / compose / Dockerfile / requirements / .env.example | **готово** |
-| `tests/` (`test_gateway`, `test_proxies`, `test_affinity`, `test_affinitydb`, `test_persona`, `test_personadb`, `test_keys`, `test_reqlog`, `test_admin_api`, `test_opencode`) | **реализовано** |
+| `tests/` (`test_gateway`, `test_proxies`, `test_affinity`, `test_affinitydb`, `test_persona`, `test_personadb`, `test_keys`, `test_reqlog`, `test_admin_api`, `test_opencode`, `test_proxy6_client`, `test_px6_service`) | **реализовано** |
 
 ## Тесты
 
@@ -472,10 +527,12 @@ npm run typecheck
 эвакуации (без БД); `tests/test_persona.py` — unit-тесты персоны (кэш,
 ротация, retry/reconcile, fail-open, без БД); `tests/test_admin_api.py` —
 герметичные тесты JSON API админки (fake gateway + in-memory sessions, без
-Redis/PostgreSQL). Остальные наборы (`test_gateway`, `test_proxies`,
-`test_affinitydb`, `test_personadb`, `test_keys`, `test_reqlog`) работают
-герметично: upstream и админка подменяются, а живой PostgreSQL для хранилищ
-шлюза (включая `session_affinity` и `proxy_personas`) поднимается из
+Redis/PostgreSQL); `tests/test_px6_service.py` — герметичные тесты px6-service
+(fake px6.net); `tests/test_proxy6_client.py` — клиент px6.net, маскирование
+ключа в логах и маппинг ошибок. Остальные наборы (`test_gateway`,
+`test_proxies`, `test_affinitydb`, `test_personadb`, `test_keys`, `test_reqlog`)
+работают герметично: upstream и админка подменяются, а живой PostgreSQL для
+хранилищ шлюза (включая `session_affinity` и `proxy_personas`) поднимается из
 `docker-compose.test.yml` (`127.0.0.1:55433`), DSN переопределяется
 `OPENROUTE_TEST_DSN`. `test_personadb` проверяет generation-гард и загрузку
 после рестарта. Фронтенд-тесты (`web-admin-ui`) — Vitest + Testing Library,

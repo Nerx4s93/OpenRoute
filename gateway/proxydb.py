@@ -9,9 +9,10 @@ membership, each proxy's manual ``enabled`` flag, and upstream
 quota/abuse parking (``quota_until`` / ``banned_until``) and the non-expiring
 ``permanently_banned`` abusive-traffic verdict. Membership is seeded
 exclusively by ``refresh_proxies`` — there is no manual-add path. The refresh
-synchronises the fetched snapshot: new rows are inserted with
-``enabled = TRUE``, existing flags are preserved, and rows absent from the
-source are soft-removed with ``listed = FALSE``. Soft-removed rows stay in the
+synchronises the fetched snapshot: new rows are inserted **disabled**
+(``enabled = FALSE``), existing flags are preserved, and rows absent from the
+source are soft-removed with ``listed = FALSE``. Enabling a proxy is always an
+explicit operator action in the admin UI. Soft-removed rows stay in the
 table so parking/affinity survive and a proxy that reappears can be re-listed.
 The only manual admin action is ``set_enabled`` on the same table; physical
 deletion is out of scope.
@@ -141,10 +142,10 @@ class ProxyDB:
     def sync_many(self, proxies: Iterable[str]) -> int:
         """Apply one successful source snapshot and return the number of new rows.
 
-        Inserts new proxies, marks every fetched proxy as ``listed`` and every
-        other row as not listed. Rows are never deleted; ``enabled`` and
-        parking are preserved. The statements run in one transaction so there
-        is no window where the whole pool is unlisted.
+        Inserts new proxies disabled, marks every fetched proxy as ``listed``
+        and every other row as not listed. Rows are never deleted; existing
+        ``enabled`` flags and parking are preserved. The statements run in one
+        transaction so there is no window where the whole pool is unlisted.
         """
         self._ensure()
         deduped = list(dict.fromkeys(p for p in proxies if p))
@@ -152,7 +153,7 @@ class ProxyDB:
             with conn.cursor() as cur:
                 cur.executemany(
                     "INSERT INTO proxies (proxy, enabled, added_at, listed)"
-                    " VALUES (%s, TRUE, %s, TRUE)"
+                    " VALUES (%s, FALSE, %s, TRUE)"
                     " ON CONFLICT (proxy) DO NOTHING",
                     [(p, time.time()) for p in deduped],
                 )

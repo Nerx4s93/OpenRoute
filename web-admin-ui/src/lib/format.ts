@@ -56,3 +56,16 @@ export function formatModels(models: string[] | null | undefined): string {
 export function requestTokens(prompt?: number | null, completion?: number | null): number {
   return (prompt ?? 0) + (completion ?? 0);
 }
+
+export function formatMoney(value: number, currency = "RUB"): string {
+  try {
+    return new Intl.NumberFormat("ru-RU", {
+      style: "currency",
+      currency: currency || "RUB",
+      maximumFractionDigits: 2,
+      minimumFractionDigits: 2,
+    }).format(value);
+  } catch {
+    return `${value.toFixed(2)} ${currency}`;
+  }
+}

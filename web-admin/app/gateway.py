@@ -54,6 +54,39 @@ def _localize(message: str) -> str:
         "Such a key already exists": "Такой ключ уже есть",
         "No key given": "Ключ не указан",
         "Key too long (max 200 chars)": "Ключ слишком длинный (макс. 200 символов)",
+        # --- px6 account / purchase ---
+        "Unknown px6.net error": "Неизвестная ошибка px6.net",
+        "Invalid px6.net API key": "Неверный API-ключ px6.net",
+        "px6.net API IP restriction": "Доступ к API px6.net ограничен по IP",
+        "Invalid px6.net API method": "Неверный метод API px6.net",
+        "Invalid proxy count": "Некорректное количество прокси",
+        "Invalid proxy period": "Некорректный период прокси",
+        "Invalid country code": "Некорректный код страны",
+        "Invalid proxy IDs": "Некорректные идентификаторы прокси",
+        "Invalid proxy version": "Некорректная версия прокси",
+        "Invalid proxy comment": "Некорректный комментарий",
+        "Invalid proxy type": "Некорректный тип прокси",
+        "Invalid proxy port": "Некорректный порт прокси",
+        "Invalid proxy string": "Некорректная строка прокси",
+        "Not enough proxies available": "На px6.net недостаточно свободных прокси",
+        "Insufficient px6.net balance": "Недостаточно средств на счёте px6.net",
+        "Proxy not found on px6.net": "Прокси не найден на px6.net",
+        "Invalid price": "Некорректная цена",
+        "Upstream request to px6.net failed": "Запрос к px6.net не удался",
+        "Upstream rate limit (px6.net): too many requests": "Превышен лимит запросов к px6.net",
+        "px6-service unavailable": "Сервис px6 недоступен",
+        "px6-service returned non-JSON response": "Сервис px6 вернул некорректный ответ",
+        "px6-service returned an invalid response": "Сервис px6 вернул некорректный ответ",
+        "Unsupported proxy version (allowed: 3, 4, 6)": "Поддерживаются версии 3, 4 и 6",
+        "Count must be between 1 and 1000": "Количество должно быть от 1 до 1000",
+        "Period must be between 1 and 365 days": "Период должен быть от 1 до 365 дней",
+        "Country must be an ISO2 code": "Страна должна быть кодом ISO2",
+        "Comment must be at most 50 characters": "Комментарий не длиннее 50 символов",
+        "Invalid numeric purchase parameter": "Некорректный числовой параметр покупки",
+        "auto_prolong must be a boolean": "Некорректный флаг автопродления",
+        "Proxies purchased and list refreshed": "Прокси куплены, список обновлён",
+        "Proxies purchased; list refresh failed":
+            "Прокси куплены, но список не обновился",
     }
     if message in exact:
         return exact[message]
@@ -202,6 +235,20 @@ def _proxy_state_fields(row: dict) -> dict:
     }
 
 
+def _px6_meta(raw: object) -> dict:
+    """Non-secret px6 catalog fields (credentials never live here)."""
+    source = raw if isinstance(raw, dict) else {}
+    def text(key: str) -> str:
+        return str(source.get(key) or "")
+    return {
+        "id": text("id"),
+        "version": text("version"),
+        "country": text("country"),
+        "date_end": text("date_end"),
+        "descr": _strip_credentials(text("descr")),
+    }
+
+
 class GatewayClient:
     """Async client for ``/internal/*`` plus snapshot normalization."""
 
@@ -252,7 +299,67 @@ class GatewayClient:
             raise HTTPException(502, "Шлюз вернул неожиданный ответ")
         return data
 
-    # --- proxy tokens ------------------------------------------------------
+    # --- px6 account / purchase -------------------------------------------
+
+    async def px6_account(self) -> dict:
+        data = await self._get("/internal/px6/account")
+        return {
+            "user_id": str(data.get("user_id") or ""),
+            "balance": _as_float(data.get("balance")),
+            "currency": str(data.get("currency") or "RUB"),
+        }
+
+    async def px6_countries(self, version: int = 6) -> dict:
+        data = await self._get(f"/internal/px6/countries?version={version}")
+        raw = data.get("countries")
+        values = raw if isinstance(raw, list) else []
+        countries = sorted({
+            str(item).strip().lower()
+            for item in values
+            if str(item).strip()
+        })
+        return {"version": _as_int(data.get("version"), version), "countries": countries}
+
+    async def px6_price(self, version: int = 6, count: int = 1, period: int = 30) -> dict:
+        data = await self._get(
+            f"/internal/px6/price?version={version}&count={count}&period={period}"
+        )
+        return {
+            "user_id": str(data.get("user_id") or ""),
+            "balance": _as_float(data.get("balance")),
+            "currency": str(data.get("currency") or "RUB"),
+            "price": _as_float(data.get("price")),
+            "price_single": _as_float(data.get("price_single")),
+            "period": _as_int(data.get("period"), period),
+            "count": _as_int(data.get("count"), count),
+            "version": _as_int(data.get("version"), version),
+        }
+
+    async def buy_proxies(self, payload: dict) -> dict:
+        data = await self._post("/internal/px6/buy", payload)
+        count = _as_int(data.get("count"), _as_int(payload.get("count"), 0))
+        refresh_ok = bool(data.get("refresh_ok", True))
+        if refresh_ok:
+            message = f"Куплено {count} прокси. Включите их в списке."
+        else:
+            message = (
+                f"Куплено {count} прокси, но список не обновился. "
+                "Нажмите «Обновить список»."
+            )
+        return {
+            "ok": True,
+            "message": message,
+            "order_id": str(data.get("order_id") or ""),
+            "count": count,
+            "price": _as_float(data.get("price")),
+            "price_single": _as_float(data.get("price_single")),
+            "period": _as_int(data.get("period"), _as_int(payload.get("period"), 0)),
+            "country": str(data.get("country") or payload.get("country") or ""),
+            "version": _as_int(data.get("version"), _as_int(payload.get("version"), 6)),
+            "currency": str(data.get("currency") or "RUB"),
+            "balance": _as_float(data.get("balance")),
+            "refresh_ok": refresh_ok,
+        }
 
     def proxy_token(self, url: str) -> str:
         secret = self.settings.internal_api_token.encode("utf-8")
@@ -308,6 +415,7 @@ class GatewayClient:
                 "id": self.proxy_token(real) if real else None,
                 "display": display,
                 **_proxy_state_fields(raw),
+                "px6": _px6_meta(raw.get("px6")),
                 "usage": {
                     "requests": _as_int(per_proxy.get("requests", raw.get("requests", 0))),
                     "errors": _as_int(per_proxy.get("errors", raw.get("errors", 0))),
@@ -323,6 +431,10 @@ class GatewayClient:
                 "errors": _as_int(total.get("errors")),
                 "tokens": _as_int(total.get("tokens")),
                 "proxies_ready": _as_int(status.get("proxies_ready")),
+                "proxies_enabled": _as_int(
+                    status.get("proxies_enabled"),
+                    sum(1 for row in rows if row["enabled"]),
+                ),
                 "proxies_total": _as_int(status.get("proxies_total"), len(rows)),
             },
             "totals": _lifetime_totals(lifetime_by_proxy),

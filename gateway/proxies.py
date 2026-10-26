@@ -145,6 +145,12 @@ class Proxy:
     manually_disabled: bool = False  # disabled via admin UI (lives in ProxyDB)
     disabled: bool = False  # reserved; proxies are never permanently dead
     last_error: Optional[str] = None
+    # --- non-secret px6.net catalog metadata (for the admin Proxies page) ---
+    px6_id: str = ""
+    px6_version: str = ""
+    px6_country: str = ""
+    px6_date_end: str = ""
+    px6_descr: str = ""
     # --- internal breaker state ---
     _fails: deque = field(default_factory=deque)  # timestamps of recent failures
     _cooldown_n: int = 0  # how many times this proxy went into cooldown
@@ -369,6 +375,16 @@ class ProxyManager:
                 return True
         return False
 
+    def _rows_preserving_enabled(self, urls: list[str]) -> list[tuple[str, bool]]:
+        """Fallback rows when the DB is unavailable.
+
+        Preserve the in-memory operator choices for proxies we already know;
+        every new proxy is disabled. This keeps the "only explicitly enabled
+        proxies carry traffic" rule fail-closed even without PostgreSQL.
+        """
+        known = {p.url: not p.manually_disabled for p in self.proxies}
+        return [(url, known.get(url, False)) for url in urls]
+
     # --- refresh ---
 
     @staticmethod
@@ -423,6 +439,36 @@ class ProxyManager:
         """host:port from a proxy URL (credentials stripped — for logs)."""
         return proxy_url.split("@")[-1]
 
+    @staticmethod
+    def _proxy_meta(p: object) -> dict[str, str]:
+        """Non-secret px6 catalog fields from one source item.
+
+        Credentials stay in ``Proxy.url`` only; this metadata is safe for the
+        admin JSON (px6 id, version, country, expiry and operator comment).
+        """
+        if not isinstance(p, dict):
+            return {}
+        def text(key: str) -> str:
+            value = p.get(key)
+            return "" if value is None else str(value)
+        return {
+            "id": text("id"),
+            "version": text("version"),
+            "country": text("country"),
+            "date_end": text("date_end"),
+            "descr": text("descr"),
+        }
+
+    def apply_metadata(self, metadata: dict[str, dict[str, str]]) -> None:
+        """Attach current px6 metadata to matching pool members."""
+        for p in self.proxies:
+            meta = metadata.get(p.url) or {}
+            p.px6_id = meta.get("id", "")
+            p.px6_version = meta.get("version", "")
+            p.px6_country = meta.get("country", "")
+            p.px6_date_end = meta.get("date_end", "")
+            p.px6_descr = meta.get("descr", "")
+
     async def refresh_proxies(self, bust_cache: bool = False) -> bool:
         """Refresh the pool, optionally forcing the source to bypass its cache.
 
@@ -466,12 +512,16 @@ class ProxyManager:
             return False
 
         urls: list[str] = []
+        metadata: dict[str, dict[str, str]] = {}
         for p in (items or []):
             u = self._proxy_url(p)
             if u is None:
                 logger.warning("Skipping malformed proxy item (%s)", self._describe_proxy_item(p))
             else:
                 urls.append(u)
+                meta = self._proxy_meta(p)
+                if meta:
+                    metadata.setdefault(u, meta)
         urls = list(dict.fromkeys(urls))  # dedupe by URL
 
         # Persist the source snapshot first (source of truth), then rebuild
@@ -484,13 +534,19 @@ class ProxyManager:
                 rows = await asyncio.to_thread(self.db.all)
                 parking = await asyncio.to_thread(self.db.parking_all)
             except Exception as exc:
-                logger.error("ProxyDB sync/all failed: %s", exc)
-                rows = [(u, True) for u in urls]
+                logger.error(
+                    "ProxyDB sync/all failed (%s); keeping current enable flags, "
+                    "new proxies stay disabled", exc,
+                )
+                rows = self._rows_preserving_enabled(urls)
         else:
-            rows = [(u, True) for u in urls]
+            # No persistent list: fail closed. A proxy may carry traffic only
+            # after an operator explicitly enabled it in the list.
+            rows = self._rows_preserving_enabled(urls)
 
         async with self._lock:
             self.apply_proxies(rows)
+            self.apply_metadata(metadata)
             if parking is not None:
                 # Restore parking for a proxy that reappeared after being
                 # unlisted: its DB row (and ban/quota) never went away.
@@ -1036,6 +1092,13 @@ class ProxyManager:
                           if group else 0.0)
                 ),
                 "last_error": p.last_error,
+                "px6": {
+                    "id": p.px6_id,
+                    "version": p.px6_version,
+                    "country": p.px6_country,
+                    "date_end": p.px6_date_end,
+                    "descr": redact_url(p.px6_descr),
+                },
             })
         return {
             "provider": PROVIDER_NAME,

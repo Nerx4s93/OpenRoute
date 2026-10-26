@@ -33,6 +33,7 @@ function clearDataQueries(queryClient: ReturnType<typeof useQueryClient>): void 
   queryClient.removeQueries({ queryKey: ["proxies"] });
   queryClient.removeQueries({ queryKey: ["keys"] });
   queryClient.removeQueries({ queryKey: ["stats"] });
+  queryClient.removeQueries({ queryKey: ["px6"] });
 }
 
 export function AuthProvider({ children }: { children: ReactNode }) {

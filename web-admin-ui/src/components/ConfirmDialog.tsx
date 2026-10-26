@@ -5,6 +5,8 @@ export function ConfirmDialog({
   title,
   children,
   confirmLabel = "Удалить",
+  pendingLabel = "Удаление…",
+  tone = "danger",
   pending = false,
   onConfirm,
   onCancel,
@@ -13,6 +15,8 @@ export function ConfirmDialog({
   title: string;
   children: ReactNode;
   confirmLabel?: string;
+  pendingLabel?: string;
+  tone?: "danger" | "accent";
   pending?: boolean;
   onConfirm: () => void;
   onCancel: () => void;
@@ -54,11 +58,11 @@ export function ConfirmDialog({
           <button
             ref={confirmRef}
             type="button"
-            className="danger"
+            className={tone}
             onClick={onConfirm}
             disabled={pending}
           >
-            {pending ? "Удаление…" : confirmLabel}
+            {pending ? pendingLabel : confirmLabel}
           </button>
         </div>
       </div>

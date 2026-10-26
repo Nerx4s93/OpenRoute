@@ -115,6 +115,7 @@ class FakeState:
         self.stats_payload: dict = _stats_payload()  # /internal/stats-data
         self.stats_days: int | None = None  # last ?days= forwarded
         self.stats_period: str | None = None  # last ?period= forwarded
+        self.px6_buy_calls: list[dict] = []  # /internal/px6/buy payloads
 
 
 def _stats(d: dict[str, dict]) -> dict:
@@ -255,6 +256,56 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
         if state.refresh_error:
             raise HTTPException(502, "Proxy refresh failed")
         return {"ok": True, "message": "Proxies refreshed"}
+
+    @app.get("/internal/px6/account")
+    async def px6_account(req: Request) -> dict:
+        require(req)
+        return {"user_id": "px6-user", "balance": 250.5, "currency": "RUB"}
+
+    @app.get("/internal/px6/countries")
+    async def px6_countries(req: Request) -> dict:
+        require(req)
+        version = int(req.query_params.get("version", "6"))
+        return {"version": version, "countries": ["de", "ru"]}
+
+    @app.get("/internal/px6/price")
+    async def px6_price(req: Request) -> dict:
+        require(req)
+        version = int(req.query_params.get("version", "6"))
+        count = int(req.query_params.get("count", "1"))
+        period = int(req.query_params.get("period", "30"))
+        return {
+            "user_id": "px6-user",
+            "balance": 250.5,
+            "currency": "RUB",
+            "price": round(12.5 * count * (period / 30), 2),
+            "price_single": round(12.5 * (period / 30), 2),
+            "period": period,
+            "count": count,
+            "version": version,
+        }
+
+    @app.post("/internal/px6/buy")
+    async def px6_buy(req: Request) -> dict:
+        require(req)
+        data = await req.json()
+        state.px6_buy_calls.append(data)
+        count = int(data.get("count", 1))
+        period = int(data.get("period", 30))
+        return {
+            "ok": True,
+            "refresh_ok": True,
+            "message": "Proxies purchased and list refreshed",
+            "order_id": "order-1",
+            "count": count,
+            "price": round(12.5 * count * (period / 30), 2),
+            "price_single": round(12.5 * (period / 30), 2),
+            "period": period,
+            "country": str(data.get("country", "ru")),
+            "version": int(data.get("version", 6)),
+            "currency": "RUB",
+            "balance": 200.0,
+        }
 
     @app.get("/internal/keys-data")
     async def keys_data(req: Request) -> dict:
@@ -517,6 +568,10 @@ def test_protected_endpoints_require_session(panel):
         ("get", "/api/admin/proxies/events"),
         ("post", "/api/admin/proxies/set"),
         ("post", "/api/admin/proxies/refresh"),
+        ("get", "/api/admin/proxies/account"),
+        ("get", "/api/admin/proxies/countries"),
+        ("get", "/api/admin/proxies/price"),
+        ("post", "/api/admin/proxies/buy"),
         ("post", "/api/admin/keys/add"),
         ("post", "/api/admin/logout"),
     ):
@@ -590,7 +645,7 @@ def test_proxies_snapshot_and_period(panel):
     assert body["server_time"]
     assert body["summary"] == {
         "requests": 4, "errors": 1, "tokens": 110,
-        "proxies_ready": 2, "proxies_total": 2,
+        "proxies_ready": 2, "proxies_enabled": 2, "proxies_total": 2,
     }
     assert [p["display"] for p in body["proxies"]] == ["10.0.0.1:3128", "10.0.0.2:3128"]
     first = body["proxies"][0]
@@ -682,6 +737,68 @@ def test_proxy_refresh_gateway_failure_is_localized(panel):
     assert response.status_code == 502
     assert response.json() == {"detail": "Не удалось обновить список прокси"}
     assert panel.state.refreshes == 1
+
+
+def test_px6_account_countries_and_price(panel):
+    panel.login_ok()
+
+    account = panel.client.get("/api/admin/proxies/account")
+    assert account.status_code == 200
+    assert account.json() == {
+        "user_id": "px6-user", "balance": 250.5, "currency": "RUB",
+    }
+
+    countries = panel.client.get("/api/admin/proxies/countries?version=4")
+    assert countries.status_code == 200
+    assert countries.json() == {"version": 4, "countries": ["de", "ru"]}
+
+    price = panel.client.get("/api/admin/proxies/price?version=6&count=2&period=30")
+    assert price.status_code == 200
+    assert price.json()["count"] == 2
+    assert price.json()["version"] == 6
+    assert price.json()["price"] == 25.0
+
+
+def test_px6_buy_requires_csrf_and_forwards_payload(panel):
+    csrf = panel.login_ok()
+
+    forbidden = panel.client.post(
+        "/api/admin/proxies/buy",
+        json={"count": 2, "period": 7, "country": "ru", "version": 6},
+    )
+    assert forbidden.status_code == 403
+    assert panel.state.px6_buy_calls == []
+
+    response = panel.client.post(
+        "/api/admin/proxies/buy",
+        headers=auth_headers(csrf),
+        json={
+            "count": 2, "period": 7, "country": "RU", "version": 6,
+            "descr": "test",
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["ok"] is True
+    assert body["count"] == 2
+    assert body["refresh_ok"] is True
+    assert body["balance"] == 200.0
+    assert body["message"] == "Куплено 2 прокси. Включите их в списке."
+    assert panel.state.px6_buy_calls == [{
+        "count": 2, "period": 7, "country": "ru", "version": 6, "descr": "test",
+    }]
+
+
+def test_px6_buy_rejects_invalid_body(panel):
+    csrf = panel.login_ok()
+    response = panel.client.post(
+        "/api/admin/proxies/buy",
+        headers=auth_headers(csrf),
+        json={"count": 0, "period": 30, "country": "ru", "version": 6},
+    )
+    assert response.status_code == 400
+    assert "Количество должно быть от 1 до 1000" in response.text
+    assert panel.state.px6_buy_calls == []
 
 
 def test_proxy_toggle_requires_csrf(panel):

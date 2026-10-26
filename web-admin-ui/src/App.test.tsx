@@ -1,5 +1,5 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -166,7 +166,7 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { name: "Статистика", level: 1 }),
     ).toBeInTheDocument();
-    expect(screen.queryByRole("link", { name: "Прокси" })).not.toBeInTheDocument();
+    expect(screen.getByRole("link", { name: "Прокси" })).toHaveClass("nav-proxies");
     expect(screen.getByRole("link", { name: "Статистика" })).toHaveClass("nav-stats");
     expect(
       await screen.findByRole("cell", { name: "203.0.113.10:8080" }),
@@ -252,6 +252,115 @@ describe("App", () => {
     );
     expect(refreshCall).toBeTruthy();
     expect((refreshCall?.[1] as RequestInit).method).toBe("POST");
+  });
+
+  it("renders the proxies page with balance and toggles a proxy", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/admin/session")) {
+        return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
+      }
+      if (url.includes("/api/admin/proxies/account")) {
+        return json({ user_id: "px6-user", balance: 250.5, currency: "RUB" });
+      }
+      if (url.includes("/api/admin/proxies/countries")) {
+        return json({ version: 6, countries: ["de", "ru"] });
+      }
+      if (url.includes("/api/admin/proxies/price")) {
+        return json({
+          user_id: "px6-user", balance: 250.5, currency: "RUB",
+          price: 12.5, price_single: 12.5, period: 30, count: 1, version: 6,
+        });
+      }
+      if (url.includes("/api/admin/proxies/set")) {
+        return json({ ok: true, message: "Прокси отключён" });
+      }
+      if (url.includes("/api/admin/proxies")) return json(proxies);
+      if (url.includes("/api/admin/stats")) return json(stats);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderApp("/admin/ui/proxies");
+
+    expect(
+      await screen.findByRole("heading", { name: "Прокси", level: 1 }),
+    ).toBeInTheDocument();
+    expect(await screen.findByText(/250,50/)).toBeInTheDocument();
+    expect(await screen.findByRole("cell", { name: "203.0.113.10:8080" })).toBeInTheDocument();
+
+    const toggle = await screen.findByRole("button", { name: "Выключить" });
+    await user.click(toggle);
+
+    expect(await screen.findByText("Прокси отключён")).toBeInTheDocument();
+    const setCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/api/admin/proxies/set"),
+    );
+    expect(setCall).toBeTruthy();
+    expect((setCall?.[1] as RequestInit).method).toBe("POST");
+    expect(String((setCall?.[1] as RequestInit).body)).toContain('"enabled":false');
+  });
+
+  it("buys proxies after confirmation", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/admin/session")) {
+        return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
+      }
+      if (url.includes("/api/admin/proxies/account")) {
+        return json({ user_id: "px6-user", balance: 250.5, currency: "RUB" });
+      }
+      if (url.includes("/api/admin/proxies/countries")) {
+        return json({ version: 6, countries: ["de", "ru"] });
+      }
+      if (url.includes("/api/admin/proxies/price")) {
+        return json({
+          user_id: "px6-user", balance: 250.5, currency: "RUB",
+          price: 12.5, price_single: 12.5, period: 30, count: 1, version: 6,
+        });
+      }
+      if (url.includes("/api/admin/proxies/buy")) {
+        return json({
+          ok: true,
+          message: "Куплено 1 прокси. Включите их в списке.",
+          order_id: "order-1", count: 1, price: 12.5, price_single: 12.5,
+          period: 30, country: "ru", version: 6, currency: "RUB",
+          balance: 238.0, refresh_ok: true,
+        });
+      }
+      if (url.includes("/api/admin/proxies")) return json(proxies);
+      if (url.includes("/api/admin/stats")) return json(stats);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderApp("/admin/ui/proxies");
+
+    await screen.findByText(/250,50/);
+    await waitFor(() => {
+      expect(screen.getByLabelText("Страна")).toHaveValue("ru");
+    });
+
+    const submit = screen.getByRole("button", { name: "Купить" });
+    await waitFor(() => expect(submit).toBeEnabled());
+    await user.click(submit);
+
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByText(/Прокси будут добавлены выключенными/)).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Купить" }));
+
+    expect(
+      await screen.findByText("Куплено 1 прокси. Включите их в списке."),
+    ).toBeInTheDocument();
+    const buyCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/api/admin/proxies/buy"),
+    );
+    expect(buyCall).toBeTruthy();
+    expect((buyCall?.[1] as RequestInit).method).toBe("POST");
+    const body = JSON.parse(String((buyCall?.[1] as RequestInit).body));
+    expect(body).toMatchObject({ count: 1, period: 30, country: "ru", version: 6 });
   });
 
   it("renders the keys page for an authenticated session", async () => {

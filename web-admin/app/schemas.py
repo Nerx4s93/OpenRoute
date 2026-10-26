@@ -26,6 +26,65 @@ class ProxySetBody(BaseModel):
         return value
 
 
+class ProxyBuyBody(BaseModel):
+    """Purchase request (proxies are bought disabled; enable manually)."""
+
+    model_config = ConfigDict(extra="ignore")
+
+    count: int = 1
+    period: int = 30
+    country: str
+    version: int = 6
+    descr: str = ""
+
+    @field_validator("count", "period", "version", mode="before")
+    @classmethod
+    def _int_field(cls, value: object) -> int:
+        if isinstance(value, bool):
+            raise ValueError("Некорректное числовое значение")
+        try:
+            return int(str(value).strip())
+        except (TypeError, ValueError):
+            raise ValueError("Некорректное числовое значение")
+
+    @field_validator("count")
+    @classmethod
+    def _count_range(cls, value: int) -> int:
+        if not 1 <= value <= 1000:
+            raise ValueError("Количество должно быть от 1 до 1000")
+        return value
+
+    @field_validator("period")
+    @classmethod
+    def _period_valid(cls, value: int) -> int:
+        if value not in (3, 7, 14, 30, 60, 90):
+            raise ValueError("Период должен быть 3, 7, 14, 30, 60 или 90 дней")
+        return value
+
+    @field_validator("version")
+    @classmethod
+    def _version_valid(cls, value: int) -> int:
+        if value not in (3, 4, 6):
+            raise ValueError("Версия должна быть 3 (IPv4 Shared), 4 (IPv4) или 6 (IPv6)")
+        return value
+
+    @field_validator("country")
+    @classmethod
+    def _country_valid(cls, value: str) -> str:
+        value = value.strip().lower()
+        if len(value) != 2 or not value.isascii() or not value.isalpha():
+            raise ValueError("Страна должна быть кодом ISO2 (две буквы)")
+        return value
+
+    @field_validator("descr")
+    @classmethod
+    def _descr_valid(cls, value: str) -> str:
+        value = value.strip()
+        if len(value) > 50:
+            raise ValueError("Комментарий не длиннее 50 символов")
+        return value
+
+
 class KeyAddBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
