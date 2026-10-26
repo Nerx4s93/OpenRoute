@@ -29,6 +29,7 @@ from .gateway import GatewayClient
 from .schemas import (
     KeyAddBody,
     KeyDeleteBody,
+    KeyRotateBody,
     KeySetBody,
     LoginBody,
     ProxyBuyBody,
@@ -408,6 +409,14 @@ async def api_key_add(request: Request, session: dict = Depends(require_panel)) 
     body = await _json_body(request, KeyAddBody)
     assert isinstance(body, KeyAddBody)
     return await gateway.add_key(body)
+
+
+@app.post(f"{_PANEL_API}/keys/rotate")
+async def api_key_rotate(request: Request, session: dict = Depends(require_panel)) -> dict:
+    auth.check_csrf(request, session)
+    body = await _json_body(request, KeyRotateBody)
+    assert isinstance(body, KeyRotateBody)
+    return await gateway.rotate_key(body.key_hash)
 
 
 @app.post(f"{_PANEL_API}/keys/set")

@@ -74,7 +74,7 @@ from .affinity import AffinityLease, AffinityManager, SessionIdentity
 from .affinitydb import AffinityDB
 from .config import PROVIDER_NAME, get_settings
 from .keydb import KeyDB
-from .keys import AuthError, KeyInfo, KeyStore, RateLimitError, hash_key
+from .keys import AuthError, KeyInfo, KeyStore, RateLimitError, generate_key, hash_key
 from .personadb import PersonaDB
 from .personas import PersonaStore
 from .px6 import Px6ServiceClient, Px6ServiceError
@@ -1439,15 +1439,13 @@ async def internal_px6_buy(request: Request) -> dict:
 
 
 async def internal_keys_add(request: Request) -> dict:
-    """``{"key": plaintext, "key_id"?, "rpm"?, "tpm"?, "models"?}``.
-    Plaintext is hashed immediately (keys.py) and never stored."""
+    """``{"key_id"?, "rpm"?, "tpm"?, "models"?}``.
+
+    The service generates the plaintext ``openroute-...`` secret, returns it
+    once and stores only its sha256 hash (keys.py / keydb.py).
+    """
     _require_internal(request)
     data = await _read_json(request)
-    plaintext = str(data.get("key", "")).strip()
-    if not plaintext:
-        return {"ok": False, "message": "No key given"}
-    if len(plaintext) > 200:
-        return {"ok": False, "message": "Key too long (max 200 chars)"}
     rpm, err = _json_limit(data.get("rpm"), "rpm")
     if err:
         return {"ok": False, "message": err}
@@ -1469,16 +1467,50 @@ async def internal_keys_add(request: Request) -> dict:
         while f"k{i}" in existing:
             i += 1
         key_id = f"k{i}"
-    h = hash_key(plaintext)
     db = _require_keydb()
-    if await asyncio.to_thread(db.add, h, key_id,
-                               rpm=rpm, tpm=tpm, models=models):
-        keystore.upsert(h, KeyInfo(
-            key_id=key_id,
-            rpm=rpm, tpm=tpm, models=models, enabled=True,
-        ))
-        return {"ok": True, "message": f"Key {key_id} added"}
-    return {"ok": False, "message": "Such a key already exists"}
+    for _ in range(5):  # hash collisions are practically impossible; retry anyway
+        plaintext = generate_key()
+        h = hash_key(plaintext)
+        if await asyncio.to_thread(db.add, h, key_id,
+                                   rpm=rpm, tpm=tpm, models=models):
+            keystore.upsert(h, KeyInfo(
+                key_id=key_id,
+                rpm=rpm, tpm=tpm, models=models, enabled=True,
+            ))
+            return {
+                "ok": True,
+                "message": f"Key {key_id} added",
+                "key": plaintext,
+                "key_id": key_id,
+            }
+    return {"ok": False, "message": "Could not generate a unique key"}
+
+
+async def internal_keys_rotate(request: Request) -> dict:
+    """``{"key_hash": str}`` — issue a new secret for an existing key.
+
+    ``key_id``, limits, models and enabled state are preserved; the old secret
+    stops authenticating immediately. The new plaintext is returned once.
+    """
+    _require_internal(request)
+    data = await _read_json(request)
+    key_hash = str(data.get("key_hash", "")).strip()
+    if not key_hash:
+        raise HTTPException(400, "No key given")
+    plaintext = generate_key()
+    new_hash = hash_key(plaintext)
+    db = _require_keydb()
+    key_id = await asyncio.to_thread(db.rotate, key_hash, new_hash)
+    if key_id is None:
+        raise HTTPException(404, "Key not found")
+    if keystore.rotate(key_hash, new_hash) is None:
+        logger.warning("Key %s was rotated in PostgreSQL but was absent in memory", key_id)
+    return {
+        "ok": True,
+        "message": "Key rotated",
+        "key": plaintext,
+        "key_id": key_id,
+    }
 
 
 async def internal_keys_set(request: Request) -> dict:
@@ -1558,6 +1590,8 @@ def create_app() -> FastAPI:
     application.add_api_route(f"{_INTERNAL_PREFIX}/px6/buy", internal_px6_buy,
                               methods=["POST"], include_in_schema=False)
     application.add_api_route(f"{_INTERNAL_PREFIX}/keys/add", internal_keys_add,
+                              methods=["POST"], include_in_schema=False)
+    application.add_api_route(f"{_INTERNAL_PREFIX}/keys/rotate", internal_keys_rotate,
                               methods=["POST"], include_in_schema=False)
     application.add_api_route(f"{_INTERNAL_PREFIX}/keys/set", internal_keys_set,
                               methods=["POST"], include_in_schema=False)

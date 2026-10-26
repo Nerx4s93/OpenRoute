@@ -1,6 +1,7 @@
 import type {
   ApiMessage,
   KeyAddPayload,
+  KeyIssued,
   KeysSnapshot,
   Period,
   ProxiesSnapshot,
@@ -157,9 +158,15 @@ export const api = {
     apiRequest<KeysSnapshot>(`/api/admin/keys?period=${period}`),
 
   addKey: (payload: KeyAddPayload) =>
-    apiRequest<ApiMessage>("/api/admin/keys/add", {
+    apiRequest<KeyIssued>("/api/admin/keys/add", {
       method: "POST",
       body: jsonBody(payload),
+    }),
+
+  rotateKey: (keyHash: string) =>
+    apiRequest<KeyIssued>("/api/admin/keys/rotate", {
+      method: "POST",
+      body: jsonBody({ key_hash: keyHash }),
     }),
 
   setKey: (keyHash: string, enabled: boolean) =>

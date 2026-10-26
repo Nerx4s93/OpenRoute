@@ -417,12 +417,14 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 | GET | `/api/admin/proxies/countries?version=` | web-admin | Страны, доступные для покупки (3/4/6) |
 | GET | `/api/admin/proxies/price?version=&count=&period=` | web-admin | Оценка стоимости заказа |
 | POST | `/api/admin/proxies/buy` | web-admin | Купить прокси и обновить пул (CSRF) |
-| POST | `/api/admin/keys/{add,set,delete}` | web-admin | Добавить/отозвать/удалить ключ (CSRF) |
+| POST | `/api/admin/keys/{add,rotate,set,delete}` | web-admin | Создать/перевыпустить/отозвать/удалить ключ (CSRF) |
 | GET | `/health` | gateway | Liveness + счётчики пула, egress-групп и привязанных сессий |
 | GET | `/docs`, `/openapi.json` | gateway | Swagger UI / схема |
 | ANY | `/internal/*` | — (нет наружу) | Internal API шлюза; доступен только web-admin по `X-Internal-Token` |
 
-Клиентские ключи не имеют ролей и дают доступ только к `/v1/*`; маршруты
+Клиентские ключи не имеют ролей и дают доступ только к `/v1/*`. Секрет
+генерируется сервисом (`openroute-...`), показывается один раз при создании
+или перевыпуске и хранится в PostgreSQL только как SHA-256 хэш. Маршруты
 `/admin/status` и `/admin/logs` удалены. `/internal/*` при пустом
 `INTERNAL_API_TOKEN` отвечает 404, при неверном токене — 403.
 

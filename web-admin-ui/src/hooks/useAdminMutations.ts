@@ -1,6 +1,6 @@
 import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type ApiError } from "../api/client";
-import type { ApiMessage, KeyAddPayload } from "../api/types";
+import type { ApiMessage, KeyAddPayload, KeyIssued } from "../api/types";
 import { useToast } from "../components/Toast";
 
 function useMutationToast<TVariables, TData>(
@@ -41,8 +41,16 @@ export function useSetProxy() {
 }
 
 export function useAddKey() {
-  return useMutationToast<KeyAddPayload, ApiMessage>(
+  return useMutationToast<KeyAddPayload, KeyIssued>(
     (payload) => api.addKey(payload),
+    "keys",
+    (data) => data.message,
+  );
+}
+
+export function useRotateKey() {
+  return useMutationToast<string, KeyIssued>(
+    (keyHash) => api.rotateKey(keyHash),
     "keys",
     (data) => data.message,
   );

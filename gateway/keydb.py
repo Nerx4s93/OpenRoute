@@ -92,6 +92,16 @@ class KeyDB:
             )
             return cur.rowcount > 0
 
+    def rotate(self, key_hash: str, new_key_hash: str) -> str | None:
+        """Replace a key hash in place; return ``key_id`` or ``None``."""
+        self._ensure()
+        with self._pool.connection() as conn:
+            row = conn.execute(
+                "UPDATE keys SET key_hash = %s WHERE key_hash = %s RETURNING key_id",
+                (new_key_hash, key_hash),
+            ).fetchone()
+        return str(row[0]) if row else None
+
     def remove(self, key_hash: str) -> bool:
         self._ensure()
         with self._pool.connection() as conn:

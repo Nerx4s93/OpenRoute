@@ -25,7 +25,8 @@ Backend админки OpenRoute (control plane). Отдаёт **только JS
 | GET | `/api/admin/stats` (`days` / `period`) | токены по прокси и UTC-дням: 1..365 дней (по умолчанию 30) или окно `period` (сессия, no-store) |
 | GET | `/api/admin/keys?period=` | ключи + статистика по `key_id` |
 | GET | `/api/admin/keys/events?period=` | SSE с JSON-снапшотами ключей |
-| POST | `/api/admin/keys/add` | добавить ключ (CSRF) |
+| POST | `/api/admin/keys/add` | создать ключ; секрет генерируется и возвращается один раз (CSRF) |
+| POST | `/api/admin/keys/rotate` | перевыпустить секрет существующего ключа (CSRF) |
 | POST | `/api/admin/keys/set` | включить/отозвать ключ (CSRF) |
 | POST | `/api/admin/keys/delete` | удалить ключ (CSRF) |
 
@@ -49,7 +50,9 @@ N−1 дней, начиная с 00:00. Старые `day`, `week`, `month` с�
   серии выровнены по `dates`, только masked `host:port`.
 - Ключи: `{server_time, keys[], stats[]}`. `keys` — активные записи
   (`key_hash`, `key_id`, лимиты, модели), `stats` — usage из журнала запросов,
-  включая `state: "deleted"` для удалённых ключей.
+  включая `state: "deleted"` для удалённых ключей. Ответы `add`/`rotate`
+  дополнительно содержат `key` — сгенерированный `openroute-...` секрет; он
+  показывается один раз и в снапшоты/БД не попадает.
 - Ошибки — `{"detail": "..."}`; ошибки internal API шлюза разворачиваются из
   OpenAI-конверта в понятный `detail`.
 - SSE отправляет `data: <json-снапшот>` и heartbeat-комментарии; при обрыве

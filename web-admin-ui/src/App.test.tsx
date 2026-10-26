@@ -443,7 +443,8 @@ describe("App", () => {
       await screen.findByRole("heading", { name: "Клиентские ключи", level: 1 }),
     ).toBeInTheDocument();
     expect((await screen.findAllByText("default")).length).toBeGreaterThan(0);
-    expect(screen.getByLabelText("Ключ доступа")).toBeInTheDocument();
+    expect(screen.queryByLabelText("Ключ доступа")).not.toBeInTheDocument();
+    expect(screen.getByLabelText("Key ID")).toBeInTheDocument();
     expect(
       screen.queryByRole("columnheader", { name: "Имя" }),
     ).not.toBeInTheDocument();
@@ -452,6 +453,104 @@ describe("App", () => {
       screen.queryByRole("columnheader", { name: "Admin" }),
     ).not.toBeInTheDocument();
     expect(screen.queryByLabelText("Администратор")).not.toBeInTheDocument();
+  });
+
+  it("creates a key and shows the generated secret once", async () => {
+    const generated = `openroute-${"a".repeat(48)}`;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/admin/session")) {
+        return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
+      }
+      if (url.includes("/api/admin/keys/add")) {
+        return json({
+          ok: true,
+          message: "Ключ k1 добавлен",
+          key: generated,
+          key_id: "k1",
+        });
+      }
+      if (url.includes("/api/admin/keys")) return json(keys);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderApp("/admin/ui/keys");
+    await screen.findByRole("heading", { name: "Клиентские ключи", level: 1 });
+    await user.click(screen.getByRole("button", { name: /Создать ключ/ }));
+
+    const dialog = await screen.findByRole("dialog", { name: "Ключ создан" });
+    expect(within(dialog).getByLabelText("Ключ доступа")).toHaveValue(generated);
+    expect(within(dialog).getByText("k1")).toBeInTheDocument();
+
+    const addCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/api/admin/keys/add"),
+    );
+    const payload = JSON.parse(String((addCall?.[1] as RequestInit).body));
+    expect(payload).not.toHaveProperty("key");
+    expect(payload).toMatchObject({ key_id: "", rpm: null, tpm: null, models: [] });
+
+    await user.click(within(dialog).getByRole("button", { name: "Готово" }));
+    await waitFor(() => {
+      expect(screen.queryByRole("dialog", { name: "Ключ создан" })).not.toBeInTheDocument();
+    });
+    expect(screen.queryByLabelText("Ключ доступа")).not.toBeInTheDocument();
+  });
+
+  it("reissues a key and shows the new secret once", async () => {
+    const generated = `openroute-${"b".repeat(48)}`;
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      const url = String(input);
+      if (url.includes("/api/admin/session")) {
+        return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
+      }
+      if (url.includes("/api/admin/keys/rotate")) {
+        return json({
+          ok: true,
+          message: "Ключ перевыпущен",
+          key: generated,
+          key_id: "default",
+        });
+      }
+      if (url.includes("/api/admin/keys")) return json(keys);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderApp("/admin/ui/keys");
+    await screen.findByRole("heading", { name: "Клиентские ключи", level: 1 });
+    await user.click(
+      await screen.findByRole("button", { name: "Перевыпустить" }),
+    );
+
+    const confirm = await screen.findByRole("dialog", {
+      name: /Перевыпустить ключ default/,
+    });
+    expect(
+      within(confirm).getByText(/Старый ключ сразу перестанет работать/),
+    ).toBeInTheDocument();
+    await user.click(
+      within(confirm).getByRole("button", { name: "Перевыпустить" }),
+    );
+
+    const dialog = await screen.findByRole("dialog", { name: "Ключ перевыпущен" });
+    expect(within(dialog).getByLabelText("Ключ доступа")).toHaveValue(generated);
+
+    const rotateCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).includes("/api/admin/keys/rotate"),
+    );
+    const payload = JSON.parse(String((rotateCall?.[1] as RequestInit).body));
+    expect(payload).toEqual({ key_hash: "hash-1" });
+
+    await user.click(within(dialog).getByRole("button", { name: "Готово" }));
+    await waitFor(() => {
+      expect(
+        screen.queryByRole("dialog", { name: "Ключ перевыпущен" }),
+      ).not.toBeInTheDocument();
+    });
+    expect(screen.queryByLabelText("Ключ доступа")).not.toBeInTheDocument();
   });
 
   it("redirects the legacy stats route to the statistics page", async () => {

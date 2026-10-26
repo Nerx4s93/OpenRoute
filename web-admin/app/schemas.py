@@ -88,22 +88,11 @@ class ProxyBuyBody(BaseModel):
 class KeyAddBody(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
-    key: str
     key_id: str = ""
     rpm: int | None = None
     tpm: int | None = None
     # The UI sends a list; a comma-separated string is accepted for curl/tests.
     models: list[str] | str | None = None
-
-    @field_validator("key")
-    @classmethod
-    def _key_valid(cls, value: str) -> str:
-        value = value.strip()
-        if not value:
-            raise ValueError("Ключ не указан")
-        if len(value) > 200:
-            raise ValueError("Ключ слишком длинный (макс. 200 символов)")
-        return value
 
     @field_validator("rpm", "tpm", mode="before")
     @classmethod
@@ -119,6 +108,20 @@ class KeyAddBody(BaseModel):
         if number < 0:
             raise ValueError(f"{info.field_name.upper()} не может быть отрицательным")
         return number
+
+
+class KeyRotateBody(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    key_hash: str
+
+    @field_validator("key_hash")
+    @classmethod
+    def _hash_required(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Не указан ключ")
+        return value
 
 
 class KeySetBody(BaseModel):

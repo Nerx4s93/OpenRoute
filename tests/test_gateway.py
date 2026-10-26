@@ -19,6 +19,7 @@ import pytest
 
 import gateway.main as main
 import gateway.proxies as prox
+from gateway.keys import hash_key
 from gateway.reqlog import LogEntry
 from starlette.requests import Request
 
@@ -1693,26 +1694,81 @@ def test_internal_keys_add_set_delete_and_persist(make_gateway):
     h = {"X-Internal-Token": "test-internal-token"}
 
     r = gw.internal.post("/internal/keys/add",
-                         json={"key": "sk-new", "key_id": "n1", "rpm": 5},
+                         json={"key_id": "n1", "rpm": 5},
                          headers=h)
     assert r.status_code == 200 and r.json()["ok"] is True
+    issued = r.json()
+    secret = issued["key"]
+    assert issued["key_id"] == "n1"
+    assert secret.startswith("openroute-") and len(secret) == 58
+
     # the new key works immediately
     gw.script_upstream(lambda req: sse_response())
+    headers = {"Authorization": f"Bearer {secret}"}
     assert gw.client.post("/v1/chat/completions", json=body(),
-                          headers={"Authorization": "Bearer sk-new"}).status_code == 200
+                          headers=headers).status_code == 200
 
     data = gw.internal.get("/internal/keys-data", headers=h).json()
     row = next(k for k in data["keys"] if k["key_id"] == "n1")
     assert "admin" not in row and "name" not in row and row["rpm"] == 5
+    assert row["key_hash"] == hash_key(secret)
+    assert secret not in json.dumps(data)
 
     r2 = gw.internal.post("/internal/keys/set",
                           json={"key_hash": row["key_hash"], "enabled": False}, headers=h)
     assert r2.status_code == 200
     assert gw.client.post("/v1/chat/completions", json=body(),
-                          headers={"Authorization": "Bearer sk-new"}).status_code == 401
+                          headers=headers).status_code == 401
 
     r3 = gw.internal.post("/internal/keys/delete", json={"key_hash": row["key_hash"]}, headers=h)
     assert r3.status_code == 200
+
+
+def test_internal_keys_rotate_invalidates_old_and_preserves_config(make_gateway):
+    gw = make_gateway(keys=[{
+        "key": "openroute-old-secret",
+        "key_id": "r1",
+        "rpm": 7,
+        "tpm": 900,
+        "models": [FREE_MODEL],
+    }])
+    h = {"X-Internal-Token": "test-internal-token"}
+    old_headers = {"Authorization": "Bearer openroute-old-secret"}
+
+    gw.script_upstream(lambda req: sse_response())
+    assert gw.client.post("/v1/chat/completions", json=body(),
+                          headers=old_headers).status_code == 200
+
+    before = gw.internal.get("/internal/keys-data", headers=h).json()["keys"][0]
+    r = gw.internal.post("/internal/keys/rotate",
+                         json={"key_hash": before["key_hash"]}, headers=h)
+    assert r.status_code == 200, r.text
+    rotated = r.json()
+    secret = rotated["key"]
+    assert rotated["key_id"] == "r1"
+    assert secret.startswith("openroute-") and secret != "openroute-old-secret"
+
+    # old secret is dead immediately; the new one works with the same config
+    assert gw.client.post("/v1/chat/completions", json=body(),
+                          headers=old_headers).status_code == 401
+    new_headers = {"Authorization": f"Bearer {secret}"}
+    assert gw.client.post("/v1/chat/completions", json=body(),
+                          headers=new_headers).status_code == 200
+
+    after = gw.internal.get("/internal/keys-data", headers=h).json()["keys"][0]
+    assert after["key_hash"] == hash_key(secret)
+    assert after["key_hash"] != before["key_hash"]
+    assert after["key_id"] == "r1"
+    assert after["rpm"] == 7 and after["tpm"] == 900
+    assert after["models"] == [FREE_MODEL]
+    assert after["enabled"] is True
+    assert secret not in json.dumps(after)
+
+    missing = gw.internal.post("/internal/keys/rotate",
+                               json={"key_hash": "no-such-hash"}, headers=h)
+    assert missing.status_code == 404
+    empty = gw.internal.post("/internal/keys/rotate", json={}, headers=h)
+    assert empty.status_code == 400
 
 
 def test_internal_bad_json_body_400(make_gateway):

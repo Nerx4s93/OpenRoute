@@ -2,25 +2,30 @@ import { useState, type FormEvent } from "react";
 import { PERIOD_SECTIONS } from "../api/types";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyRow, ErrorBanner, LoadingRows } from "../components/Feedback";
+import { KeySecretDialog } from "../components/KeySecretDialog";
 import { PeriodTabs } from "../components/PeriodTabs";
 import { Section } from "../components/Section";
 import { StatusBadge } from "../components/StatusBadge";
-import { useAddKey, useDeleteKey, useSetKey } from "../hooks/useAdminMutations";
+import { useAddKey, useDeleteKey, useRotateKey, useSetKey } from "../hooks/useAdminMutations";
 import { useKeysLive } from "../hooks/useLiveSnapshot";
 import { usePeriod } from "../hooks/usePeriod";
 import { formatLimit, formatModels, formatNumber } from "../lib/format";
 import { keyStateLabel } from "../lib/proxyState";
 
 interface KeyForm {
-  key: string;
   key_id: string;
   rpm: string;
   tpm: string;
   models: string;
 }
 
+interface IssuedKey {
+  title: string;
+  keyId: string;
+  secret: string;
+}
+
 const EMPTY_FORM: KeyForm = {
-  key: "",
   key_id: "",
   rpm: "",
   tpm: "",
@@ -40,11 +45,14 @@ export function KeysPage() {
   const [period, setPeriod] = usePeriod();
   const query = useKeysLive(period);
   const addKey = useAddKey();
+  const rotateKey = useRotateKey();
   const setKey = useSetKey();
   const deleteKey = useDeleteKey();
   const [form, setForm] = useState<KeyForm>(EMPTY_FORM);
   const [formError, setFormError] = useState("");
   const [pendingDelete, setPendingDelete] = useState<{ hash: string; keyId: string } | null>(null);
+  const [pendingRotate, setPendingRotate] = useState<{ hash: string; keyId: string } | null>(null);
+  const [issuedKey, setIssuedKey] = useState<IssuedKey | null>(null);
   const snapshot = query.data;
 
   const update = <K extends keyof KeyForm>(field: K, value: KeyForm[K]) => {
@@ -56,15 +64,6 @@ export function KeysPage() {
     event.preventDefault();
     if (addKey.isPending) return;
 
-    const key = form.key.trim();
-    if (!key) {
-      setFormError("Ключ не указан");
-      return;
-    }
-    if (key.length > 200) {
-      setFormError("Ключ слишком длинный (макс. 200 символов)");
-      return;
-    }
     const rpm = parseLimit(form.rpm, "RPM");
     if (rpm.error) {
       setFormError(rpm.error);
@@ -79,7 +78,6 @@ export function KeysPage() {
     setFormError("");
     addKey.mutate(
       {
-        key,
         key_id: form.key_id.trim(),
         rpm: rpm.value,
         tpm: tpm.value,
@@ -89,7 +87,15 @@ export function KeysPage() {
           .filter(Boolean),
       },
       {
-        onSuccess: () => setForm(EMPTY_FORM),
+        onSuccess: (data) => {
+          setForm(EMPTY_FORM);
+          setIssuedKey({
+            title: "Ключ создан",
+            keyId: data.key_id,
+            secret: data.key,
+          });
+          addKey.reset(); // keep the one-time secret out of React Query's cache
+        },
       },
     );
   };
@@ -106,20 +112,7 @@ export function KeysPage() {
       <Section id="add-title" icon="＋" title="Добавить клиентский ключ" note="Новый доступ">
         <div className="form-content">
           <form className="add" onSubmit={submit}>
-            <div className="field wide">
-              <label htmlFor="key">Ключ доступа</label>
-              <input
-                id="key"
-                name="key"
-                type="text"
-                placeholder="sk-..."
-                autoComplete="off"
-                required
-                value={form.key}
-                onChange={(event) => update("key", event.target.value)}
-              />
-            </div>
-            <div className="field key-id">
+            <div className="field">
               <label htmlFor="key_id">Key ID</label>
               <input
                 id="key_id"
@@ -169,9 +162,13 @@ export function KeysPage() {
                 onChange={(event) => update("models", event.target.value)}
               />
             </div>
-            <div className="form-footer key-form-footer">
+            <div className="form-footer">
+              <span className="form-hint">
+                Ключ доступа с префиксом openroute- создастся автоматически
+                и будет показан один раз.
+              </span>
               <button type="submit" disabled={addKey.isPending}>
-                {addKey.isPending ? "Добавление…" : "＋   Добавить ключ"}
+                {addKey.isPending ? "Создание…" : "＋   Создать ключ"}
               </button>
             </div>
           </form>
@@ -207,6 +204,8 @@ export function KeysPage() {
                   const state = keyStateLabel(key.enabled ? "active" : "revoked");
                   const pending =
                     setKey.isPending && setKey.variables?.keyHash === key.key_hash;
+                  const rotating =
+                    rotateKey.isPending && rotateKey.variables === key.key_hash;
                   return (
                     <tr key={key.key_hash} className={key.enabled ? undefined : "dead"}>
                       <td className="mono">{key.key_id}</td>
@@ -215,6 +214,14 @@ export function KeysPage() {
                       <td className="mono">{formatModels(key.models)}</td>
                       <td><StatusBadge label={state.label} tone={state.tone} /></td>
                       <td className="actions">
+                        <button
+                          type="button"
+                          className="acc"
+                          disabled={rotating}
+                          onClick={() => setPendingRotate({ hash: key.key_hash, keyId: key.key_id })}
+                        >
+                          {rotating ? "…" : "Перевыпустить"}
+                        </button>
                         <button
                           type="button"
                           className={key.enabled ? undefined : "acc"}
@@ -287,6 +294,35 @@ export function KeysPage() {
       </Section>
 
       <ConfirmDialog
+        open={Boolean(pendingRotate)}
+        title={`Перевыпустить ключ ${pendingRotate?.keyId ?? ""}?`}
+        confirmLabel="Перевыпустить"
+        pendingLabel="Перевыпуск…"
+        tone="accent"
+        pending={rotateKey.isPending}
+        onCancel={() => setPendingRotate(null)}
+        onConfirm={() => {
+          if (!pendingRotate) return;
+          rotateKey.mutate(pendingRotate.hash, {
+            onSuccess: (data) => {
+              setPendingRotate(null);
+              setIssuedKey({
+                title: "Ключ перевыпущен",
+                keyId: data.key_id,
+                secret: data.key,
+              });
+              rotateKey.reset(); // keep the one-time secret out of React Query's cache
+            },
+          });
+        }}
+      >
+        <p>
+          Старый ключ сразу перестанет работать. Лимиты, модели и Key ID
+          сохранятся, а новый ключ будет показан только один раз.
+        </p>
+      </ConfirmDialog>
+
+      <ConfirmDialog
         open={Boolean(pendingDelete)}
         title={`Удалить ключ ${pendingDelete?.keyId ?? ""}?`}
         pending={deleteKey.isPending}
@@ -300,6 +336,14 @@ export function KeysPage() {
       >
         <p>Ключ будет удалён без возможности восстановления. Статистика по нему останется в журнале.</p>
       </ConfirmDialog>
+
+      <KeySecretDialog
+        open={Boolean(issuedKey)}
+        title={issuedKey?.title ?? ""}
+        keyId={issuedKey?.keyId ?? ""}
+        secret={issuedKey?.secret ?? ""}
+        onClose={() => setIssuedKey(null)}
+      />
     </>
   );
 }

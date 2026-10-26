@@ -6,7 +6,7 @@ gateway client is pointed at an in-process fake gateway (``FastAPI`` +
 
 Covered: login (password only), server sessions in an HttpOnly cookie, CSRF on
 mutations, brute-force lock-out, session expiry, logout, proxy enable/disable,
-proxy credentials not leaking to the browser, client-key add/revoke/delete,
+proxy credentials not leaking to the browser, client-key add/rotate/revoke/delete,
 per-key stats from the request log, period forwarding, and the JSON SSE stream.
 """
 
@@ -16,6 +16,7 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import secrets
 import sys
 from datetime import date, timedelta
 from pathlib import Path
@@ -319,11 +320,6 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
     async def keys_add(req: Request) -> dict:
         require(req)
         data = await req.json()
-        plaintext = str(data.get("key", "")).strip()
-        if not plaintext:
-            return {"ok": False, "message": "No key given"}
-        if len(plaintext) > 200:
-            return {"ok": False, "message": "Key too long (max 200 chars)"}
         rpm, err = _limit(data.get("rpm"), "rpm")
         if err:
             return {"ok": False, "message": err}
@@ -344,14 +340,38 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
             while f"k{i}" in existing:
                 i += 1
             key_id = f"k{i}"
+        plaintext = "openroute-" + secrets.token_hex(24)
         kh = hash_key(plaintext)
-        if kh in state.keys:
-            return {"ok": False, "message": "Such a key already exists"}
         state.keys[kh] = {
             "key_hash": kh, "key_id": key_id,
             "rpm": rpm, "tpm": tpm, "models": models, "enabled": True,
         }
-        return {"ok": True, "message": f"Key {key_id} added"}
+        return {
+            "ok": True,
+            "message": f"Key {key_id} added",
+            "key": plaintext,
+            "key_id": key_id,
+        }
+
+    @app.post("/internal/keys/rotate")
+    async def keys_rotate(req: Request) -> dict:
+        require(req)
+        data = await req.json()
+        old_hash = str(data.get("key_hash", ""))
+        row = state.keys.get(old_hash)
+        if row is None:
+            raise HTTPException(404, "Key not found")
+        plaintext = "openroute-" + secrets.token_hex(24)
+        new_hash = hash_key(plaintext)
+        del state.keys[old_hash]
+        row = dict(row, key_hash=new_hash)
+        state.keys[new_hash] = row
+        return {
+            "ok": True,
+            "message": "Key rotated",
+            "key": plaintext,
+            "key_id": row["key_id"],
+        }
 
     @app.post("/internal/keys/set")
     async def keys_set(req: Request) -> dict:
@@ -571,6 +591,7 @@ def test_protected_endpoints_require_session(panel):
         ("get", "/api/admin/proxies/price"),
         ("post", "/api/admin/proxies/buy"),
         ("post", "/api/admin/keys/add"),
+        ("post", "/api/admin/keys/rotate"),
         ("post", "/api/admin/logout"),
     ):
         response = getattr(panel.client, method)(path)
@@ -965,10 +986,8 @@ def test_keys_snapshot_and_stats(panel):
 def test_add_key_validation(panel):
     csrf = panel.login_ok()
     for payload, message in (
-        ({"key": ""}, "Ключ не указан"),
-        ({"key": "x" * 201}, "Ключ слишком длинный"),
-        ({"key": "sk-ok", "rpm": "abc"}, "Некорректный RPM"),
-        ({"key": "sk-ok", "tpm": -5}, "TPM не может быть отрицательным"),
+        ({"rpm": "abc"}, "Некорректный RPM"),
+        ({"tpm": -5}, "TPM не может быть отрицательным"),
     ):
         response = panel.client.post(
             "/api/admin/keys/add", headers=auth_headers(csrf), json=payload,
@@ -984,24 +1003,20 @@ def test_add_toggle_delete_key(panel):
         "/api/admin/keys/add",
         headers=auth_headers(csrf),
         json={
-            "key": "sk-new-client", "rpm": 30, "tpm": 500,
+            "rpm": 30, "tpm": 500,
             "models": ["deepseek-v4.1-flash-free", "gpt-oss"],
         },
     )
     assert response.status_code == 200
-    assert response.json()["message"] == "Ключ k1 добавлен"
+    body = response.json()
+    assert body["message"] == "Ключ k1 добавлен"
+    assert body["key_id"] == "k1"
+    assert body["key"].startswith("openroute-")
     k1 = next(v for v in panel.state.keys.values() if v["key_id"] == "k1")
-    assert "admin" not in k1 and "name" not in k1
+    assert "admin" not in k1 and "name" not in k1 and "key" not in k1
+    assert k1["key_hash"] == hash_key(body["key"])
     assert k1["rpm"] == 30 and k1["tpm"] == 500
     assert k1["models"] == ["deepseek-v4.1-flash-free", "gpt-oss"]
-
-    # duplicate plaintext rejected
-    response = panel.client.post(
-        "/api/admin/keys/add", headers=auth_headers(csrf), json={"key": "sk-new-client"},
-    )
-    assert response.status_code == 400
-    assert response.json()["detail"] == "Такой ключ уже есть"
-    assert len(panel.state.keys) == 2
 
     # revoke / re-enable
     response = panel.client.post(
@@ -1016,6 +1031,9 @@ def test_add_toggle_delete_key(panel):
         json={"key_hash": k1["key_hash"], "enabled": True},
     )
     assert panel.state.keys[k1["key_hash"]]["enabled"] is True
+
+    snapshot = panel.client.get("/api/admin/keys").json()
+    assert body["key"] not in json.dumps(snapshot)
 
     # delete
     response = panel.client.post(
@@ -1033,10 +1051,51 @@ def test_add_toggle_delete_key(panel):
     assert response.json()["detail"] == "Ключ не найден"
 
 
+def test_rotate_key_issues_new_secret_and_preserves_config(panel):
+    csrf = panel.login_ok()
+    created = panel.client.post(
+        "/api/admin/keys/add",
+        headers=auth_headers(csrf),
+        json={"key_id": "rot", "rpm": 12, "tpm": 700, "models": ["gpt-oss"]},
+    ).json()
+    old_secret = created["key"]
+    old_row = next(v for v in panel.state.keys.values() if v["key_id"] == "rot")
+    old_hash = old_row["key_hash"]
+
+    response = panel.client.post(
+        "/api/admin/keys/rotate",
+        headers=auth_headers(csrf),
+        json={"key_hash": old_hash},
+    )
+    assert response.status_code == 200, response.text
+    rotated = response.json()
+    assert rotated["message"] == "Ключ перевыпущен"
+    assert rotated["key_id"] == "rot"
+    assert rotated["key"].startswith("openroute-")
+    assert rotated["key"] != old_secret
+
+    assert old_hash not in panel.state.keys
+    new_row = panel.state.keys[hash_key(rotated["key"])]
+    assert new_row["key_id"] == "rot"
+    assert new_row["rpm"] == 12 and new_row["tpm"] == 700
+    assert new_row["models"] == ["gpt-oss"]
+    assert new_row["enabled"] is True
+    snapshot = panel.client.get("/api/admin/keys").json()
+    assert rotated["key"] not in json.dumps(snapshot)
+
+    response = panel.client.post(
+        "/api/admin/keys/rotate",
+        headers=auth_headers(csrf),
+        json={"key_hash": "no-such-hash"},
+    )
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Ключ не найден"
+
+
 def test_key_mutations_require_csrf(panel):
     panel.login_ok()
     response = panel.client.post(
-        "/api/admin/keys/add", json={"key": "sk-forged"},
+        "/api/admin/keys/add", json={"rpm": 10},
     )
     assert response.status_code == 403
     assert len(panel.state.keys) == 1

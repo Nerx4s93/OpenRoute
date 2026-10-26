@@ -4,8 +4,9 @@ Near-verbatim port of ``NVRoute/app/keys.py`` — the client-facing contract is
 unchanged; only the provider string in error messages changes (``OpenRoute``).
 
 Keys live in PostgreSQL (table ``keys``, module ``keydb.py``) and are managed
-only via the web admin UI. In memory only sha256 hashes + config (``KeyInfo``)
-are held; plaintext is never stored or logged. Comparisons are constant-time
+only via the web admin UI. The service generates each secret with
+``generate_key()``; only its sha256 hash + config (``KeyInfo``) are held in
+memory, and plaintext is never persisted or logged. Comparisons are constant-time
 (``hmac.compare_digest``) over sha256 digests. RPM/TPM counters are in-memory
 sliding 60s windows (single event loop / single worker): with ``--workers N``
 or on restart, counters reset and are not shared.
@@ -23,11 +24,18 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import secrets
 import time
 from collections import deque
 from dataclasses import dataclass
 
 _WINDOW = 60.0  # RPM/TPM window, seconds
+KEY_PREFIX = "openroute-"
+
+
+def generate_key() -> str:
+    """Generate a new service-owned client key (plaintext, returned once)."""
+    return f"{KEY_PREFIX}{secrets.token_hex(24)}"
 
 
 def hash_key(key: str) -> str:
@@ -121,6 +129,21 @@ class KeyStore:
             return False
         info.enabled = enabled
         return True
+
+    def rotate(self, old_hash: str, new_hash: str) -> KeyInfo | None:
+        """Replace a key's hash in place; old hash stops authenticating.
+
+        Config and ``key_id`` are preserved, while that key's RPM/TPM windows
+        are reset: the reissued credential starts with a clean budget. Returns
+        the existing ``KeyInfo`` or ``None`` when ``old_hash`` is unknown.
+        """
+        info = self._by_hash.pop(old_hash, None)
+        if info is None:
+            return None
+        self._by_hash[new_hash] = info
+        self._rpm.pop(info.key_id, None)
+        self._tpm.pop(info.key_id, None)
+        return info
 
     # --- auth ---
 

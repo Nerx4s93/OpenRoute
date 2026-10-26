@@ -133,6 +133,12 @@ export interface ApiMessage {
   message: string;
 }
 
+/** A generated secret is returned only by the add/rotate mutation. */
+export interface KeyIssued extends ApiMessage {
+  key: string;
+  key_id: string;
+}
+
 export interface Px6Account {
   user_id: string;
   balance: number;
@@ -177,7 +183,6 @@ export interface ProxyBuyResult extends ApiMessage {
 }
 
 export interface KeyAddPayload {
-  key: string;
   key_id?: string;
   rpm?: number | null;
   tpm?: number | null;

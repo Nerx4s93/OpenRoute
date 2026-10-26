@@ -225,7 +225,6 @@ button.accent:hover { background: #71cdaa28; }
 form.add { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap: 15px; }
 .field { grid-column: span 2; display: grid; gap: 7px; min-width: 0; }
 .field.wide { grid-column: span 3; }
-.field.key-id { grid-column: span 3; }
 .field.full { grid-column: 1 / -1; }
 .field.buy-comment { grid-column: span 4; }
 .field label { color: #a9bac3; font-size: 11px; font-weight: 700; }
@@ -242,7 +241,6 @@ form.add select:disabled { opacity: .6; }
 form.add select option { background: #0d1720; color: var(--text); }
 .form-footer { grid-column: 1 / -1; display: flex; align-items: center;
   justify-content: space-between; gap: 16px; padding-top: 5px; }
-.key-form-footer { justify-content: flex-end; }
 form.add button, .login-box button[type=submit] { padding: 10px 18px;
   background: var(--mint); border-color: var(--mint); color: #092322; font-size: 12px; font-weight: 800; }
 form.add button:hover, .login-box button[type=submit]:hover {
@@ -286,6 +284,15 @@ form.add button:hover, .login-box button[type=submit]:hover {
 .modal h2 { font-size: 16px; }
 .modal-body { margin: 13px 0 20px; color: #aebcc6; font-size: 13px; }
 .modal-actions { display: flex; justify-content: flex-end; gap: 9px; }
+.key-secret-modal { width: min(570px, 100%); }
+.secret-lead { margin: 0 0 10px; line-height: 1.55; }
+.secret-meta { margin: 0 0 10px; color: #8394a1; font-size: 11px; }
+.secret-row { display: flex; gap: 8px; align-items: stretch; margin: 12px 0; }
+.secret-row input { flex: 1; min-width: 0; padding: 10px 12px;
+  border: 1px solid #344756; border-radius: 9px; background: #0d1720;
+  color: var(--text); outline: none; font-size: 12px; }
+.secret-row input:focus { border-color: #85dfcb; box-shadow: 0 0 0 3px #85dfcb1c; }
+.secret-warning { margin: 0; color: #f5c77a; line-height: 1.55; }
 
 /* --- full page states ---------------------------------------------------- */
 .full-page { min-height: 100vh; display: grid; place-items: center; padding: 28px; }
@@ -382,7 +389,7 @@ form.add button:hover, .login-box button[type=submit]:hover {
   .table-scroll::before { content: "Прокрутите таблицу →"; display: block; position: sticky;
     left: 0; width: max-content; padding: 10px 16px; color: #7895a3; font-size: 10px; }
   .table-scroll table { min-width: 760px; }
-  .field, .field.wide, .field.key-id, .field.full, .field.buy-comment { grid-column: span 6; }
+  .field, .field.wide, .field.full, .field.buy-comment { grid-column: span 6; }
   .form-content { padding: 16px; }
   .form-footer { align-items: stretch; flex-direction: column; }
   form.add button { width: 100%; }

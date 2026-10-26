@@ -50,10 +50,11 @@ def _localize(message: str) -> str:
         "Key enabled": "Ключ включён",
         "Key revoked (401)": "Ключ отозван",
         "Key deleted": "Ключ удалён",
+        "Key rotated": "Ключ перевыпущен",
         "Key not found": "Ключ не найден",
         "Such a key already exists": "Такой ключ уже есть",
         "No key given": "Ключ не указан",
-        "Key too long (max 200 chars)": "Ключ слишком длинный (макс. 200 символов)",
+        "Could not generate a unique key": "Не удалось сгенерировать уникальный ключ",
         # --- px6 account / purchase ---
         "Unknown px6.net error": "Неизвестная ошибка px6.net",
         "Invalid px6.net API key": "Неверный API-ключ px6.net",
@@ -597,18 +598,40 @@ class GatewayClient:
         else:
             models = None
         return {
-            "key": body.key,
             "key_id": body.key_id.strip(),
             "rpm": body.rpm,
             "tpm": body.tpm,
             "models": models,
         }
 
+    @staticmethod
+    def _issued_key(data: dict) -> str:
+        key = str(data.get("key") or "")
+        if not key:
+            raise HTTPException(502, "Шлюз не вернул ключ доступа")
+        return key
+
     async def add_key(self, body: KeyAddBody) -> dict:
         data = await self._post("/internal/keys/add", self._key_payload(body))
         if not data.get("ok", True):
             raise HTTPException(400, _localize(str(data.get("message") or "Не удалось добавить ключ")))
-        return {"ok": True, "message": _localize(str(data.get("message") or "Ключ добавлен"))}
+        return {
+            "ok": True,
+            "message": _localize(str(data.get("message") or "Ключ добавлен")),
+            "key": self._issued_key(data),
+            "key_id": str(data.get("key_id") or body.key_id.strip()),
+        }
+
+    async def rotate_key(self, key_hash: str) -> dict:
+        data = await self._post("/internal/keys/rotate", {"key_hash": key_hash})
+        if not data.get("ok", True):
+            raise HTTPException(400, _localize(str(data.get("message") or "Не удалось перевыпустить ключ")))
+        return {
+            "ok": True,
+            "message": _localize(str(data.get("message") or "Ключ перевыпущен")),
+            "key": self._issued_key(data),
+            "key_id": str(data.get("key_id") or ""),
+        }
 
     async def set_key(self, key_hash: str, enabled: bool) -> dict:
         data = await self._post("/internal/keys/set", {"key_hash": key_hash, "enabled": enabled})

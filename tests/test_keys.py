@@ -5,7 +5,14 @@ import pytest
 
 import gateway.keys as keys_mod
 from gateway.keydb import KeyDB
-from gateway.keys import AuthError, KeyInfo, KeyStore, RateLimitError, hash_key
+from gateway.keys import (
+    AuthError,
+    KeyInfo,
+    KeyStore,
+    RateLimitError,
+    generate_key,
+    hash_key,
+)
 
 
 def row(e):
@@ -24,6 +31,16 @@ def make_store(entries):
     ks = KeyStore()
     ks.load([row(e) for e in entries])
     return ks
+
+
+def test_generate_key_prefix_and_entropy():
+    first = generate_key()
+    second = generate_key()
+    assert first.startswith("openroute-")
+    assert len(first) == len("openroute-") + 48
+    assert set(first.removeprefix("openroute-")) <= set("0123456789abcdef")
+    assert first != second
+    assert hash_key(first) != first
 
 
 # --- auth ---
@@ -268,6 +285,27 @@ def test_set_enabled_revokes_and_restores():
     assert ks.set_enabled(hash_key("no-such"), False) is False
 
 
+def test_rotate_replaces_hash_and_resets_windows():
+    ks = make_store([{"key": "sk-old", "key_id": "r1", "tpm": 100}])
+    old = ks.authenticate("Bearer sk-old")
+    ks.count_tokens(old, 80)
+
+    old_hash = hash_key("sk-old")
+    new_hash = hash_key("sk-new")
+    info = ks.rotate(old_hash, new_hash)
+    assert info is not None and info.key_id == "r1"
+    assert ks.rotate(old_hash, hash_key("sk-never")) is None
+    with pytest.raises(AuthError):
+        ks.authenticate("Bearer sk-old")
+
+    new = ks.authenticate("Bearer sk-new")
+    assert new.key_id == "r1" and new.tpm == 100
+    ks.count_tokens(new, 80)
+    ks.check_tpm(new)  # the old key's 80-token window was reset
+    assert hash_key("sk-old") not in ks._by_hash
+    assert new_hash in ks._by_hash
+
+
 # --- KeyDB (PostgreSQL key store) ---
 
 
@@ -288,8 +326,17 @@ def test_keydb_crud(pg_dsn):
     assert db.set_enabled(h1, False) is True
     assert db.all()[0]["enabled"] is False
 
-    assert db.remove(h1) is True
+    rotated = hash_key("sk-one-rotated")
+    assert db.rotate(h1, rotated) == "k1"
+    assert db.rotate(h1, hash_key("sk-one-again")) is None
+    r1 = db.all()[0]
+    assert r1["key_hash"] == rotated
+    assert r1["key_id"] == "k1" and r1["enabled"] is False
+    assert r1["rpm"] == 60 and r1["tpm"] == 1000
+    assert r1["models"] == ["m1", "m2"]
+
     assert db.remove(h1) is False
+    assert db.remove(rotated) is True
     assert [r["key_id"] for r in db.all()] == ["k2"]
     db.close()
     db.close()  # idempotent
