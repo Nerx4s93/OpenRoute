@@ -46,8 +46,9 @@ services:
       web-admin-ui:
         condition: service_healthy
 
-  # --- PostgreSQL: хранилище шлюза (лог запросов + proxies/keys).
+  # --- PostgreSQL: база storage-service (proxies/keys/affinity/personas/лог).
   # В приватной сети openroute-net; порт наружу НЕ публикуется (как у px6).
+  # Gateway к базе не подключается: единственный клиент — storage-service.
   # Данные — в именованном томе pgdata (переживает пересоздание контейнера).
   postgres:
     image: postgres:17-alpine
@@ -69,6 +70,51 @@ services:
       start_period: 5s
     networks:
       - net
+
+  # --- storage-service: единственный компонент, который ходит в PostgreSQL.
+  # Домены (proxies/keys/affinity/personas/лог запросов) отдаются gateway по
+  # HTTP с X-Storage-Token. Контейнер openroute-storage = DNS-имя в сети
+  # (STORAGE_SERVICE_URL=http://openroute-storage:8000). Хост-порт НЕ
+  # публикуется, edge его не маршрутизирует: наружу сервис недоступен.
+  storage-service:
+    build: ./storage-service
+    image: openroute-storage
+    container_name: openroute-storage
+    env_file:
+      - ./storage-service/.env
+    environment:
+      # Единственное место в compose, где фигурирует DSN: внутри сети хост
+      # postgres вместо localhost из storage-service/.env (тот — для запуска
+      # без Docker). Gateway этот DSN не получает никогда.
+      POSTGRES_DSN: postgresql://openroute:openroute@postgres:5432/openroute
+    restart: unless-stopped
+    # Стримов нет; 30с хватает, чтобы закрыть пул соединений.
+    stop_grace_period: 30s
+    init: true
+    mem_limit: 192m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      # Запас на старт БД и первое применение схемы (DB_STARTUP_TIMEOUT_SECONDS=15).
+      start_period: 20s
+    networks:
+      - net
+    # Стартуем только после готовности postgres: /health делает SELECT 1,
+    # а схема применяется при первом подключении.
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   # --- Redis: хранилище сессий web-admin. В приватной сети openroute-net;
   # порт наружу НЕ публикуется. AOF (everysec) + том: сессии переживают
@@ -106,16 +152,15 @@ services:
   gateway:
     build: .
     image: openroute-gateway
+    # .env даёт только настройки шлюза: DSN PostgreSQL в нём нет и быть не
+    # должно — gateway общается с базой исключительно через storage-service.
     env_file:
       - .env
-    environment:
-      # PostgreSQL — сосед по docker-сети (POSTGRES_DSN из .env предназначен
-      # для локального запуска без Docker, здесь перекрываем хост на postgres).
-      POSTGRES_DSN: postgresql://openroute:openroute@postgres:5432/openroute
     restart: unless-stopped
     # UPSTREAM_TIMEOUT=300: стримы дорабатывают до конца до SIGKILL
-    # (дефолт Docker — всего 10с); in-flight записи лога в PostgreSQL тоже
-    # успевают доехать (pool.close() в lifespan).
+    # (дефолт Docker — всего 10с); in-flight записи лога уходят в
+    # storage-service по HTTP и тоже успевают доехать (bounded drain в
+    # RequestLog.close(), затем закрытие HTTP-клиента).
     stop_grace_period: 320s
     init: true
     mem_limit: 512m
@@ -137,13 +182,15 @@ services:
     networks:
       - net
     # Порядок старта: сначала px6 (шлюз тянет из него список прокси) и
-    # postgres (хранилище лога/прокси/ключей). /health у px6 не ходит в
-    # апстрим, так что condition безопасен; если px6 всё же упал — шлюз
-    # ретраит фетч через PROXY_RETRY_SECONDS.
+    # storage-service (всё хранилище: прокси, ключи, affinity, personas, лог).
+    # Gateway к postgres напрямую не подключён и не должен: DSN знает только
+    # storage-service. /health у px6 не ходит в апстрим, так что condition
+    # безопасен; если px6 всё же упал — шлюз ретраит фетч через
+    # PROXY_RETRY_SECONDS.
     depends_on:
       px6:
         condition: service_healthy
-      postgres:
+      storage-service:
         condition: service_healthy
 
   # --- web-admin: control plane (JSON API /api/admin/* + сессии в Redis).

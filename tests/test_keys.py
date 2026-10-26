@@ -1,10 +1,9 @@
-"""Tests for keys.py + keydb.py: auth, RPM/TPM, model allow-list, hashing;
-KeyDB CRUD/persistence/schema migration; incremental KeyStore mutations."""
+"""Tests for keys.py: auth, RPM/TPM, model allow-list, hashing and incremental
+KeyStore mutations. Persistence is covered by the storage-service suite."""
 
 import pytest
 
 import gateway.keys as keys_mod
-from gateway.keydb import KeyDB
 from gateway.keys import (
     AuthError,
     KeyInfo,
@@ -16,7 +15,7 @@ from gateway.keys import (
 
 
 def row(e):
-    """dict in the keydb.all() shape for entry e (plaintext "key" + fields)."""
+    """dict in the storage-service shape for entry e (plaintext "key" + fields)."""
     return {
         "key_hash": hash_key(e["key"]),
         "key_id": e.get("key_id", "k1"),
@@ -304,111 +303,3 @@ def test_rotate_replaces_hash_and_resets_windows():
     ks.check_tpm(new)  # the old key's 80-token window was reset
     assert hash_key("sk-old") not in ks._by_hash
     assert new_hash in ks._by_hash
-
-
-# --- KeyDB (PostgreSQL key store) ---
-
-
-def test_keydb_crud(pg_dsn):
-    db = KeyDB(pg_dsn)
-    h1 = hash_key("sk-one")
-    assert db.add(h1, "k1", rpm=60, tpm=1000, models=["m1", "m2"]) is True
-    assert db.add(h1, "k1-dup") is False
-    assert db.add(hash_key("sk-two"), "k2") is True
-
-    rows = db.all()
-    assert [r["key_id"] for r in rows] == ["k1", "k2"]
-    r1 = rows[0]
-    assert r1["key_hash"] == h1 and r1["enabled"] is True
-    assert r1["rpm"] == 60 and r1["tpm"] == 1000 and r1["models"] == ["m1", "m2"]
-    assert rows[1]["rpm"] is None and rows[1]["models"] is None
-
-    assert db.set_enabled(h1, False) is True
-    assert db.all()[0]["enabled"] is False
-
-    rotated = hash_key("sk-one-rotated")
-    assert db.rotate(h1, rotated) == "k1"
-    assert db.rotate(h1, hash_key("sk-one-again")) is None
-    r1 = db.all()[0]
-    assert r1["key_hash"] == rotated
-    assert r1["key_id"] == "k1" and r1["enabled"] is False
-    assert r1["rpm"] == 60 and r1["tpm"] == 1000
-    assert r1["models"] == ["m1", "m2"]
-
-    assert db.remove(h1) is False
-    assert db.remove(rotated) is True
-    assert [r["key_id"] for r in db.all()] == ["k2"]
-    db.close()
-    db.close()  # idempotent
-
-
-def test_keydb_persists_across_instances(pg_dsn):
-    db1 = KeyDB(pg_dsn)
-    db1.add(hash_key("sk-a"), "a1")
-    db1.add(hash_key("sk-b"), "b1")
-    db1.set_enabled(hash_key("sk-b"), False)
-    db1.close()
-
-    db2 = KeyDB(pg_dsn)
-    rows = {r["key_id"]: r for r in db2.all()}
-    assert rows["a1"]["enabled"] is True
-    assert rows["b1"]["enabled"] is False
-    db2.close()
-
-
-def test_keydb_drops_legacy_columns(pg_dsn):
-    """Existing installations lose the admin flag and redundant display name."""
-    import psycopg
-
-    with psycopg.connect(pg_dsn) as conn:
-        conn.execute(
-            """
-            CREATE TABLE keys (
-                id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
-                key_hash TEXT NOT NULL UNIQUE,
-                key_id TEXT NOT NULL,
-                name TEXT NOT NULL DEFAULT '',
-                admin BOOLEAN NOT NULL DEFAULT FALSE,
-                rpm INTEGER,
-                tpm INTEGER,
-                models JSONB,
-                enabled BOOLEAN NOT NULL DEFAULT TRUE,
-                added_at DOUBLE PRECISION NOT NULL
-            )
-            """
-        )
-        conn.execute(
-            "INSERT INTO keys (key_hash, key_id, name, admin, enabled, added_at)"
-            " VALUES (%s, 'legacy', 'Legacy', TRUE, TRUE, 1.0)",
-            (hash_key("sk-legacy"),),
-        )
-
-    db = KeyDB(pg_dsn)
-    rows = db.all()
-    assert len(rows) == 1 and rows[0]["key_id"] == "legacy"
-    assert "admin" not in rows[0] and "name" not in rows[0]
-    with psycopg.connect(pg_dsn) as conn:
-        columns = {
-            row[0]
-            for row in conn.execute(
-                "SELECT column_name FROM information_schema.columns"
-                " WHERE table_name = 'keys'"
-            ).fetchall()
-        }
-    assert "admin" not in columns and "name" not in columns
-    db.close()
-
-
-def test_keydb_stores_hash_not_plaintext(pg_dsn):
-    import psycopg
-
-    secret = "sk-very-secret-plaintext"
-    db = KeyDB(pg_dsn)
-    db.add(hash_key(secret), "k1")
-    db.close()
-
-    with psycopg.connect(pg_dsn) as conn:
-        rows = conn.execute("SELECT key_hash, key_id FROM keys").fetchall()
-    blob = "\n".join(" ".join(str(v) for v in r) for r in rows)
-    assert secret not in blob
-    assert hash_key(secret) in blob

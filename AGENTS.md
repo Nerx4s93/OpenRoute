@@ -11,6 +11,11 @@ OpenAI-совместимый API-шлюз, который балансируе�
 «ведро» квоты opencode.ai: входной IPv4 не считается выходным IP, потому что
 провайдер может выпускать трафик через IPv6.
 
+- **Хранение**: пул прокси, клиентские ключи, sticky-привязки, personas, лог
+  запросов и статистика принадлежат приватному `storage-service` —
+  единственному компоненту со SQL и `POSTGRES_DSN`. Gateway ходит в него по
+  HTTP с `X-Storage-Token` и никогда не получает DSN; без storage-service он
+  не стартует.
 - При старте и периодически шлюз забирает **все активные прокси** из
   `px6-service` (обёртка над API [px6.net](https://px6.net)). Комментарий
   `descr` больше не фильтруется: новые прокси добавляются в пул **выключенными**,
@@ -34,8 +39,8 @@ OpenAI-совместимый API-шлюз, который балансируе�
   до ближайшей полуночи UTC; сессии эвакуируются на другие прокси. Любой другой
   429 — прозрачный passthrough без cooldown и ротации: лимиты провайдера/ключа
   не являются свойством конкретного прокси.
-- **`403 abusive traffic`** навсегда банит только этот прокси-URL (флаг в БД),
-  эвакуирует его сессии, и больше никогда его не выбирает.
+- **`403 abusive traffic`** навсегда банит только этот прокси-URL (флаг в
+  `storage-service`), эвакуирует его сессии, и больше никогда его не выбирает.
 - Round-robin по готовым прокси; при сбое запрос немедленно уходит на следующий
   прокси (каждый пробуется за запрос максимум один раз).
 - Клиентская поверхность: `/v1/*` (OpenAI passthrough) за клиентскими
@@ -48,7 +53,7 @@ OpenAI-совместимый API-шлюз, который балансируе�
 
 ```python
 from openai import OpenAI
-client = OpenAI(base_url="http://127.0.0.1:53202/v1", api_key="sk-client-...")
+client = OpenAI(base_url="http://127.0.0.1:53202/v1", api_key="openroute-...")
 client.chat.completions.create(model="deepseek-v4.1-flash-free",
                                messages=[{"role": "user", "content": "hi"}])
 ```
@@ -65,8 +70,8 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
    │  Клиент  │        │   (OpenAI-совместимый шлюз над пулом прокси)  │
    │ (OpenAI  │ HTTPS  │                                               │
    │  SDK /   ├───────►│  Балансирует /v1/* по прокси и форвардит в    │
-   │  curl /  │ :53202 │  free-tier инференс opencode.ai               │
-   │  браузер)│        │                                               │
+   │  curl /  │ :53202 │  free-tier инференс opencode.ai; состояние    │
+   │  браузер)│        │  хранит в storage-service                     │
    └──────────┘        └───────┬───────────────────────────┬───────────┘
                                │ POST /inference/...       │ GET список
                                │ (через прокси)            │ прокси
@@ -76,6 +81,9 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
                      │ (free-tier инференс│        │ (источник прокси, │
                      │  + каталог моделей)│        │ баланс/покупка)   │
                      └───────────────────┘        └───────────────────┘
+
+   Внутри OpenRoute (сеть openroute-net):
+   [gateway] ── HTTP + X-Storage-Token ──► [storage-service] ── SQL ──► [PostgreSQL]
 ```
 
 ### C4 — контейнеры (уровень 2)
@@ -89,7 +97,9 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
                                                                          │
    (web-admin-ui — только статика; браузер сам ходит в /api/admin/* через edge)
    [gateway] ──► [openroute-px6] ──► px6.net       (каталог, баланс, покупка прокси)
-   [gateway] ──► [PostgreSQL]                       (request_log + proxies + keys + session_affinity + proxy_personas)
+   [gateway] ──► [openroute-storage] ──► [PostgreSQL]
+                                                     (proxies + keys + session_affinity
+                                                      + proxy_personas + request_log)
    [gateway] ──► opencode.ai                        (free-tier инференс через прокси)
    [web-admin] ──► [Redis]                          (серверные сессии админки)
    [web-admin] ──► [gateway] /internal/*            (X-Internal-Token, только внутри сети)
@@ -98,8 +108,15 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
 - **`edge/`** — nginx: единственная точка входа, маршрутизация на сервисы;
   `/internal/*` наружу не маршрутизируется вообще. SSE-стримы не буферизуются.
 - **`gateway/`** — шлюз (data plane): `/v1/*`, пул прокси, клиентские
-  ключи, лог запросов в PostgreSQL, internal API для админки. Своих хостовых
-  портов не публикует.
+  ключи, internal API для админки; всё состояние читает и пишет через
+  `storage-service`. Своих хостовых портов не публикует, к PostgreSQL не
+  подключается.
+- **`storage-service/`** — приватный FastAPI-сервис хранения (образ
+  `openroute-storage`, контейнер `openroute-storage`): единственный компонент
+  со SQL и `POSTGRES_DSN`. Отдаёт gateway домены `proxies`, `keys`,
+  `affinity`, `personas`, `request-log/stats` по HTTP с `X-Storage-Token`.
+  Слушает `8000` только внутри `openroute-net`; хост-порт не публикуется, edge
+  его не маршрутизирует, публичного `/docs` нет.
 - **`web-admin/`** — backend админки (control plane): JSON API
   `/api/admin/*`, сессии в Redis, CSRF, SSE; своими данными не владеет —
   ходит в шлюз по internal API.
@@ -109,10 +126,27 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
 - **`px6-service/`** — микросервис px6.net: обёртка над API с TTL-кэшем;
   отдаёт все активные прокси, баланс аккаунта, страны, цену и покупку. Это
   единственный компонент, который знает `PX6_API_KEY`.
-- **`postgres`** — PostgreSQL 17: хранилище шлюза (`request_log`, `proxies`,
-  `keys`, `session_affinity`, `proxy_personas`). Том
-  `pgdata`; порт наружу не публикуется.
+- **`postgres`** — PostgreSQL 17: хранилище `storage-service` (`request_log`,
+  `proxies`, `keys`, `session_affinity`, `proxy_personas`). Том
+  `pgdata`; порт наружу не публикуется, DSN знает только storage-service.
 - **`redis`** — Redis 7: сессии админки (том `redisdata`), порт наружу не публикуется.
+
+### Отказ storage-service
+
+- **Старт**: gateway проверяет `GET /health` и авторизованный список прокси
+  (`StorageClient.check()`), затем загружает прокси, ключи, affinity и
+  personas. Недоступный сервис, неверный `STORAGE_API_TOKEN` или ошибка
+  загрузки прокси/ключей/affinity/personas — отказ старта, а не работа без
+  персистентности. Ошибка отдельной загрузки parking старт не блокирует.
+- **После старта**: in-memory кэши (пул, ключи, привязки, personas) продолжают
+  обслуживать `/v1/*`; проксирование не ждёт storage-service.
+- **Мутации** ключей и включение/выключение прокси через internal API
+  отвечают 503 и не меняют in-memory состояние; статистика отвечает 200 с
+  нулями/пустыми сериями.
+- **Запись**: лог запросов — fire-and-forget; affinity, personas и parking —
+  фоновые best-effort записи (ошибка логируется, повтор — при следующем
+  изменении/backoff). Уже сохранённые в PostgreSQL данные не теряются и снова
+  видны после восстановления.
 
 
 ---
@@ -124,25 +158,31 @@ OpenRoute/
 ├── AGENTS.md                 # техническая документация (этот файл)
 ├── README.md                 # пользовательская инструкция по установке (TODO)
 ├── docker-compose.yml        # весь стек одной командой (сеть openroute-net)
-├── docker-compose.test.yml   # PostgreSQL для pytest (127.0.0.1:55433)
+├── docker-compose.test.yml   # PostgreSQL для real-SQL тестов storage-service (127.0.0.1:55433)
 ├── Dockerfile                # шлюз (python:3.12-slim)
-├── requirements.txt          # запайнено: fastapi/uvicorn/httpx/pydantic-settings/psycopg
-├── requirements-dev.txt      # + pytest/pytest-asyncio/redis
-├── .env.example
+├── requirements.txt          # gateway: fastapi/uvicorn/httpx/pydantic-settings/curl_cffi (без psycopg)
+├── requirements-dev.txt      # + pytest/pytest-asyncio/redis/psycopg (psycopg — только для тестов storage-service)
+├── .env.example              # настройки gateway (STORAGE_*); DSN отсутствует
 ├── gateway/                  # шлюз (data plane) — РЕАЛИЗОВАНО
 │   ├── opencode.py           # gate-заголовки, session id, body, Retry-After, SSE, классификаторы 429/403
 │   ├── sessions.py           # fingerprint диалога -> один upstream session id
-│   ├── affinity.py           # sticky-сессии: привязки, score S/R/T, эвакуация
-│   ├── affinitydb.py         # session_affinity: load/upsert/clear
-│   ├── personas.py           # persona на прокси-bucket: кэш, ротация, retry/reconcile
-│   ├── personadb.py          # proxy_personas: load/upsert с generation-гардом
-│   ├── config.py  proxies.py  proxydb.py  keys.py  keydb.py  reqlog.py  pg.py
+│   ├── affinity.py           # sticky-сессии: привязки, score S/R/T, эвакуация; persist через storage-service
+│   ├── personas.py           # persona на прокси-bucket: кэш, ротация, retry/reconcile; фоновая запись в storage-service
+│   ├── storage.py            # async StorageClient — типизированный HTTP-фасад над storage-service
+│   ├── reqlog.py             # лог запросов: fire-and-forget запись в storage-service + deque fallback
+│   ├── config.py  proxies.py  keys.py  px6.py  curlclient.py
 │   └── main.py               # FastAPI: passthrough /v1/*, ретраи, internal API, lifespan
+├── storage-service/          # РЕАЛИЗОВАНО: приватный сервис хранения, единственный SQL/DSN
+│   ├── openroute_storage/    # FastAPI: main, config, db, schema, schemas, services
+│   ├── Dockerfile
+│   ├── requirements.txt      # fastapi/uvicorn/pydantic-settings/psycopg
+│   ├── .env.example          # STORAGE_API_TOKEN + POSTGRES_DSN (реальный .env не коммитится)
+│   └── README.md             # контракты storage-service
 ├── edge/                     # nginx: nginx.conf, proxy_params_edge.conf, Dockerfile
 ├── px6-service/              # РЕАЛИЗОВАНО: px6.net → все активные прокси, баланс, покупка
 ├── web-admin/                # РЕАЛИЗОВАНО: JSON API (config, sessions, auth, gateway, schemas, main)
 ├── web-admin-ui/             # РЕАЛИЗОВАНО: React SPA (Vite, React Router, TanStack Query)
-└── tests/                    # pytest: шлюз, прокси, ключи, лог, админка, px6, opencode
+└── tests/                    # pytest: шлюз, storage-service/storage client, прокси, ключи, лог, админка, px6, opencode
 ```
 
 ---
@@ -160,23 +200,26 @@ OpenRoute/
 - Добавить или удалить прокси вручную нельзя: членство в пуле определяется
   **только** фетчем; в админке доступны лишь включить/выключить существующий
   прокси и купить новые через px6.net.
-- Список из `PROXIES_URL` синхронизируется с БД: новые прокси добавляются,
+- Список из `PROXIES_URL` синхронизируется через `storage-service`
+  (`POST /proxies/sync`) с таблицей `proxies`: новые прокси добавляются,
   пропавшие из источника помечаются `listed = FALSE` (soft-delete) и
   перестают участвовать в балансировке. Записи физически не удаляются, поэтому
   парковка/баны и привязки сессий переживают временное исчезновение прокси;
   если он снова появится в источнике, он возвращается в пул. Флаг `enabled`
   (ручное вкл/выкл) при синхронизации не сбрасывается.
-- Если PostgreSQL временно недоступен, gateway сохраняет текущие флаги уже
-  известных прокси и оставляет новые выключенными (fail-closed), а не включает
-  весь полученный список.
+- Если `storage-service` временно недоступен, снимок источника не применяется:
+  gateway сохраняет текущие флаги уже известных прокси и оставляет новые
+  выключенными (fail-closed), а не включает весь полученный список. Уже
+  загруженный пул продолжает обслуживать трафик.
 - **Квоты**: каждый прокси-URL — отдельное ведро (`canonical_quota_key`).
   Прокси не объединяются по входному IPv4: выход может быть IPv6, и разные
   порты одного входного адреса могут иметь разные выходные адреса.
 - **Парковка и баны переживают рестарт**: `quota_until`, `banned_until` и
-  `permanently_banned` пишутся в таблицу `proxies` при получении
-  `FreeUsageLimitError` / abusive-403 и загружаются при старте gateway. После
-  пересборки контейнера админка снова показывает «лимит …» / «бан …», а
-  запаркованные и навсегда забаненные прокси не опрашиваются и не выбираются.
+  `permanently_banned` пишутся `storage-service` в таблицу `proxies` при
+  получении `FreeUsageLimitError` / abusive-403 (фоновая best-effort запись)
+  и загружаются при старте gateway из storage-service. После пересборки
+  контейнера админка снова показывает «лимит …» / «бан …», а запаркованные и
+  навсегда забаненные прокси не опрашиваются и не выбираются.
 - **Round-robin** по готовым прокси (не в cooldown, не отключён, не на локальном
   RPM-капе, не запаркован). Каждый прокси пробуется в запросе максимум один раз.
 - **Circuit breaker** (сетевые ошибки / 5xx): ошибки копятся в скользящем окне
@@ -192,7 +235,7 @@ OpenRoute/
   `ACCOUNT_THROTTLE_*`) сохранена для внутренних путей, но HTTP-обработчик
   её больше не вызывает.
 - **403 `abusive traffic`** (case-insensitive поиск в теле) → **постоянный
-  бан** этого прокси-URL (`permanently_banned = TRUE` в БД) с эвакуацией;
+  бан** этого прокси-URL (`permanently_banned = TRUE` в storage-service) с эвакуацией;
   персона bucket ротируется; `FreeTierError` — passthrough; прочие 403 —
   обычный failover (`mark_failure` + следующая попытка).
 - **Ретраи**: 5xx/сетевые — повтор на следующем прокси с экспоненциальным
@@ -219,8 +262,9 @@ OpenRoute/
 ## Sticky-сессии (affinity)
 
 - Задача закрепляется за прокси-URL надолго: привязка хранится в
-  `session_affinity` и не меняется, пока прокси не запаркован/забанен или
-  пока он не отключён в админке.
+  `storage-service` (таблица `session_affinity`, загружается при старте
+  gateway) и не меняется, пока прокси не запаркован/забанен или пока он не
+  отключён в админке.
 - Идентификатор берётся из `x-opencode-session` / `x-session-affinity` /
   `x-session-id` (валидный `ses_...`); если его нет — из fingerprint диалога
   (ключ + проект + первое сообщение); одиночные запросы без истории привязку
@@ -229,6 +273,10 @@ OpenRoute/
   R — запросов за окно `AFFINITY_WINDOW_SECONDS`, T — реальных токенов за то
   же окно; веса — `AFFINITY_WEIGHT_*`. Кулдаун/локальный RPM-кап родного
   прокси не двигает привязку: текущий запрос временно уходит на другой адрес.
+- Запись привязок — фоновая (coalescing writer), best-effort: ошибка
+  storage-service не блокирует и не ломает запрос, привязка остаётся в памяти,
+  а следующее изменение состояния планирует повторную запись. После рестарта
+  S восстанавливается из storage-service; R/T — in-memory и начинаются с нуля.
 - **Требование к клиенту (комбайну)**: присылать стабильный валидный
   `x-opencode-session: ses_...` на задачу — тогда все её реплики гарантированно
   идут через один прокси (один выходной адрес). Без него шлюз сам выводит
@@ -278,11 +326,12 @@ OpenRoute/
 - Ротация (generation + 1, новые id) — только при `429 FreeUsageLimitError`
   и `403 abusive traffic`. Обычный 429, `FreeTierError`, 401, 5xx и сетевые
   ошибки персону не ротируют.
-- Персона хранится в PostgreSQL (`proxy_personas`, создаётся существующей
-  схемой) и переживает рестарт; generation-гард не даёт старой записи
-  перетереть новую. Запись — фоновая (fire-and-forget): при недоступной БД
-  запросы не ждут и не ломаются, персона живёт в памяти, запись повторяется,
-  а при расхождении стор примиряется с более новой строкой БД. Загрузка
+- Персона хранится в `storage-service` (таблица `proxy_personas`, схема
+  применяется при его старте) и переживает рестарт; generation-гард на стороне
+  сервиса не даёт старой записи перетереть новую. Запись — фоновая
+  (fire-and-forget): при недоступном storage-service запросы не ждут и не
+  ломаются, персона живёт в памяти, dirty-очередь повторяет запись с backoff,
+  а при расхождении стор примиряется с более новой строкой. Загрузка
   валидирует идентификаторы и заменяет битую строку валидной персоной.
 - Переменная `PERSONA_ENABLED` (по умолчанию `true`); `false` — форвардятся
   клиентские identity-заголовки (`x-opencode-project`, `traceparent`,
@@ -305,13 +354,15 @@ OpenRoute/
   запросов в этом окне не показываются. График и его список прокси также
   строятся только по запросам выбранного периода. Старая страница
   `/admin/ui/stats` удалена; этот URL перенаправляется на `/admin/ui`.
-- **Хранилище**: дневные агрегаты строятся по `request_log`; для них добавлен
-  индекс `request_log(account, ts)`. DDL идемпотентен и применяется при старте
-  gateway; отдельная миграция не нужна, достаточно перезапуска.
+- **Хранилище**: дневные агрегаты строятся `storage-service` по `request_log`;
+  для них добавлен индекс `request_log(account, ts)`. DDL идемпотентен и
+  применяется при старте storage-service; gateway SQL не выполняет. Отдельная
+  миграция не нужна, достаточно перезапуска сервисов.
 - **API шлюза**: `GET /internal/stats-data?days=30` (`X-Internal-Token`,
   `days` зажимается в `1..365`) или `GET /internal/stats-data?period=all`
   (`1d`/`3d`/`7d`/`30d`/`90d`/`all`, как на странице «Статистика»; старые
-  `day`/`week`/`month` тоже принимаются). Отдаёт `days`, `server_time`
+  `day`/`week`/`month` тоже принимаются). Шлюз получает агрегаты из
+  storage-service и отдаёт прежний контракт: `days`, `server_time`
   (epoch), `dates` (UTC-дни по возрастанию),
   `totals`, `proxies`, `series_total` и `series_by_proxy` — параллельные
   массивы `tokens`/`requests`/`errors` на каждый день `dates`. `totals`,
@@ -328,11 +379,15 @@ OpenRoute/
   — необязательный объект `px6` (`id`, `version`, `country`, `date_end`,
   `descr`). Прежние поля не изменились: `summary` и `usage` строки сохраняют
   контракт. Учётные данные прокси по-прежнему не попадают в браузер.
-- **Устойчивость**: при недоступном PostgreSQL эндпоинты статистики всё равно
-  отвечают 200 — нулями и пустыми сериями. Опрос панели
-  (`/internal/proxies-data`, ~1 раз в секунду) использует кэш агрегатов
-  (TTL ~10 с), а дневные серии формируются для графика на странице
-  «Статистика» (обновление ~30 с).
+- **Устойчивость**: при недоступном storage-service (включая недоступный
+  PostgreSQL за ним) эндпоинты статистики всё равно отвечают 200 — нулями и
+  пустыми сериями; «последние запросы» откатываются на локальный deque шлюза.
+  Опрос панели (`/internal/proxies-data`, ~1 раз в секунду) использует
+  gateway-кэш агрегатов (TTL ~10 с), а дневные серии формируются для графика
+  на странице «Статистика» (обновление ~30 с). Запись лога запросов —
+  fire-and-forget: сбой хранилища не блокирует проксирование, но записи,
+  не доехавшие во время сбоя, могут не сохраниться; уже записанные данные не
+  теряются и снова видны после восстановления.
 
 ---
 
@@ -354,7 +409,8 @@ OpenRoute/
   остаётся успешным (`refresh_ok: false`) с предупреждением: деньги уже
   списаны, оператору нужно нажать «Обновить список».
 - **Секреты**: `PX6_API_KEY` знает только `px6-service`; логин/пароль прокси
-  хранятся в gateway и никогда не отдаются в браузер. Панель получает
+  хранятся в `storage-service` (таблица `proxies`) и никогда не отдаются в
+  браузер. Панель получает
   masked-имя `host:port`, непрозрачный HMAC-идентификатор прокси и несекретные
   поля px6 (`id`, `version`, `country`, `date_end`, `descr`).
 - **Внутренние API**: gateway `GET /internal/px6/account`,
@@ -429,7 +485,7 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 
 Клиентские ключи не имеют ролей и дают доступ только к `/v1/*`. Секрет
 генерируется сервисом (`openroute-...`), показывается один раз при создании
-или перевыпуске и хранится в PostgreSQL только как SHA-256 хэш. Маршруты
+или перевыпуске и хранится в storage-service только как SHA-256 хэш. Маршруты
 `/admin/status` и `/admin/logs` удалены. `/internal/*` при пустом
 `INTERNAL_API_TOKEN` отвечает 404, при неверном токене — 403.
 
@@ -454,14 +510,26 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 | POST | `/internal/keys/set` | включить/отозвать ключ |
 | POST | `/internal/keys/delete` | удалить ключ |
 
+### storage-service (приватный API)
+
+`storage-service` слушает `openroute-storage:8000` только внутри
+`openroute-net`: у него нет хост-порта, edge его не маршрутизирует, публичного
+`/docs`/OpenAPI нет. Все методы, кроме `GET /health`, требуют
+`X-Storage-Token: <STORAGE_API_TOKEN>` (constant-time сравнение); пустой
+`STORAGE_API_TOKEN` = fail closed (401). `GET /health` неаутентифицирован и
+отдаёт `{"status":"ok","database":"ok"}` либо 503 при недоступном PostgreSQL.
+Доменные контракты (proxies, keys, affinity, personas, request-log/stats) —
+в `storage-service/README.md`; gateway обращается к ним через
+`gateway/storage.py`. Наружу этот API не выходит.
+
 ## Клиентские ключи
 
 - Секрет генерирует gateway через `gateway/keys.py:generate_key()`:
   `openroute-` + 48 hex-символов, всего 58 символов. Пользователь не вводит
-  ключ вручную.
-- В PostgreSQL (`keys`) хранятся только `key_hash` (SHA-256), `key_id`, `rpm`,
-  `tpm`, `models`, `enabled` и `added_at`. Plaintext не сохраняется и не
-  логируется.
+  ключ вручную; генерация и хэширование остаются в gateway.
+- В `storage-service` (таблица `keys` в PostgreSQL) передаётся и хранится
+  только `key_hash` (SHA-256), а также `key_id`, `rpm`, `tpm`, `models`,
+  `enabled` и `added_at`. Plaintext не сохраняется и не логируется.
 - `POST /internal/keys/add` создаёт ключ и возвращает `key` + `key_id`;
   `POST /internal/keys/rotate` заменяет хэш, сохраняет `key_id`, лимиты,
   модели и `enabled`, сбрасывает RPM/TPM-окна и сразу делает старый секрет
@@ -474,6 +542,9 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 - RPM/TPM — in-memory скользящие окна на `key_id`; они сбрасываются при
   рестарте и перевыпуске. `key_id` — только метка: уникальность не
   гарантируется, статистика по одинаковым `key_id` агрегируется.
+- Все мутации ключей идут через storage-service. При его недоступности
+  add/rotate/set/delete отвечают 503, а in-memory состояние не меняется;
+  чтение снапшота деградирует к in-memory копии без plaintext.
 
 ---
 
@@ -490,6 +561,7 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 | 429 | любой другой 429 upstream (провайдер/ключ) | тело upstream (passthrough, без cooldown и ротации) |
 | 502 | все прокси, которые пробовали, упали (`All upstream attempts failed`) | OpenAI-конверт |
 | 503 | пул пуст (нет прокси / фетч не удаётся) | OpenAI-конверт |
+| 503 | storage-service недоступен/отклонил токен при мутации ключа или прокси | OpenAI-конверт (`Storage service unavailable`); состояние не меняется |
 | 504 | исчерпан бюджет ретраев `RETRY_BUDGET_SECONDS` | OpenAI-конверт |
 
 ---
@@ -500,30 +572,40 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 
 ```bash
 # перед первым запуском: скопируйте примеры и задайте секреты
-cp .env.example .env                                   # INTERNAL_API_TOKEN
-cp web-admin/.env.example web-admin/.env       # ADMIN_PASSWORD + тот же INTERNAL_API_TOKEN
-cp px6-service/.env.example px6-service/.env     # PX6_API_KEY
+cp .env.example .env                                   # INTERNAL_API_TOKEN + STORAGE_API_TOKEN
+cp storage-service/.env.example storage-service/.env   # тот же STORAGE_API_TOKEN + POSTGRES_DSN
+cp web-admin/.env.example web-admin/.env               # ADMIN_PASSWORD + тот же INTERNAL_API_TOKEN
+cp px6-service/.env.example px6-service/.env           # PX6_API_KEY
 
 docker compose up --build -d                 # весь стек одной командой; сеть openroute-net compose создаёт сам
 docker compose logs -f edge                  # логи стены
 docker compose logs -f gateway               # логи шлюза
+docker compose logs -f storage-service       # логи сервиса хранения
 docker compose down                          # остановка всего
 ```
+
+`STORAGE_API_TOKEN` в корневом `.env` и в `storage-service/.env` должен
+совпадать: gateway отправляет его как `X-Storage-Token`. `POSTGRES_DSN`
+получает **только** `storage-service` (в compose — `postgres:5432`); gateway
+его не знает и зависит от `storage-service` (healthy), а не от `postgres`.
 
 Наружу смотрит **только edge** на http://127.0.0.1:53202 (хост-порт задаёт
 `OPENROUTE_EDGE_PORT`): и API (`/v1`), и админка (`/`, `/login`, `/admin/ui`,
 `/api/admin/*`).
-Сервисы (gateway, web-admin, web-admin-ui, px6, postgres, redis) хостовых
-портов не публикуют. Данные — в томах `pgdata`/`redisdata` (удаляются только
+Сервисы (gateway, storage-service, web-admin, web-admin-ui, px6, postgres,
+redis) хостовых портов не публикуют; у `storage-service` нет и маршрута в
+edge. Данные — в томах `pgdata`/`redisdata` (удаляются только
 `docker compose down -v`). `docker compose stop` ждёт до 320 с
-(`stop_grace_period`), чтобы стримы доработали до конца.
+(`stop_grace_period`), чтобы стримы доработали до конца; storage-service
+останавливается за 30 с.
 
 > **Сосуществование с NVRoute.** OpenRoute полностью изолирован от соседнего
 > стека NVRoute: у него собственная docker-сеть `openroute-net` (не общая
 > `service-net`), уникальные имена контейнеров (`openroute-px6`,
-> `openroute-postgres`, `openroute-redis`; остальные — автоимена
-> `openroute-gateway-*`, `openroute-web-admin-*` и `openroute-web-admin-ui-*`)
-> и собственный хост-порт edge `OPENROUTE_EDGE_PORT` (по умолчанию 53202;
+> `openroute-storage`, `openroute-postgres`, `openroute-redis`; остальные —
+> автоимена `openroute-gateway-*`, `openroute-web-admin-*` и
+> `openroute-web-admin-ui-*`) и собственный хост-порт edge
+> `OPENROUTE_EDGE_PORT` (по умолчанию 53202;
 > NVRoute занимает 53201). Оба стека поднимаются одновременно и не
 > конфликтуют.
 
@@ -531,24 +613,40 @@ docker compose down                          # остановка всего
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt
+pip install -r requirements.txt -r storage-service/requirements.txt
+
+# терминал 1: storage-service (нужен доступный PostgreSQL)
+cd storage-service
+cp .env.example .env          # STORAGE_API_TOKEN + POSTGRES_DSN
+uvicorn openroute_storage.main:app --host 127.0.0.1 --port 8010 --no-access-log
+
+# терминал 2: px6-service (из корня репозитория)
 cd px6-service && uvicorn app.main:app --host 127.0.0.1 --port 8001  # PX6_API_KEY=...
-# в соседнем терминале, из корня:
+
+# терминал 3: gateway (из корня репозитория)
+STORAGE_SERVICE_URL=http://127.0.0.1:8010 \
+STORAGE_API_TOKEN=<тот же, что в storage-service/.env> \
 PROXIES_URL=http://127.0.0.1:8001/proxies \
 PX6_SERVICE_URL=http://127.0.0.1:8001 \
   uvicorn gateway.main:app --host 127.0.0.1 --port 8000
 ```
 
-`PX6_SERVICE_URL` — база px6-service (без `/proxies`) для баланса, стран,
-цены и покупки. Нужен доступный PostgreSQL (по умолчанию
-`POSTGRES_DSN=postgresql://openroute:openroute@localhost:5432/openroute`); схема
-создаётся сама при первом обращении. Без Docker edge нет: backend админки
-запускается отдельно (`web-admin/`), а SPA — через `npm run dev` в
+`STORAGE_SERVICE_URL` — база storage-service; локально выбран порт `8010`,
+чтобы не конфликтовать с gateway на `8000` (в контейнере сервис слушает
+`8000`). `STORAGE_API_TOKEN` должен совпадать с `storage-service/.env`.
+`POSTGRES_DSN` задаётся **только** в `storage-service/.env` (по умолчанию
+`postgresql://openroute:openroute@localhost:5432/openroute`); схема создаётся
+storage-service при первом подключении, а gateway без доступного
+storage-service не стартует. `PX6_SERVICE_URL` — база px6-service (без
+`/proxies`) для баланса, стран, цены и покупки. Без Docker edge нет: backend
+админки запускается отдельно (`web-admin/`), а SPA — через `npm run dev` в
 `web-admin-ui/` (Vite проксирует `/api` на `127.0.0.1:8000`).
 
-Обновление с предыдущей версии — только перезапуск: индекс
-`request_log(account, ts)` создаётся идемпотентно при старте gateway.
-Отдельных шагов миграции и правок compose/`.env` не требуется.
+Обновление с предыдущей версии: отдельная миграция не нужна — storage-service
+идемпотентно применяет ту же схему к существующему тому `pgdata`, включая
+индекс `request_log(account, ts)`. Нужно лишь перенести `POSTGRES_DSN` в
+`storage-service/.env` и задать совпадающий `STORAGE_API_TOKEN` в корневом
+`.env` и `storage-service/.env`.
 
 ---
 
@@ -556,37 +654,49 @@ PX6_SERVICE_URL=http://127.0.0.1:8001 \
 
 | Компонент | Статус |
 |---|---|
-| `gateway/` (шлюз: `main`, `config`, `proxies`, `proxydb`, `affinity`, `affinitydb`, `personas`, `personadb`, `keys`, `keydb`, `reqlog`, `pg`, `opencode`) | **реализовано** |
+| `gateway/` (шлюз: `main`, `config`, `proxies`, `affinity`, `personas`, `keys`, `reqlog`, `storage`, `opencode`, `sessions`, `px6`, `curlclient`) | **реализовано**; прямые SQL-модули удалены, остался только `StorageClient` |
+| `storage-service/` (`openroute_storage`: FastAPI, `config`, `db`, `schema`, `schemas`, `services`; Dockerfile, `.env.example`, README) | **реализовано** — единственный владелец SQL/PostgreSQL |
 | `web-admin/` (JSON API: `config`, `sessions`, `auth`, `gateway`, `schemas`, `main`) | **реализовано** |
 | `web-admin-ui/` (React SPA: Vite, React Router, TanStack Query, SSE) | **реализовано** |
 | `px6-service/` | **реализовано** (все активные прокси, баланс, страны, цена, покупка) |
-| edge / compose / Dockerfile / requirements / .env.example | **готово** |
-| `tests/` (`test_gateway`, `test_proxies`, `test_affinity`, `test_affinitydb`, `test_persona`, `test_personadb`, `test_keys`, `test_reqlog`, `test_admin_api`, `test_opencode`, `test_proxy6_client`, `test_px6_service`) | **реализовано** |
+| edge / compose / Dockerfile / requirements / .env.example | **готово** (storage-service в compose, у gateway нет DSN) |
+| `tests/` (`test_gateway`, `test_gateway_storage`, `test_storage_client`, `test_fake_storage`, `test_storage_service`, `test_storage_affinity_persona`, `test_proxies`, `test_affinity`, `test_persona`, `test_keys`, `test_reqlog`, `test_admin_api`, `test_opencode`, `test_proxy6_client`, `test_px6_service`, `test_sessions`, `test_curlclient`) | **реализовано** |
 
 ## Тесты
 
 ```bash
 pip install -r requirements-dev.txt
-pytest tests
+pytest tests                              # 388 passed, 2 skipped
+pytest tests/test_storage_service.py -q   # 12 passed (нужен живой PostgreSQL)
 
 cd web-admin-ui
 npm ci
-npm test
+npm test                                  # 32 tests
 npm run typecheck
+npm run build
 ```
 
-`tests/test_opencode.py` — чистые юнит-тесты интеграции с opencode.ai (не
-требуют сети/БД); `tests/test_affinity.py` — unit-тесты привязок, score и
-эвакуации (без БД); `tests/test_persona.py` — unit-тесты персоны (кэш,
-ротация, retry/reconcile, fail-open, без БД); `tests/test_admin_api.py` —
-герметичные тесты JSON API админки (fake gateway + in-memory sessions, без
-Redis/PostgreSQL); `tests/test_px6_service.py` — герметичные тесты px6-service
-(fake px6.net); `tests/test_proxy6_client.py` — клиент px6.net, маскирование
-ключа в логах и маппинг ошибок. Остальные наборы (`test_gateway`,
-`test_proxies`, `test_affinitydb`, `test_personadb`, `test_keys`, `test_reqlog`)
-работают герметично: upstream и админка подменяются, а живой PostgreSQL для
-хранилищ шлюза (включая `session_affinity` и `proxy_personas`) поднимается из
-`docker-compose.test.yml` (`127.0.0.1:55433`), DSN переопределяется
-`OPENROUTE_TEST_DSN`. `test_personadb` проверяет generation-гард и загрузку
-после рестарта. Фронтенд-тесты (`web-admin-ui`) — Vitest + Testing Library,
-без сети и без backend.
+`tests/test_storage_service.py` — единственный набор с живым PostgreSQL:
+изолированная БД на каждый тест (`pg_dsn`, создание/удаление), `TestClient`,
+проверки auth, контрактов и идемпотентности схемы. Нужен
+`docker-compose.test.yml` (`127.0.0.1:55433`); DSN переопределяется
+`OPENROUTE_TEST_DSN`. `tests/test_storage_client.py` — `StorageClient` на
+`httpx.MockTransport` (без сети/БД), матрица ошибок и отсутствие утечки
+токена/тела; `tests/test_fake_storage.py` — семантика in-memory
+`FakeStorage`; `tests/test_gateway_storage.py` — startup-контракт, мутации
+ключей/прокси через storage, 503 при сбое, refresh/parking;
+`tests/test_storage_affinity_persona.py` — affinity/personas через storage и
+отказ старта при неудачной загрузке.
+
+Остальные наборы (`test_gateway`, `test_proxies`, `test_affinity`,
+`test_persona`, `test_keys`, `test_reqlog`, `test_sessions`, `test_curlclient`)
+герметичны: upstream, админка и storage подменяются (`tests/fake_storage.py`),
+PostgreSQL для gateway-тестов не нужен. Прежние прямые DB-наборы удалены
+вместе с SQL-модулями; их сценарии покрыты storage-service и `test_storage_*`.
+`tests/test_opencode.py` — чистые юнит-тесты интеграции с
+opencode.ai (без сети/БД); `tests/test_admin_api.py` — герметичные тесты JSON
+API админки (fake gateway + in-memory sessions, без Redis/PostgreSQL);
+`tests/test_px6_service.py` — герметичные тесты px6-service (fake px6.net);
+`tests/test_proxy6_client.py` — клиент px6.net, маскирование ключа в логах и
+маппинг ошибок. Фронтенд-тесты (`web-admin-ui`) — Vitest + Testing Library
+(32 теста), без сети и без backend; дополнительно проходят typecheck и build.

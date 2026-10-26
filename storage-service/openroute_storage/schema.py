@@ -1,18 +1,15 @@
-"""Shared PostgreSQL infrastructure (psycopg3 + psycopg_pool).
+"""Frozen PostgreSQL schema owned by storage-service.
 
-Implements the shared pool factory and the FROZEN ``SCHEMA`` DDL (the contract
-for the gateway stores and the migration script).
-
-All gateway stores (reqlog/proxydb/keydb) talk to one PostgreSQL server via
-their own ``ConnectionPool``. The pool is lazy (``min_size=0``) and
-thread-safe; ``ensure_schema`` is idempotent and runs on first DB access.
+The DDL is a contract: an existing ``pgdata`` volume must keep working
+unchanged, so the statements are idempotent and no migration is required.
+It was historically derived from the gateway's former ``pg.py``; that module
+is removed and this service is now the sole SQL owner. Do not change these
+statements without treating it as a schema migration.
 """
 
 from __future__ import annotations
 
 from typing import Any
-
-from psycopg_pool import ConnectionPool
 
 SCHEMA: tuple[str, ...] = (
     # Request log (reqlog.py). IDENTICAL to NVRoute's request_log; the
@@ -38,7 +35,7 @@ SCHEMA: tuple[str, ...] = (
     # Per-account daily statistics scan ``request_log`` by account + timestamp.
     "CREATE INDEX IF NOT EXISTS idx_request_log_account_ts"
     " ON request_log (account, ts)",
-    # Proxy pool (proxydb.py) — replaces NVRoute's ``accounts`` table.
+    # Proxy pool — replaces NVRoute's ``accounts`` table.
     # quota_until/banned_until persist timed parking; permanently_banned is the
     # non-expiring abusive-traffic verdict, so a gateway restart never forgets
     # that a proxy must not be used again.
@@ -67,9 +64,9 @@ SCHEMA: tuple[str, ...] = (
     # deleted, so parking and foreign keys survive and a proxy can come back.
     "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS listed"
     " BOOLEAN NOT NULL DEFAULT TRUE",
-    # Sticky session -> exit proxy binding (affinitydb.py). ``ON DELETE SET
-    # NULL`` unbinds a session when its proxy is removed; ``created_at`` is
-    # never changed by a move (only ``proxy``/``last_used_at`` are updated).
+    # Sticky session -> exit proxy binding. ``ON DELETE SET NULL`` unbinds a
+    # session when its proxy is removed; ``created_at`` is never changed by a
+    # move (only ``proxy``/``last_used_at`` are updated).
     """
     CREATE TABLE IF NOT EXISTS session_affinity (
         session_key TEXT PRIMARY KEY,
@@ -86,7 +83,7 @@ SCHEMA: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS idx_session_affinity_used
         ON session_affinity (last_used_at)
     """,
-    # Client keys (keydb.py); models is a JSONB array of model names.
+    # Client keys; models is a JSONB array of model names.
     """
     CREATE TABLE IF NOT EXISTS keys (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -120,39 +117,16 @@ SCHEMA: tuple[str, ...] = (
 )
 
 
-def make_pool(dsn: str, name: str, max_size: int = 4) -> ConnectionPool:
-    """Lazy connection pool.
+async def ensure_schema(conn: Any) -> None:
+    """Idempotently create all tables/indexes on ``conn``.
 
-    - ``min_size=0``: the constructor opens no connections and never fails,
-      even when the server is unreachable — degradation surfaces on the first
-      real use;
-    - ``timeout=5``: how long ``pool.connection()`` waits for a free
-      connection (unreachable server -> ``PoolTimeout`` instead of a hang);
-    - ``connect_timeout=5``: ceiling for the background worker's TCP connect;
-    - ``application_name=name`` is visible in ``pg_stat_activity``.
+    ``pg_advisory_xact_lock`` serialises concurrent initialisation (e.g. two
+    storage-service replicas starting together). The lock is held until COMMIT,
+    which is why the caller must run this inside one transaction.
     """
-    return ConnectionPool(
-        dsn,
-        min_size=0,
-        max_size=max_size,
-        timeout=5.0,
-        name=name,
-        open=True,
-        kwargs={"application_name": name, "connect_timeout": 5},
-    )
-
-
-def ensure_schema(conn: Any) -> None:
-    """Idempotently create all tables/indexes (the SAME DDL for the app and the
-    migration script). Runs on a pooled connection; commits in the same
-    transaction as the first use.
-
-    ``pg_advisory_xact_lock`` serialises concurrent initialisation (e.g.
-    ``RequestLog``/``ProxyDB``/``KeyDB`` coming up together): without it,
-    parallel ``CREATE TABLE IF NOT EXISTS`` statements from different
-    connections can race in the catalogue tables. The lock is held until COMMIT
-    — which is exactly why the caller must commit in the same transaction.
-    """
-    conn.execute("SELECT pg_advisory_xact_lock(740514)")
+    await conn.execute("SELECT pg_advisory_xact_lock(740514)")
     for ddl in SCHEMA:
-        conn.execute(ddl)
+        await conn.execute(ddl)
+
+
+__all__ = ["SCHEMA", "ensure_schema"]

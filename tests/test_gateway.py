@@ -714,8 +714,8 @@ def test_free_usage_limit_parks_group_and_evacuates_current_session(make_gateway
     assert gw.manager.group_of(state.proxy) is b
     assert b.proxies[0].requests == 1
     gw.flush_affinity()
-    row = next(r for r in gw.affinitydb.load_all() if r[0] == f"sid:{sid}")
-    assert row[1] == state.proxy
+    row = gw.affinity_binding(f"sid:{sid}")
+    assert row is not None and row["proxy"] == state.proxy
 
 
 def test_generic_429_does_not_park_or_evacuate(make_gateway):
@@ -1250,7 +1250,7 @@ def test_models_endpoint_fallback_on_error(make_gateway, monkeypatch):
 def _wait_log_entry(gw, pred, timeout=5.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        for row in gw.reqlog.recent(20):
+        for row in gw.call(gw.reqlog.recent_async, 20):
             if pred(row):
                 return row
         time.sleep(0.05)
@@ -1268,8 +1268,27 @@ def test_request_log_and_usage_persisted(make_gateway):
     assert row["method"] == "POST" and row["model"] == FREE_MODEL
     assert row["account"] == "proxy-a.invalid:8080"  # masked proxy
     assert row["prompt_tokens"] == 6 and row["completion_tokens"] == 2
-    usage = gw.reqlog.summary()
+    usage = gw.call(gw.reqlog.summary_async)
     assert usage["total"]["requests"] >= 1
+
+
+def test_startup_creates_storage_backed_reqlog(make_gateway):
+    """No injected facade: the lifespan builds one on the shared storage client
+    and the request path writes through to ``FakeStorage.log``."""
+    gw = make_gateway(inject_reqlog=False)
+    assert gw.reqlog is not None and gw.reqlog is main.reqlog
+    assert gw.reqlog._storage is gw.storage
+
+    gw.script_upstream(lambda req: sse_response())
+    r = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
+    assert r.status_code == 200
+
+    row = _wait_log_entry(gw, lambda x: x["path"] == "chat/completions")
+    assert row["key_id"] == "default" and row["account"] == "proxy-a.invalid:8080"
+    assert any(
+        entry["path"] == "chat/completions" and entry["key_id"] == "default"
+        for entry in gw.storage.log
+    )
 
 
 def test_stream_usage_logged(make_gateway):
@@ -1681,8 +1700,9 @@ def test_internal_disable_invalidates_affinity(make_gateway):
     assert r.status_code == 200
     assert state.proxy is None  # stale sticky binding invalidated at once
     gw.flush_affinity()
-    row = next(r for r in gw.affinitydb.load_all() if r[0] == f"sid:{sid}")
-    assert row[1] is None  # persisted as proxy = NULL, row/created_at preserved
+    row = gw.affinity_binding(f"sid:{sid}")
+    assert row is not None and row["proxy"] is None  # persisted as proxy = NULL
+    assert row["created_at"] is not None  # row/created_at preserved
 
     # The next turn leaves the disabled exit and binds to the remaining one.
     assert gw.client.post("/v1/chat/completions", json=body(), headers=auth).status_code == 200

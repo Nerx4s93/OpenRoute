@@ -3,13 +3,14 @@
 Near-verbatim port of ``NVRoute/app/keys.py`` — the client-facing contract is
 unchanged; only the provider string in error messages changes (``OpenRoute``).
 
-Keys live in PostgreSQL (table ``keys``, module ``keydb.py``) and are managed
-only via the web admin UI. The service generates each secret with
-``generate_key()``; only its sha256 hash + config (``KeyInfo``) are held in
-memory, and plaintext is never persisted or logged. Comparisons are constant-time
-(``hmac.compare_digest``) over sha256 digests. RPM/TPM counters are in-memory
-sliding 60s windows (single event loop / single worker): with ``--workers N``
-or on restart, counters reset and are not shared.
+Keys are persisted by storage-service (table ``keys``): the gateway holds only
+sha256 hashes + config in ``KeyStore`` and manages them via the admin UI. The
+service generates each secret with ``generate_key()``; only its sha256 hash +
+config (``KeyInfo``) are held in memory, and plaintext is never persisted or
+logged. Comparisons are constant-time (``hmac.compare_digest``) over sha256
+digests. RPM/TPM counters are in-memory sliding 60s windows (single event loop /
+single worker): with ``--workers N`` or on restart, counters reset and are not
+shared.
 
 Enforcement:
 - RPM — ``check_rate(key)`` BEFORE proxying the request;
@@ -82,7 +83,7 @@ class KeyStore:
     # --- load / mutations ---
 
     def load(self, rows: list[dict]) -> None:
-        """Full reload from ``keydb.all()`` (called in lifespan).
+        """Full reload from storage-service key rows.
 
         A full reload: RPM/TPM windows reset — they are empty at startup
         anyway. Admin mutations use incremental upsert/remove/set_enabled so
@@ -247,3 +248,23 @@ class KeyStore:
 
     def key_ids(self) -> list[str]:
         return sorted(i.key_id for i in self._by_hash.values())
+
+    def snapshot(self) -> list[dict]:
+        """Rows in the storage-service shape (hashes only).
+
+        The admin panel normally lists keys from storage-service; this
+        in-memory view is the graceful fallback when the service is briefly
+        unavailable. Plaintext secrets are never stored here, so the shape is
+        identical to the persistent one (no credentials can leak).
+        """
+        return [
+            {
+                "key_hash": key_hash,
+                "key_id": info.key_id,
+                "rpm": info.rpm,
+                "tpm": info.tpm,
+                "models": list(info.models) if info.models else None,
+                "enabled": bool(info.enabled),
+            }
+            for key_hash, info in self._by_hash.items()
+        ]

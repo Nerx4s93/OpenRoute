@@ -98,21 +98,25 @@ class AffinityManager:
     All public state mutations (``begin_request`` / ``next_proxy`` /
     ``note_*`` / ``_evacuate_sync``) are synchronous: no ``await`` happens
     between reading and writing affinity state in the single event loop. Only
-    PostgreSQL writes and :meth:`load` / :meth:`aclose` are asynchronous; they
+    persistence writes and :meth:`load` / :meth:`aclose` are asynchronous; they
     go through a coalescing background writer.
+
+    Persistence is ``storage-service`` (``storage``): the shared HTTP client is
+    owned by ``main`` and is never closed here. Without a storage client the
+    manager is memory-only (unit tests / a deliberately unpersisted gateway).
     """
 
     def __init__(
         self,
         settings: Settings,
         proxies: ProxyManager,
-        db=None,
+        storage=None,
         now_wall=time.time,
         now_mono=time.monotonic,
     ) -> None:
         self._s = settings
         self.proxies = proxies
-        self.db = db
+        self.storage = storage
         self._now_wall = now_wall
         self._now_mono = now_mono
         self._sessions: dict[str, SessionState] = {}
@@ -123,25 +127,45 @@ class AffinityManager:
         self._loaded = False
         self._closed = False
 
+    def bind_storage(self, storage) -> None:
+        """Use ``storage`` for persistence."""
+        self.storage = storage
+
+    @property
+    def _persistent(self) -> bool:
+        return self.storage is not None
+
     # --- lifecycle ---------------------------------------------------------
 
     async def load(self) -> None:
-        """Load persisted bindings (S is restored; R/T start empty)."""
-        if self.db is None or self._loaded:
+        """Load persisted bindings (S is restored; R/T start empty).
+
+        With a storage client a failed load is reported to the caller (the
+        gateway refuses to start without its persistence).
+        """
+        if self._loaded:
             return
-        try:
-            rows = await asyncio.to_thread(self.db.load_all)
-        except Exception:
-            logger.exception("AffinityDB load failed; starting with empty bindings")
-            return
-        for key, proxy, created_at, last_used_at in rows:
-            self._sessions.setdefault(
-                key, SessionState(key, proxy, float(created_at), float(last_used_at))
-            )
-        self._loaded = True
+        if self.storage is not None:
+            rows = await self.storage.load_affinity()
+            for row in rows:
+                key = row["session_key"]
+                self._sessions.setdefault(
+                    key,
+                    SessionState(
+                        key,
+                        row.get("proxy"),
+                        float(row["created_at"]),
+                        float(row["last_used_at"]),
+                    ),
+                )
+            self._loaded = True
 
     async def aclose(self) -> None:
-        """Flush pending upserts, then close the DB (idempotent)."""
+        """Flush pending upserts (idempotent).
+
+        The storage client is shared with ``main`` and is deliberately NOT
+        closed here: ``main`` owns its lifecycle (and closes it last).
+        """
         if self._closed:
             return
         try:
@@ -155,21 +179,16 @@ class AffinityManager:
                     await task
                 except (asyncio.CancelledError, Exception):
                     pass
-            db, self.db = self.db, None
-            if db is not None:
-                try:
-                    await asyncio.to_thread(db.close)
-                except Exception:
-                    logger.debug("AffinityDB close failed", exc_info=True)
+            self.storage = None
 
     async def flush(self) -> None:
-        """Wait until every queued binding write reached PostgreSQL.
+        """Wait until every queued binding write reached its backend.
 
         The writer task is never awaited directly: it may have been created on
         a different event loop (multiple ``TestClient`` portals in tests).
         Awaiting a foreign task raises, while its ``done()`` flag and the
         pending queue are safe to poll. A foreign writer drains the queue until
-        it is empty, so waiting for ``done()`` also waits for its last commit.
+        it is empty, so waiting for ``done()`` also waits for its last write.
         """
         while not self._closed:
             task = self._writer_task
@@ -180,13 +199,13 @@ class AffinityManager:
                 break
             self._kick_writer()
             if self._writer_task is None:
-                break  # no DB / closed: nothing will ever be written
+                break  # no backend / closed: nothing will ever be written
             await asyncio.sleep(0.01)
 
-    # --- coalescing DB writer ---------------------------------------------
+    # --- coalescing writer ------------------------------------------------
 
     def _schedule_write(self, state: SessionState) -> None:
-        if self.db is None or self._closed:
+        if not self._persistent or self._closed:
             return
         self._pending[state.key] = (
             state.key, state.proxy, state.created_at, state.last_used_at,
@@ -194,7 +213,7 @@ class AffinityManager:
         self._kick_writer()
 
     def _kick_writer(self) -> None:
-        if self.db is None or self._closed:
+        if not self._persistent or self._closed:
             return
         try:
             loop = asyncio.get_running_loop()
@@ -203,61 +222,73 @@ class AffinityManager:
         if self._writer_task is None or self._writer_task.done():
             self._writer_task = loop.create_task(self._writer_loop())
 
-    @staticmethod
-    def _is_fk_violation(exc: BaseException) -> bool:
-        return exc.__class__.__name__ == "ForeignKeyViolation"
-
     async def _writer_loop(self) -> None:
         """Ordered, coalescing writer: latest state per session key wins.
 
         Concurrent requests may enqueue the same key several times; only the
-        last snapshot is written. A FK violation means the proxy row was just
-        deleted (race with an admin delete): the affected bindings are retried
-        as ``proxy = NULL`` instead of losing the write.
+        last snapshot is written. storage-service performs the row-by-row FK
+        fallback and reports ``unbound``. Every failure is logged and never
+        propagates to the request path: the in-memory binding stays valid and
+        a later state change schedules another write.
         """
         try:
             while self._pending:
                 batch = list(self._pending.values())
                 self._pending.clear()
+                storage = self.storage
+                if storage is None:
+                    return
                 try:
-                    await asyncio.to_thread(self.db.upsert_many, batch)
+                    result = await storage.upsert_affinity(batch)
                 except Exception as exc:
-                    if not self._is_fk_violation(exc):
-                        logger.warning("AffinityDB upsert failed: %s", exc)
-                        continue
-                    # A referenced proxy was deleted concurrently. Retry ROW BY
-                    # ROW: only the binding(s) that still point at a vanished
-                    # proxy may become NULL. A batch-wide NULL retry would
-                    # silently unbind healthy sessions that merely shared the
-                    # coalesced write.
-                    await self._retry_fk_batch(batch)
+                    logger.warning(
+                        "Affinity storage upsert failed (%s)",
+                        type(exc).__name__,
+                    )
+                    continue
+                try:
+                    unbound = int((result or {}).get("unbound") or 0)
+                except (TypeError, ValueError, AttributeError):
+                    unbound = 0
+                if unbound > 0:
+                    await self._reconcile_unbound(batch)
         finally:
             self._writer_task = None
 
-    async def _retry_fk_batch(
+    async def _reconcile_unbound(
         self, batch: list[tuple[str, str | None, float, float]]
     ) -> None:
-        """Row-by-row fallback after a batch FK violation (deleted proxy)."""
-        for key, proxy, created_at, used in batch:
-            row = (key, proxy, created_at, used)
-            try:
-                await asyncio.to_thread(self.db.upsert_many, [row])
-            except Exception as exc:
-                if not self._is_fk_violation(exc):
-                    logger.warning("AffinityDB upsert failed: %s", exc)
-                    continue
-                null_row = (key, None, created_at, used)
-                try:
-                    await asyncio.to_thread(self.db.upsert_many, [null_row])
-                except Exception:
-                    logger.warning("AffinityDB NULL retry failed", exc_info=True)
-                    continue
-                # The proxy vanished from PostgreSQL: keep memory in sync (only
-                # if this state still points at the vanished binding).
-                state = self._sessions.get(key)
-                if (state is not None and state.proxy == proxy
-                        and state.last_used_at == used):
-                    state.proxy = None
+        """Sync memory after storage-service nulled vanished-proxy bindings.
+
+        The service reports only a count, so the authoritative bindings are
+        re-read and only sessions whose persisted proxy is now NULL are
+        unbound, and only while the in-memory snapshot still matches the row
+        that was written. Healthy bindings in the same coalesced batch stay
+        untouched.
+        """
+        storage = self.storage
+        if storage is None:
+            return
+        try:
+            rows = await storage.load_affinity()
+        except Exception as exc:
+            logger.warning(
+                "Affinity reconcile after unbound rows failed (%s)",
+                type(exc).__name__,
+            )
+            return
+        persisted = {
+            row["session_key"]: row.get("proxy") for row in rows
+        }
+        for key, proxy, _created_at, used in batch:
+            if proxy is None:
+                continue
+            if key not in persisted or persisted[key] is not None:
+                continue
+            state = self._sessions.get(key)
+            if (state is not None and state.proxy == proxy
+                    and state.last_used_at == used):
+                state.proxy = None
 
     # --- window / aggregates ----------------------------------------------
 
@@ -482,7 +513,7 @@ class AffinityManager:
 
         A new session is assigned by score; an existing session keeps its
         binding (and only refreshes ``last_used_at``). One-shot requests carry
-        no :class:`SessionState` and never create a DB row.
+        no :class:`SessionState` and never create a persisted row.
         """
         now = self._now_wall()
         if identity.key is None:
@@ -552,7 +583,7 @@ class AffinityManager:
                 return proxy
 
         # Temporary fallback (cooling / RPM cap / URL already tried): the
-        # permanent binding in ``state`` and PostgreSQL stays untouched.
+        # permanent binding in ``state`` and persistence stay untouched.
         chosen = self._pick_url(exclude)
         if chosen is not None:
             return chosen
@@ -615,8 +646,8 @@ class AffinityManager:
 
         Big sessions first (``tokens_1h`` desc, then ``requests_1h`` desc,
         then key desc); after every assignment aggregates are recomputed, so
-        the next session sees the projector's new load. DB writes are queued
-        and coalesced.
+        the next session sees the projector's new load. Persistence writes are
+        queued and coalesced.
         """
         exclude = set(exclude or ())
         now = self._now_wall()
@@ -664,7 +695,7 @@ class AffinityManager:
 
         Parking and every in-memory rebind happen synchronously inside the
         call (before it returns control to the event loop); only the coalesced
-        PostgreSQL write is backgrounded.
+        persistence write is backgrounded.
         """
         return self._evacuate_sync(
             group, quota_until=quota_until, banned_until=banned_until,

@@ -1,4 +1,8 @@
-"""Unit tests for proxy personas (gateway.personas) — no real DB or network."""
+"""Unit tests for proxy personas (gateway.personas) — no real DB or network.
+
+Persistence is exercised against the in-memory ``FakeStorage``; local async
+subclasses model slow/hanging/failing storage-service calls.
+"""
 
 from __future__ import annotations
 
@@ -8,8 +12,10 @@ import time
 import pytest
 
 import gateway.personas as personas_mod
+from fake_storage import FakeStorage
 from gateway import opencode
 from gateway.personas import Persona, PersonaStore
+from gateway.storage import StorageUnavailable
 
 
 def _assert_valid(persona: Persona) -> None:
@@ -20,59 +26,29 @@ def _assert_valid(persona: Persona) -> None:
     assert persona.generation >= 0
 
 
-def _row(persona: Persona) -> tuple[str, str, str, str, float, int]:
-    return (persona.quota_key, persona.session_id, persona.project_id,
-            persona.trace_id, persona.created_at, persona.generation)
+def _row(persona: Persona) -> dict:
+    return {
+        "quota_key": persona.quota_key,
+        "session_id": persona.session_id,
+        "project_id": persona.project_id,
+        "trace_id": persona.trace_id,
+        "created_at": persona.created_at,
+        "generation": persona.generation,
+    }
 
 
-class FakeDB:
-    """In-memory PersonaDB double honouring the generation guard."""
+class TrackingStorage(FakeStorage):
+    """FakeStorage that records successful persona upserts."""
 
-    def __init__(self, rows=(), *, fail_upserts: int = 0):
-        self.rows = list(rows)
-        self.fail_upserts = fail_upserts
-        self.saved: list[Persona] = []
-        self.closed = False
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs)
+        self.upserts: list[Persona] = []
 
-    def load_all(self):
-        return list(self.rows)
-
-    def load_one(self, quota_key):
-        for row in self.rows:
-            if row[0] == quota_key:
-                return row
-        return None
-
-    def upsert(self, persona):
-        if self.fail_upserts:
-            self.fail_upserts -= 1
-            raise RuntimeError("db down")
-        stored = self.load_one(persona.quota_key)
-        if stored is not None and stored[5] > persona.generation:
-            return False
-        self.rows = [r for r in self.rows if r[0] != persona.quota_key]
-        self.rows.append(_row(persona))
-        self.saved.append(persona)
-        return True
-
-    def close(self):
-        self.closed = True
-
-
-class BadDB:
-    """Every operation fails: the store must degrade to memory-only."""
-
-    def load_all(self):
-        raise RuntimeError("db down")
-
-    def load_one(self, quota_key):
-        raise RuntimeError("db down")
-
-    def upsert(self, persona):
-        raise RuntimeError("db down")
-
-    def close(self):
-        raise RuntimeError("db down")
+    async def upsert_persona(self, persona):
+        written = await super().upsert_persona(persona)
+        if written:
+            self.upserts.append(persona)
+        return written
 
 
 def _fast_persist(monkeypatch):
@@ -90,7 +66,7 @@ def test_persona_create_has_valid_fields():
 
 @pytest.mark.asyncio
 async def test_get_or_create_is_stable_and_keyed_by_bucket():
-    store = PersonaStore(None)
+    store = PersonaStore()
     first = await store.get_or_create("a.invalid:8080")
     again = await store.get_or_create("a.invalid:8080")
     other = await store.get_or_create("b.invalid:8080")
@@ -106,7 +82,7 @@ async def test_get_or_create_is_stable_and_keyed_by_bucket():
 
 @pytest.mark.asyncio
 async def test_get_or_create_parallel_calls_share_one_persona():
-    store = PersonaStore(None)
+    store = PersonaStore()
     results = await asyncio.gather(
         *(store.get_or_create("bucket:1") for _ in range(20)))
     assert len({p.session_id for p in results}) == 1
@@ -117,7 +93,7 @@ async def test_get_or_create_parallel_calls_share_one_persona():
 
 @pytest.mark.asyncio
 async def test_rotate_increments_generation_and_replaces_ids():
-    store = PersonaStore(None)
+    store = PersonaStore()
     before = await store.get_or_create("a.invalid:8080")
     after = await store.rotate("a.invalid:8080")
     _assert_valid(after)
@@ -132,9 +108,14 @@ async def test_rotate_increments_generation_and_replaces_ids():
 
 
 @pytest.mark.asyncio
-async def test_bad_db_never_breaks_lookup_or_load():
-    store = PersonaStore(BadDB())
-    await store.load()  # must not raise
+async def test_unavailable_storage_load_fails_but_lookup_stays_valid():
+    """A failed initial load is reportable (startup); requests keep working."""
+    storage = FakeStorage()
+    storage.raise_unavailable()
+    store = PersonaStore(storage=storage)
+
+    with pytest.raises(StorageUnavailable):
+        await store.load()
     assert store.get_cached("a.invalid:8080") is None
 
     persona = await store.get_or_create("a.invalid:8080")  # must not raise
@@ -144,61 +125,65 @@ async def test_bad_db_never_breaks_lookup_or_load():
     rotated = await store.rotate("a.invalid:8080")  # must not raise
     assert rotated.generation == 1
 
-    await store.close()  # gathers/quiesces failed writes, swallows close error
+    await store.close()  # swallows failed writes
     await store.close()  # idempotent
 
 
 @pytest.mark.asyncio
 async def test_persist_retries_after_failure(monkeypatch):
     _fast_persist(monkeypatch)
-    db = FakeDB(fail_upserts=1)
-    store = PersonaStore(db)
+    storage = FakeStorage()
+    store = PersonaStore(storage=storage)
     await store.load()
 
+    storage.fail_next(StorageUnavailable("storage down"))
     persona = await store.get_or_create("bucket:1")
-    await asyncio.sleep(0.05)  # first upsert fails -> backoff, then retried
-    assert db.fail_upserts == 0
+    await asyncio.sleep(0)  # let the scheduled write run and fail
+    assert "bucket:1" not in storage.personas
+    assert "bucket:1" in store._dirty  # still queued for a retry
 
     assert await store.get_or_create("bucket:1") is persona
     await asyncio.sleep(0.05)
-    assert db.saved, "dirty persona was never retried"
-    assert db.saved[-1].session_id == persona.session_id
-    assert db.saved[-1].generation == 0
+    assert "bucket:1" in storage.personas, "dirty persona was never retried"
+    assert storage.personas["bucket:1"]["session_id"] == persona.session_id
+    assert storage.personas["bucket:1"]["generation"] == 0
     await store.close()
 
 
 @pytest.mark.asyncio
 async def test_rotation_during_backoff_persists_new_generation(monkeypatch):
     _fast_persist(monkeypatch)
-    db = FakeDB(fail_upserts=1)
-    store = PersonaStore(db)
+    storage = FakeStorage()
+    store = PersonaStore(storage=storage)
     await store.load()
 
+    storage.fail_next(StorageUnavailable("storage down"))
     first = await store.get_or_create("bucket:1")
     rotated = await store.rotate("bucket:1")  # generation 1, during backoff
     await asyncio.sleep(0.05)
     await store.get_or_create("bucket:1")  # cache hit -> retry if expired
     await asyncio.sleep(0.05)
 
-    assert db.saved, "generation 1 was never written"
-    assert db.saved[-1].generation == 1
-    assert db.saved[-1].session_id == rotated.session_id
+    assert "bucket:1" in storage.personas, "generation 1 was never written"
+    assert storage.personas["bucket:1"]["generation"] == 1
+    assert storage.personas["bucket:1"]["session_id"] == rotated.session_id
     assert rotated.session_id != first.session_id
     await store.close()
 
 
 @pytest.mark.asyncio
-async def test_reconcile_with_db_after_failed_load(monkeypatch):
+async def test_reconcile_with_storage_after_failed_load(monkeypatch):
     _fast_persist(monkeypatch)
 
-    class LoadFailsDB(FakeDB):
-        def load_all(self):
-            raise RuntimeError("db down during load")
+    class LoadFailsStorage(FakeStorage):
+        async def load_personas(self):
+            raise StorageUnavailable("storage down during load")
 
     stored = Persona.create("bucket:1", generation=5)
-    db = LoadFailsDB(rows=[_row(stored)])
-    store = PersonaStore(db)
-    await store.load()
+    storage = LoadFailsStorage(personas=[stored])
+    store = PersonaStore(storage=storage)
+    with pytest.raises(StorageUnavailable):
+        await store.load()
     assert store.get_cached("bucket:1") is None
 
     created = await store.get_or_create("bucket:1")  # generation 0, rejected
@@ -208,23 +193,28 @@ async def test_reconcile_with_db_after_failed_load(monkeypatch):
     cached = store.get_cached("bucket:1")
     assert cached is not None
     assert cached.generation >= 5
-    assert cached.session_id == stored.session_id  # DB row won
+    assert cached.session_id == stored.session_id  # stored row won
 
     rotated = await store.rotate("bucket:1")
     assert rotated.generation == 6
     await asyncio.sleep(0.05)
-    assert db.saved[-1].generation == 6
-    assert db.saved[-1].session_id == rotated.session_id
+    assert storage.personas["bucket:1"]["generation"] == 6
+    assert storage.personas["bucket:1"]["session_id"] == rotated.session_id
     await store.close()
 
 
 @pytest.mark.asyncio
 async def test_load_replaces_invalid_row_with_valid_persona(monkeypatch):
     _fast_persist(monkeypatch)
-    row = ("bucket:1", "not-a-session", opencode.new_project_id(),
-           opencode.new_trace_id(), 10.0, 3)
-    db = FakeDB(rows=[row])
-    store = PersonaStore(db)
+    storage = TrackingStorage(personas=[{
+        "quota_key": "bucket:1",
+        "session_id": "not-a-session",
+        "project_id": opencode.new_project_id(),
+        "trace_id": opencode.new_trace_id(),
+        "created_at": 10.0,
+        "generation": 3,
+    }])
+    store = PersonaStore(storage=storage)
     await store.load()
     await asyncio.sleep(0.05)
 
@@ -232,29 +222,27 @@ async def test_load_replaces_invalid_row_with_valid_persona(monkeypatch):
     assert cached is not None
     _assert_valid(cached)
     assert cached.generation == 4
-    assert db.saved and db.saved[-1].generation == 4
-    assert db.saved[-1].session_id == cached.session_id
+    assert storage.upserts and storage.upserts[-1].generation == 4
+    assert storage.upserts[-1].session_id == cached.session_id
+    assert storage.personas["bucket:1"]["session_id"] == cached.session_id
     await store.close()
 
 
 @pytest.mark.asyncio
 async def test_load_restores_rows_without_downgrading_generation():
-    class FakeLoadDB(FakeDB):
-        def upsert(self, persona):
-            return True
-
-    db = FakeLoadDB(rows=[
-        _row(Persona.create("a.invalid:1", generation=4)),
-        _row(Persona.create("b.invalid:2", generation=2)),
-    ])
-    store = PersonaStore(db)
+    a = Persona.create("a.invalid:1", generation=4)
+    b = Persona.create("b.invalid:2", generation=2)
+    storage = FakeStorage(personas=[a, b])
+    store = PersonaStore(storage=storage)
     await store.load()
     assert store.get_cached("a.invalid:1").generation == 4
     assert store.get_cached("b.invalid:2").generation == 2
 
-    # A newer in-memory persona (created while load raced startup) wins.
+    # A newer in-memory persona (created while load raced startup) wins over
+    # the older row on a repeated load.
     rotated = await store.rotate("a.invalid:1")
     assert rotated.generation == 5
+    store._loaded = False
     await store.load()
     assert store.get_cached("a.invalid:1") is rotated
     assert rotated.generation == 5
@@ -264,18 +252,18 @@ async def test_load_restores_rows_without_downgrading_generation():
 @pytest.mark.asyncio
 async def test_close_flushes_dirty_persona(monkeypatch):
     _fast_persist(monkeypatch)
-    db = FakeDB()
-    store = PersonaStore(db)
+    storage = FakeStorage()
+    store = PersonaStore(storage=storage)
     persona = await store.get_or_create("bucket:1")
     await store.close()
-    assert db.saved
-    assert db.saved[-1].session_id == persona.session_id
-    assert db.closed is True
+    assert storage.personas["bucket:1"]["session_id"] == persona.session_id
+    # The shared storage client is owned by main and must stay open.
+    assert storage.closed is False
 
 
 @pytest.mark.asyncio
 async def test_close_is_idempotent_and_store_keeps_working_in_memory():
-    store = PersonaStore(None)
+    store = PersonaStore()
     persona = await store.get_or_create("a.invalid:8080")
     await store.close()
     await store.close()
@@ -289,36 +277,31 @@ async def test_close_is_idempotent_and_store_keeps_working_in_memory():
 
 @pytest.mark.asyncio
 async def test_close_does_not_duplicate_inflight_write():
-    class SlowDB(FakeDB):
-        def upsert(self, persona):
-            time.sleep(0.05)
-            return super().upsert(persona)
+    class SlowStorage(TrackingStorage):
+        async def upsert_persona(self, persona):
+            await asyncio.sleep(0.05)
+            return await super().upsert_persona(persona)
 
-    db = SlowDB()
-    store = PersonaStore(db)
+    storage = SlowStorage()
+    store = PersonaStore(storage=storage)
     persona = await store.get_or_create("k")
     await store.close()
 
-    assert len(db.saved) == 1
-    assert db.saved[0].session_id == persona.session_id
-    assert db.closed is True
+    assert len(storage.upserts) == 1
+    assert storage.upserts[0].session_id == persona.session_id
 
 
 @pytest.mark.asyncio
-async def test_close_is_bounded_when_db_hangs(monkeypatch):
+async def test_close_is_bounded_when_storage_hangs(monkeypatch):
     monkeypatch.setattr(personas_mod, "_CLOSE_TIMEOUT_SECONDS", 0.05)
 
-    class HangingDB(FakeDB):
-        def upsert(self, persona):
-            time.sleep(0.2)
-            return super().upsert(persona)
+    class HangingStorage(TrackingStorage):
+        async def upsert_persona(self, persona):
+            await asyncio.sleep(0.2)
+            return await super().upsert_persona(persona)
 
-        def close(self):
-            time.sleep(0.2)
-            super().close()
-
-    db = HangingDB()
-    store = PersonaStore(db)
+    storage = HangingStorage()
+    store = PersonaStore(storage=storage)
     for key in ("k1", "k2", "k3"):
         await store.get_or_create(key)
 
@@ -331,7 +314,7 @@ async def test_close_is_bounded_when_db_hangs(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_fallback_persona_is_cached(monkeypatch):
-    store = PersonaStore(None)
+    store = PersonaStore()
 
     def boom(persona):
         raise RuntimeError("boom")
@@ -347,13 +330,18 @@ async def test_fallback_persona_is_cached(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_load_invalid_row_keeps_newer_cached_persona():
-    store = PersonaStore(None)
+    store = PersonaStore()
     await store.get_or_create("k")
     current = await store.rotate("k")  # generation 1
-    row = ("k", "not-a-session", opencode.new_project_id(),
-           opencode.new_trace_id(), 1.0, 0)
-    db = FakeDB(rows=[row])
-    store._db = db
+    storage = TrackingStorage(personas=[{
+        "quota_key": "k",
+        "session_id": "not-a-session",
+        "project_id": opencode.new_project_id(),
+        "trace_id": opencode.new_trace_id(),
+        "created_at": 1.0,
+        "generation": 0,
+    }])
+    store.bind_storage(storage)
 
     await store.load()
 
@@ -362,5 +350,5 @@ async def test_load_invalid_row_keeps_newer_cached_persona():
     _assert_valid(cached)
     assert cached.generation == 1
     await asyncio.sleep(0.05)
-    assert db.saved == []
+    assert storage.upserts == []
     await store.close()

@@ -1,9 +1,13 @@
 """Gateway configuration (pydantic-settings).
 
 ``Settings`` field names map to upper-case env vars case-insensitively
-(``postgres_dsn`` <- ``POSTGRES_DSN``). :func:`get_settings` returns the
-process-wide singleton (``lru_cache``). The field set is a frozen contract —
-do not rename fields: the env-var names are part of the contract.
+(``storage_service_url`` <- ``STORAGE_SERVICE_URL``). :func:`get_settings`
+returns the process-wide singleton (``lru_cache``). The field set is a frozen
+contract — do not rename fields: the env-var names are part of the contract.
+
+The gateway owns no database connection: every persistent domain (proxies,
+client keys, affinity, personas, request log) goes through ``storage-service``,
+which is the only component that knows the PostgreSQL DSN.
 """
 
 from __future__ import annotations
@@ -19,14 +23,20 @@ class Settings(BaseSettings):
     """All gateway env vars (see ``.env.example``).
 
     Field names map to upper-case env vars case-insensitively
-    (``postgres_dsn`` <- ``POSTGRES_DSN``).
+    (``storage_service_url`` <- ``STORAGE_SERVICE_URL``). There is deliberately
+    no DSN field: PostgreSQL is reached only by ``storage-service``.
     """
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8", extra="ignore")
 
     # --- internal API (web-admin <-> gateway) ---
     internal_api_token: str = ""  # empty = internal API disabled (404)
-    postgres_dsn: str = "postgresql://openroute:openroute@localhost:5432/openroute"
+
+    # --- storage-service (owns PostgreSQL; gateway has no DSN of its own) ---
+    # The gateway reaches it by container name inside the private Docker network.
+    storage_service_url: str = "http://openroute-storage:8000"
+    storage_api_token: str = ""  # STORAGE_API_TOKEN (empty = service fails closed)
+    storage_timeout_seconds: float = 10.0
 
     # --- proxy pool source ---
     proxies_url: str = "http://openroute-px6:8000/proxies"

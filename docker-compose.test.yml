@@ -1,7 +1,8 @@
-# PostgreSQL для локального прогона тестов (pytest).
-# Порт публикуется ТОЛЬКО на 127.0.0.1:55433, чтобы не конфликтовать
-# ни с прод-инстансом из docker-compose.yml (порт не публикуется),
-# ни с NVRoute-тестами (55432), ни с локальным PostgreSQL (5432).
+# PostgreSQL для real-SQL тестов storage-service (pytest).
+# Нужен только tests/test_storage_service.py: gateway-наборы герметичны и
+# используют tests/fake_storage.py. Порт публикуется ТОЛЬКО на 127.0.0.1:55433,
+# чтобы не конфликтовать ни с прод-инстансом из docker-compose.yml (порт не
+# публикуется), ни с NVRoute-тестами (55432), ни с локальным PostgreSQL (5432).
 #
 # Запуск: docker compose -f docker-compose.test.yml up -d
 # Остановка: docker compose -f docker-compose.test.yml down -v

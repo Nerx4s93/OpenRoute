@@ -71,11 +71,8 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from . import opencode, sessions
 from .affinity import AffinityLease, AffinityManager, SessionIdentity
-from .affinitydb import AffinityDB
 from .config import PROVIDER_NAME, get_settings
-from .keydb import KeyDB
 from .keys import AuthError, KeyInfo, KeyStore, RateLimitError, generate_key, hash_key
-from .personadb import PersonaDB
 from .personas import PersonaStore
 from .px6 import Px6ServiceClient, Px6ServiceError
 from .proxies import (
@@ -85,8 +82,15 @@ from .proxies import (
     canonical_quota_key,
     mask_proxy,
 )
-from .proxydb import ProxyDB
 from .reqlog import LogEntry, RequestLog
+from .storage import (
+    StorageAuthError,
+    StorageClient,
+    StorageConflict,
+    StorageError,
+    StorageNotFound,
+    StorageUnavailable,
+)
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("openroute")
@@ -94,23 +98,21 @@ logger = logging.getLogger("openroute")
 settings = get_settings()
 manager = ProxyManager(settings)
 keystore = KeyStore()
-reqlog = RequestLog(settings.postgres_dsn)
+# Request log facade: storage-service owns ``request_log``. Created in the
+# lifespan once the shared storage client exists; tests inject one bound to a
+# fake before startup.
+reqlog: RequestLog | None = None
 # Conversation fingerprint -> upstream session id (a caller's affinity wins).
 session_registry = sessions.SessionRegistry()
-# PostgreSQL stores (proxies/keys tables in the same DB) are created in the
-# lifespan — tests patch settings per-gateway, so the DSN is taken at startup,
-# not at module import.
-proxydb: ProxyDB | None = None
-keydb: KeyDB | None = None
-affinitydb: AffinityDB | None = None
+# storage-service owns all persistence for proxies, keys, affinity, personas
+# and the request log. Created in the lifespan so tests can inject a fake; a
+# gateway that cannot reach it refuses to start.
+storage: StorageClient | None = None
+# Sticky sessions and proxy personas persist through the shared storage client.
 affinity: AffinityManager | None = None
 # One synthetic client identity per proxy quota bucket (in-memory hot path;
-# PostgreSQL persistence is fire-and-forget).
+# storage-service persistence is fire-and-forget).
 personas: PersonaStore | None = None
-
-# Strong refs to fire-and-forget tasks (log writes): create_task returns a
-# weakref-compatible Future — without a set the task can be GC'd in flight.
-_bg_tasks: set[asyncio.Task] = set()
 
 # Upstream request headers need no drop list: the request is built from a
 # strict ALLOWLIST (see ``_upstream_headers``) and nothing from the client is
@@ -146,51 +148,126 @@ async def refresh_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncIterator[None]:
-    global proxydb, keydb, affinitydb, affinity, personas
-    # The proxy pool and client keys live in PostgreSQL and are populated only
-    # via the internal API (admin UI). env/files no longer participate.
-    proxydb = ProxyDB(settings.postgres_dsn)
-    manager.bind_db(proxydb)
-    rows = proxydb.all()
-    manager.apply_proxies(rows)
+    global storage, affinity, personas, reqlog
+    # storage-service owns all persistence for proxies, client keys, affinity,
+    # personas and the request log. Tests inject a fake by setting
+    # ``main.storage`` before startup; production constructs the HTTP client
+    # here. A gateway without its persistence service must NOT serve traffic
+    # (see STORAGE_SERVICE_URL / STORAGE_API_TOKEN).
+    if storage is None:
+        storage = StorageClient(
+            settings.storage_service_url,
+            settings.storage_api_token,
+            timeout=settings.storage_timeout_seconds,
+        )
+    storage_client = storage
     try:
-        parking = proxydb.parking_all()
+        await storage_client.check()
+    except Exception as exc:
+        # Never chain the exception: no URL/token/DSN may leak into logs or the
+        # startup error. Only the type is diagnostic enough.
+        logger.error("storage-service check failed (%s); refusing to start",
+                     type(exc).__name__)
+        await _close_storage_client(storage_client)
+        if storage is storage_client:
+            storage = None
+        raise RuntimeError(
+            "storage-service is unreachable or rejected STORAGE_API_TOKEN; "
+            "refusing to start without persistence"
+        ) from None
+
+    manager.bind_storage(storage_client)
+    try:
+        proxy_rows = await storage_client.list_proxies(listed=True)
+    except Exception as exc:
+        logger.error("Failed to load proxies from storage-service (%s)",
+                     type(exc).__name__)
+        await _close_storage_client(storage_client)
+        if storage is storage_client:
+            storage = None
+        raise RuntimeError(
+            "failed to load the proxy pool from storage-service"
+        ) from None
+    manager.apply_proxies(proxy_rows)
+    try:
+        # ALL rows, including soft-removed ones: a proxy that reappears after
+        # being unlisted must get its quota parking/ban back.
+        parking = await storage_client.list_proxies()
         manager.load_parking(parking)
     except Exception:
         logger.exception("Failed to load proxy parking; starting unparked")
-    logger.info("Loaded %d proxies from PostgreSQL (%d enabled)",
-                len(rows), sum(1 for _, en in rows if en))
-    if not rows:
+    logger.info("Loaded %d proxies from storage-service (%d enabled)",
+                len(proxy_rows), sum(1 for p in manager.proxies if p.enabled))
+    if not proxy_rows:
         logger.warning("No proxies configured: add proxies via the admin UI "
                        "(or PROXIES_URL will populate them on refresh)")
-    keydb = KeyDB(settings.postgres_dsn)
-    keystore.load(keydb.all())
+    try:
+        key_rows = await storage_client.list_keys()
+    except Exception as exc:
+        logger.error("Failed to load client keys from storage-service (%s)",
+                     type(exc).__name__)
+        await _close_storage_client(storage_client)
+        if storage is storage_client:
+            storage = None
+        raise RuntimeError(
+            "failed to load client keys from storage-service"
+        ) from None
+    keystore.load([_key_row(row) for row in key_rows])
     if not keystore.key_ids():
         logger.warning("No client keys configured: all /v1 requests get 401 "
                        "until keys are added via the admin UI")
     # Sticky sessions: load persisted bindings (S survives a restart; R/T are
-    # in-memory and start empty). The manager is created even when disabled so
-    # /health keeps a stable shape.
-    if affinitydb is None:
-        affinitydb = AffinityDB(settings.postgres_dsn)
+    # in-memory and start empty). Persistence is storage-service; an initial
+    # load failure aborts startup instead of silently serving without the
+    # bindings the operator expects. The manager is created even when disabled
+    # so /health keeps a stable shape.
     if affinity is None:
-        affinity = AffinityManager(settings, manager, db=affinitydb)
+        affinity = AffinityManager(settings, manager, storage=storage_client)
+    else:
+        affinity.bind_storage(storage_client)
     try:
         await affinity.load()
-    except Exception:
-        logger.exception("Failed to load session affinity; continuing without it")
-    logger.info("Session affinity enabled=%s (window=%.0fs)",
+    except Exception as exc:
+        logger.error(
+            "Failed to load session affinity from storage-service (%s); "
+            "refusing to start", type(exc).__name__)
+        affinity = None
+        await _close_storage_client(storage_client)
+        if storage is storage_client:
+            storage = None
+        raise RuntimeError(
+            "failed to load session affinity from storage-service"
+        ) from None
+    logger.info("Session affinity enabled=%s (window=%.0fs, storage-service)",
                 settings.affinity_enabled, settings.affinity_window_seconds)
     # Proxy personas: one synthetic session/project/trace identity per quota
-    # bucket. Loading is best-effort; an unreachable DB leaves the store empty
-    # and persistence becomes a no-op (requests never wait on it).
-    if personas is None and settings.persona_enabled:
-        personas = PersonaStore(PersonaDB(settings.postgres_dsn))
+    # bucket. Like affinity, the initial load must succeed: without it the
+    # gateway would silently create replacement identities for every bucket.
+    if settings.persona_enabled:
+        if personas is None:
+            personas = PersonaStore(storage=storage_client)
+        else:
+            personas.bind_storage(storage_client)
         try:
             await personas.load()
-        except Exception:
-            logger.exception("Failed to load proxy personas; starting empty")
-    logger.info("Proxy personas enabled=%s", settings.persona_enabled)
+        except Exception as exc:
+            logger.error(
+                "Failed to load proxy personas from storage-service (%s); "
+                "refusing to start", type(exc).__name__)
+            personas = None
+            await _close_storage_client(storage_client)
+            if storage is storage_client:
+                storage = None
+            raise RuntimeError(
+                "failed to load proxy personas from storage-service"
+            ) from None
+    logger.info("Proxy personas enabled=%s (storage-service)",
+                settings.persona_enabled)
+    # Request log: rows and aggregates live in storage-service. The log never
+    # blocks startup (writes are fire-and-forget), and a facade injected by a
+    # test is reused as-is instead of being replaced.
+    if reqlog is None:
+        reqlog = RequestLog(storage_client)
     task = asyncio.create_task(refresh_loop())
     logger.info("%s gateway started: upstream=%s, proxies from %s",
                 PROVIDER_NAME, settings.opencode_base_url, settings.proxies_url)
@@ -203,21 +280,27 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     if affinity is not None:
         await affinity.aclose()
         affinity = None
-        affinitydb = None  # closed by AffinityManager.aclose()
-    elif affinitydb is not None:
-        affinitydb.close()
-        affinitydb = None
     if personas is not None:
         await personas.close()
         personas = None
-    if keydb is not None:
-        keydb.close()
-        keydb = None
-    if proxydb is not None:
-        proxydb.close()
-        proxydb = None
-    reqlog.close()
+    # Drain request-log writes (bounded) before the storage client goes away.
+    # The facade never closes the shared client itself.
+    if reqlog is not None:
+        await reqlog.close()
+        reqlog = None
+    # Drain in-flight parking writes before the storage client goes away.
     await manager.aclose()
+    await _close_storage_client(storage_client)
+    if storage is storage_client:
+        storage = None
+
+
+async def _close_storage_client(client) -> None:
+    """Close a storage client without ever raising (idempotent)."""
+    try:
+        await client.aclose()
+    except Exception:
+        logger.debug("Failed to close the storage client", exc_info=True)
 
 
 # --- error envelope --------------------------------------------------------
@@ -386,19 +469,21 @@ def _log_request(
     started: float, stream: bool, account: str | None,
     prompt: int | None = None, completion: int | None = None, error: str | None = None,
 ) -> None:
-    """Fire-and-forget logging: ``log()`` never raises and never breaks a request."""
+    """Fire-and-forget logging: schedules the storage write, never blocks.
+
+    ``log_soon`` is synchronous and swallows every failure (including a
+    missing/closed facade), so the request path never awaits the log service.
+    """
+    log = reqlog
+    if log is None:
+        return
     entry = LogEntry(
         ts=time.time(), key_id=key_id, method=method, path=path, model=model,
         status=status, latency_ms=round((time.monotonic() - started) * 1000.0, 1),
         stream=stream, account=account, prompt_tokens=prompt,
         completion_tokens=completion, error=error,
     )
-    try:
-        task = asyncio.create_task(reqlog.log(entry))
-        _bg_tasks.add(task)  # strong ref: the task is not GC'd in flight
-        task.add_done_callback(_bg_tasks.discard)
-    except RuntimeError:  # no running event loop — should not happen in a request path
-        pass
+    log.log_soon(entry)
 
 
 async def _drain(upstream: httpx.Response, stream: bool) -> None:
@@ -1031,18 +1116,37 @@ def _require_internal(request: Request) -> None:
         raise HTTPException(403, "Invalid internal token")
 
 
-def _require_proxydb() -> ProxyDB:
-    """ProxyDB is initialised in lifespan; without it (no startup) -> 503."""
-    if proxydb is None:
-        raise HTTPException(503, "Proxy DB not initialized")
-    return proxydb
+def _require_storage() -> StorageClient:
+    """storage-service client is created in lifespan; absent -> 503."""
+    if storage is None:
+        raise HTTPException(503, "Storage service not initialized")
+    return storage
 
 
-def _require_keydb() -> KeyDB:
-    """KeyDB is initialised in lifespan; without it (no startup) -> 503."""
-    if keydb is None:
-        raise HTTPException(503, "Key DB not initialized")
-    return keydb
+def _storage_http_error(
+    exc: StorageError,
+    *,
+    action: str,
+    not_found: str = "Not found",
+    conflict: str = "Conflict",
+) -> HTTPException:
+    """Map a typed storage failure to a secret-free ``HTTPException``.
+
+    Only the exception CLASS is used — never the message, token or DSN. A
+    missing row is a 404, a write conflict a 409, and everything else
+    (transport/5xx/auth) is a 503: the gateway cannot persist the change.
+    """
+    if isinstance(exc, StorageNotFound):
+        return HTTPException(404, not_found)
+    if isinstance(exc, StorageConflict):
+        return HTTPException(409, conflict)
+    if isinstance(exc, (StorageAuthError, StorageUnavailable)):
+        logger.error("storage-service unavailable during %s: %s",
+                     action, type(exc).__name__)
+    else:
+        logger.error("storage-service failed during %s: %s (HTTP %s)",
+                     action, type(exc).__name__, getattr(exc, "status_code", None))
+    return HTTPException(503, "Storage service unavailable")
 
 
 def _json_limit(raw: object, field: str) -> tuple[int | None, str | None]:
@@ -1068,6 +1172,28 @@ _ROLLING_PERIOD_DAYS = {"1d": 1, "3d": 3, "7d": 7, "30d": 30, "90d": 90}
 # Legacy day/week/month stay accepted for existing API clients.
 _PANEL_PERIODS = {"day", "week", "month"} | set(_ROLLING_PERIOD_DAYS)
 _STATS_PERIODS = _PANEL_PERIODS | {"all"}
+
+
+def _empty_usage() -> dict:
+    """The zero ``summary`` payload (admin responses degrade, never raise)."""
+    return {
+        "total": {
+            "requests": 0, "errors": 0, "tokens": 0, "avg_latency_ms": 0.0,
+        }
+    }
+
+
+def _with_usage_total(usage: dict | None) -> dict:
+    """Keep the admin ``usage`` contract when the request log degrades.
+
+    ``RequestLog.summary_async`` returns ``{}`` when storage-service is
+    unavailable (stats never 500); the panel payloads always carry
+    ``usage["total"]``, so fill the zero record instead of a missing key.
+    """
+    out = dict(usage or {})
+    if not isinstance(out.get("total"), dict):
+        out["total"] = _empty_usage()["total"]
+    return out
 
 
 def _period_since(period: str) -> float | None:
@@ -1104,9 +1230,15 @@ async def _proxies_panel_data(period: str = "all") -> dict:
     the heavy per-day series.
     """
     since = _period_since(period)
-    per_proxy = await reqlog.summary_by_account_async(since)
-    usage = await reqlog.summary_async(since)
-    recent = await reqlog.recent_async(50)
+    log = reqlog
+    if log is None:  # not started (or already shut down): degrade, never 500
+        per_proxy: dict = {}
+        usage: dict = _empty_usage()
+        recent: list[dict] = []
+    else:
+        per_proxy = await log.summary_by_account_async(since)
+        usage = _with_usage_total(await log.summary_async(since))
+        recent = await log.recent_async(50)
     st = manager.status()
     rows = []
     for p, s in zip(manager.proxies, st["proxies"]):
@@ -1116,7 +1248,10 @@ async def _proxies_panel_data(period: str = "all") -> dict:
     st["proxies"] = rows
 
     try:
-        stats = await reqlog.proxy_stats_async(ttl_seconds=10.0)
+        stats = (
+            await log.proxy_stats_async(ttl_seconds=10.0)
+            if log is not None else {}
+        )
     except Exception:
         logger.exception("Failed to load per-proxy lifetime statistics")
         stats = {}
@@ -1143,12 +1278,45 @@ async def _proxies_panel_data(period: str = "all") -> dict:
     }
 
 
+def _key_row(row: dict) -> dict:
+    """One key row in the exact panel shape (hashes + config, no plaintext)."""
+    models = row.get("models")
+    return {
+        "key_hash": str(row.get("key_hash") or ""),
+        "key_id": str(row.get("key_id") or ""),
+        "rpm": row.get("rpm"),
+        "tpm": row.get("tpm"),
+        "models": list(models) if isinstance(models, list) else None,
+        "enabled": bool(row.get("enabled", False)),
+    }
+
+
 async def _keys_panel_data(period: str = "all") -> dict:
-    """Snapshot for the "Keys" page: key config from keydb + per-key stats from
-    the request log (including deleted keys — it is keyed by key_id)."""
-    usage = await reqlog.summary_async(_period_since(period))
-    keys_rows = await asyncio.to_thread(_require_keydb().all)
-    return {"keys": keys_rows, "usage": usage}
+    """Snapshot for the "Keys" page: key config from storage-service + per-key
+    stats from the request log (including deleted keys — it is keyed by
+    key_id).
+
+    Degrades to the in-memory ``keystore`` snapshot (same fields, hashes only)
+    when storage-service is briefly unavailable: the panel must never 500.
+    """
+    log = reqlog
+    usage = (
+        _with_usage_total(await log.summary_async(_period_since(period)))
+        if log is not None else _empty_usage()
+    )
+    client = storage
+    if client is None:
+        return {"keys": keystore.snapshot(), "usage": usage}
+    try:
+        rows = await client.list_keys()
+    except StorageError as exc:
+        logger.warning("Key list unavailable from storage-service (%s); "
+                       "serving the in-memory snapshot", type(exc).__name__)
+    except Exception:
+        logger.exception("Key list failed; serving the in-memory snapshot")
+    else:
+        return {"keys": [_key_row(row) for row in rows], "usage": usage}
+    return {"keys": keystore.snapshot(), "usage": usage}
 
 
 async def _stats_panel_data(days: int = 30, period: str | None = None) -> dict:
@@ -1186,7 +1354,10 @@ async def _stats_panel_data(days: int = 30, period: str | None = None) -> dict:
         query_since = start.timestamp()
 
     try:
-        daily = await reqlog.daily_by_account_async(query_since)
+        daily = (
+            await reqlog.daily_by_account_async(query_since)
+            if reqlog is not None else []
+        )
     except Exception:
         logger.exception("Failed to load the daily token series")
         daily = []
@@ -1319,16 +1490,23 @@ async def internal_proxies_set(request: Request) -> dict:
     data = await _read_json(request)
     proxy = str(data.get("proxy", ""))
     enabled = bool(data.get("enabled"))
-    db = _require_proxydb()
-    if await asyncio.to_thread(db.set_enabled, proxy, enabled):
-        manager.set_manually_disabled(proxy, not enabled)
-        if not enabled and affinity is not None:
-            try:
-                affinity.forget_proxy(proxy)  # invalidate stale sticky bindings
-            except Exception:
-                logger.exception("Affinity forget_proxy failed for %s", mask_proxy(proxy))
-        return {"ok": True, "message": "Proxy enabled" if enabled else "Proxy disabled"}
-    raise HTTPException(404, "Proxy not found")
+    client = _require_storage()
+    try:
+        updated = await client.set_proxy_enabled(proxy, enabled)
+    except StorageError as exc:
+        raise _storage_http_error(
+            exc, action="proxy set", not_found="Proxy not found") from None
+    if not updated:
+        raise HTTPException(404, "Proxy not found")
+    # Runtime/affinity side effects only AFTER persistence succeeded: a failed
+    # write must never leave the pool disagreeing with the stored flag.
+    manager.set_manually_disabled(proxy, not enabled)
+    if not enabled and affinity is not None:
+        try:
+            affinity.forget_proxy(proxy)  # invalidate stale sticky bindings
+        except Exception:
+            logger.exception("Affinity forget_proxy failed for %s", mask_proxy(proxy))
+    return {"ok": True, "message": "Proxy enabled" if enabled else "Proxy disabled"}
 
 
 # --- px6 account / purchase (web-admin -> gateway -> px6-service) ----------
@@ -1442,7 +1620,7 @@ async def internal_keys_add(request: Request) -> dict:
     """``{"key_id"?, "rpm"?, "tpm"?, "models"?}``.
 
     The service generates the plaintext ``openroute-...`` secret, returns it
-    once and stores only its sha256 hash (keys.py / keydb.py).
+    once and stores only its sha256 hash (storage-service).
     """
     _require_internal(request)
     data = await _read_json(request)
@@ -1467,12 +1645,16 @@ async def internal_keys_add(request: Request) -> dict:
         while f"k{i}" in existing:
             i += 1
         key_id = f"k{i}"
-    db = _require_keydb()
+    client = _require_storage()
     for _ in range(5):  # hash collisions are practically impossible; retry anyway
         plaintext = generate_key()
         h = hash_key(plaintext)
-        if await asyncio.to_thread(db.add, h, key_id,
-                                   rpm=rpm, tpm=tpm, models=models):
+        try:
+            created = await client.add_key(
+                h, key_id, rpm=rpm, tpm=tpm, models=models)
+        except StorageError as exc:
+            raise _storage_http_error(exc, action="key add") from None
+        if created:
             keystore.upsert(h, KeyInfo(
                 key_id=key_id,
                 rpm=rpm, tpm=tpm, models=models, enabled=True,
@@ -1491,6 +1673,12 @@ async def internal_keys_rotate(request: Request) -> dict:
 
     ``key_id``, limits, models and enabled state are preserved; the old secret
     stops authenticating immediately. The new plaintext is returned once.
+
+    storage-service makes rotation idempotent for a retried hash pair
+    (``already_rotated``): the freshly generated secret is returned only when
+    the service confirms its hash now identifies a persisted row. A genuinely
+    lost response cannot recover the *previous* plaintext — the operator simply
+    rotates again.
     """
     _require_internal(request)
     data = await _read_json(request)
@@ -1499,12 +1687,34 @@ async def internal_keys_rotate(request: Request) -> dict:
         raise HTTPException(400, "No key given")
     plaintext = generate_key()
     new_hash = hash_key(plaintext)
-    db = _require_keydb()
-    key_id = await asyncio.to_thread(db.rotate, key_hash, new_hash)
-    if key_id is None:
+    client = _require_storage()
+    try:
+        result = await client.rotate_key(key_hash, new_hash)
+    except StorageError as exc:
+        raise _storage_http_error(
+            exc, action="key rotate", not_found="Key not found",
+            conflict="Key hash already in use") from None
+
+    rotated = bool(result.get("rotated"))
+    already = bool(result.get("already_rotated"))
+    returned_id = result.get("key_id")
+    if not rotated and not already:
+        logger.error("storage-service returned an unexpected rotate payload")
+        raise HTTPException(503, "Storage service unavailable")
+    if already and not rotated and not returned_id:
+        # The service could not tell us which row owns the new hash; do not
+        # hand out a secret that may belong to nothing (and do not touch the
+        # in-memory store on a failed rotation).
         raise HTTPException(404, "Key not found")
-    if keystore.rotate(key_hash, new_hash) is None:
-        logger.warning("Key %s was rotated in PostgreSQL but was absent in memory", key_id)
+    info = keystore.rotate(key_hash, new_hash)
+    key_id = str(returned_id) if returned_id else (info.key_id if info else "")
+    if info is None:
+        # In-memory state was already gone (e.g. an idempotent retry). Re-read
+        # the persisted row so the freshly issued secret authenticates without
+        # a gateway restart; failure to do so only delays the sync.
+        logger.warning("Key %s was rotated in storage-service but was absent in memory",
+                       key_id or "?")
+        await _upsert_key_from_storage(client, new_hash)
     return {
         "ok": True,
         "message": "Key rotated",
@@ -1513,28 +1723,61 @@ async def internal_keys_rotate(request: Request) -> dict:
     }
 
 
+async def _upsert_key_from_storage(client: StorageClient, key_hash: str) -> bool:
+    """Best-effort: load one persisted key row into the in-memory store."""
+    try:
+        rows = await client.list_keys()
+    except Exception as exc:
+        logger.warning("Could not re-read key state from storage-service (%s)",
+                       type(exc).__name__)
+        return False
+    for raw in rows:
+        row = _key_row(raw)
+        if row["key_hash"] != key_hash:
+            continue
+        keystore.upsert(key_hash, KeyInfo(
+            key_id=row["key_id"],
+            rpm=row["rpm"],
+            tpm=row["tpm"],
+            models=row["models"],
+            enabled=row["enabled"],
+        ))
+        return True
+    return False
+
+
 async def internal_keys_set(request: Request) -> dict:
     """``{"key_hash": str, "enabled": bool}`` — revoke/enable a key."""
     _require_internal(request)
     data = await _read_json(request)
     key_hash = str(data.get("key_hash", ""))
     enabled = bool(data.get("enabled"))
-    db = _require_keydb()
-    if await asyncio.to_thread(db.set_enabled, key_hash, enabled):
-        keystore.set_enabled(key_hash, enabled)
-        return {"ok": True, "message": "Key enabled" if enabled else "Key revoked (401)"}
-    raise HTTPException(404, "Key not found")
+    client = _require_storage()
+    try:
+        updated = await client.set_key_enabled(key_hash, enabled)
+    except StorageError as exc:
+        raise _storage_http_error(
+            exc, action="key set", not_found="Key not found") from None
+    if not updated:
+        raise HTTPException(404, "Key not found")
+    keystore.set_enabled(key_hash, enabled)
+    return {"ok": True, "message": "Key enabled" if enabled else "Key revoked (401)"}
 
 
 async def internal_keys_delete(request: Request) -> dict:
     _require_internal(request)
     data = await _read_json(request)
     key_hash = str(data.get("key_hash", ""))
-    db = _require_keydb()
-    if await asyncio.to_thread(db.remove, key_hash):
-        keystore.remove(key_hash)
-        return {"ok": True, "message": "Key deleted"}
-    raise HTTPException(404, "Key not found")
+    client = _require_storage()
+    try:
+        deleted = await client.delete_key(key_hash)
+    except StorageError as exc:
+        raise _storage_http_error(
+            exc, action="key delete", not_found="Key not found") from None
+    if not deleted:
+        raise HTTPException(404, "Key not found")
+    keystore.remove(key_hash)
+    return {"ok": True, "message": "Key deleted"}
 
 
 async def _read_json(request: Request) -> dict:

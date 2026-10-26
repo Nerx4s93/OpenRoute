@@ -3,8 +3,9 @@
 (uniform RR, exclude, NoReadyProxyError), RPM cap, proxy parsing/dedupe, probe
 behaviour (407/5xx), ensure_client, status/masking.
 
-Most tests need no PostgreSQL (ProxyManager has no store); the refresh/upsert
-integration tests use the ``pg_dsn`` fixture.
+Most tests need no persistence (ProxyManager's storage is optional); the
+refresh/upsert and restart-persistence tests inject the in-memory
+``FakeStorage``, which mirrors the storage-service contract.
 """
 
 import asyncio
@@ -19,15 +20,15 @@ import pytest
 
 import gateway.opencode as opencode
 import gateway.proxies as prox
+from fake_storage import FakeStorage
 from gateway.proxies import NoReadyProxyError, Proxy, ProxyManager, mask_proxy
+from gateway.storage import StorageUnavailable
 
 from gw import build_settings
 
-_UNUSED_DSN = "postgresql://unused"
-
 
 def mgr(proxies=(), **over):
-    m = ProxyManager(build_settings(_UNUSED_DSN, **over))
+    m = ProxyManager(build_settings(**over))
     m.apply_proxies([(p, True) for p in proxies])
     return m
 
@@ -445,23 +446,27 @@ async def test_refresh_proxies_bust_cache_adds_refresh_param_only_when_asked():
 
 
 @pytest.mark.asyncio
-async def test_refresh_db_failure_keeps_known_flags_and_disables_new():
+async def test_refresh_storage_failure_keeps_known_flags_and_disables_new():
     import types
 
     m = mgr(proxies=["http://old-on:1", "http://old-off:2"])
     m.set_manually_disabled("http://old-off:2", True)
 
-    class BrokenDB:
-        def sync_many(self, urls):
-            raise RuntimeError("db down")
+    class BrokenSyncStorage(FakeStorage):
+        def __init__(self):
+            super().__init__()
+            self.calls: list[str] = []
 
-        def all(self):
-            raise AssertionError("all() must not run after sync_many failed")
+        async def sync_proxies(self, urls):
+            self.calls.append("sync_proxies")
+            raise StorageUnavailable("storage down")
 
-        def parking_all(self):
-            raise AssertionError("parking_all() must not run after sync_many failed")
+        async def list_proxies(self, listed=None):
+            self.calls.append("list_proxies")
+            raise AssertionError("list_proxies() must not run after sync failed")
 
-    m.bind_db(BrokenDB())
+    storage = BrokenSyncStorage()
+    m.bind_storage(storage)
     await _fake_fetch(m, {"proxies": [
         {"host": "old-on", "port": 1},
         {"host": "old-off", "port": 2},
@@ -475,6 +480,8 @@ async def test_refresh_db_failure_keeps_known_flags_and_disables_new():
     assert by_url["http://old-off:2"].manually_disabled is True
     assert by_url["http://new:3"].manually_disabled is True
     assert "1/3 enabled" in (m.last_fetch_status or "")
+    # Fail-closed: the unavailable store is not consulted beyond the sync.
+    assert storage.calls == ["sync_proxies"]
     await m.aclose()
 
 
@@ -529,29 +536,26 @@ def test_redact_url_strips_userinfo_and_secret():
 
 
 @pytest.mark.asyncio
-async def test_parking_persists_across_manager_restart(pg_dsn):
-    from gateway.proxydb import ProxyDB
-
+async def test_parking_persists_across_manager_restart():
     quota_until = time.time() + 3600
     banned_until = time.time() + 7200
-    db = ProxyDB(pg_dsn)
-    assert db.upsert_many(["http://h1:1"]) == 1
+    storage = FakeStorage(proxies=["http://h1:1"])
 
-    m = ProxyManager(build_settings(pg_dsn))
-    m.bind_db(db)
-    m.apply_proxies(db.all())
+    m = ProxyManager(build_settings())
+    m.bind_storage(storage)
+    m.apply_proxies(await storage.list_proxies(listed=True))
     group = m.egress_groups()[0]
     m.mark_quota_exhausted(group, quota_until)
     m.mark_banned(group, banned_until)
-    await m.aclose()
-    db.close()
+    await m.aclose()  # drains the fire-and-forget parking writes
+    assert storage.proxies["http://h1:1"]["quota_until"] == pytest.approx(quota_until)
+    assert storage.proxies["http://h1:1"]["banned_until"] == pytest.approx(banned_until)
 
-    # A fresh manager (gateway restart) must recover the parking from the DB.
-    db2 = ProxyDB(pg_dsn)
-    m2 = ProxyManager(build_settings(pg_dsn))
-    m2.bind_db(db2)
-    m2.apply_proxies(db2.all())
-    m2.load_parking(db2.parking_all())
+    # A fresh manager (gateway restart) must recover the parking from storage.
+    m2 = ProxyManager(build_settings())
+    m2.bind_storage(storage)
+    m2.apply_proxies(await storage.list_proxies(listed=True))
+    m2.load_parking(await storage.list_proxies())
     restored = m2.egress_groups()[0]
     assert restored.quota_until == pytest.approx(quota_until)
     assert restored.banned_until == pytest.approx(banned_until)
@@ -559,7 +563,6 @@ async def test_parking_persists_across_manager_restart(pg_dsn):
     assert status["egress_groups_quota_parked"] == 1
     assert status["egress_groups_banned"] == 1
     assert status["proxies"][0]["quota_seconds_left"] > 3500
-    db2.close()
     await m2.aclose()
 
 
@@ -582,31 +585,26 @@ def test_permanently_banned_bucket_is_never_selected_or_waited_for():
 
 
 @pytest.mark.asyncio
-async def test_permanent_ban_persists_across_manager_restart(pg_dsn):
-    from gateway.proxydb import ProxyDB
+async def test_permanent_ban_persists_across_manager_restart():
+    storage = FakeStorage(proxies=["http://h1:1", "http://h2:2"])
 
-    db = ProxyDB(pg_dsn)
-    assert db.upsert_many(["http://h1:1", "http://h2:2"]) == 2
-
-    m = ProxyManager(build_settings(pg_dsn))
-    m.bind_db(db)
-    m.apply_proxies(db.all())
+    m = ProxyManager(build_settings())
+    m.bind_storage(storage)
+    m.apply_proxies(await storage.list_proxies(listed=True))
     a = next(g for g in m.egress_groups() if g.host == "h1:1")
     m.mark_permanently_banned(a)
     await m.aclose()
-    db.close()
+    assert storage.proxies["http://h1:1"]["permanently_banned"] is True
 
-    db2 = ProxyDB(pg_dsn)
-    m2 = ProxyManager(build_settings(pg_dsn))
-    m2.bind_db(db2)
-    m2.apply_proxies(db2.all())
-    m2.load_parking(db2.parking_all())
+    m2 = ProxyManager(build_settings())
+    m2.bind_storage(storage)
+    m2.apply_proxies(await storage.list_proxies(listed=True))
+    m2.load_parking(await storage.list_proxies())
     restored = next(g for g in m2.egress_groups() if g.host == "h1:1")
     assert restored.permanently_banned is True
     assert restored.is_parked(time.time())
     assert all(m2.next_proxy().url == "http://h2:2" for _ in range(3))
     assert m2.status()["egress_groups_banned"] == 1
-    db2.close()
     await m2.aclose()
 
 
@@ -624,16 +622,14 @@ def test_load_parking_merges_duplicate_keys_by_max():
 
 
 @pytest.mark.asyncio
-async def test_refresh_never_probes_or_unbans_permanent_ban(pg_dsn):
-    from gateway.proxydb import ProxyDB
-
-    db = ProxyDB(pg_dsn)
-    assert db.upsert_many(["http://h1:1", "http://h2:2"]) == 2
-    m = ProxyManager(build_settings(pg_dsn))
-    m.bind_db(db)
-    m.apply_proxies(db.all())
+async def test_refresh_never_probes_or_unbans_permanent_ban():
+    storage = FakeStorage(proxies=["http://h1:1", "http://h2:2"])
+    m = ProxyManager(build_settings())
+    m.bind_storage(storage)
+    m.apply_proxies(await storage.list_proxies(listed=True))
     a = next(g for g in m.egress_groups() if g.host == "h1:1")
     m.mark_permanently_banned(a)
+    await m._drain_bg_tasks()  # the ban must reach storage before the refresh
 
     probed: list[str] = []
 
@@ -650,19 +646,17 @@ async def test_refresh_never_probes_or_unbans_permanent_ban(pg_dsn):
     assert restored.permanently_banned is True
     m.mark_success(restored.proxies[0])
     assert restored.permanently_banned is True
-    db.close()
+    assert storage.proxies["http://h1:1"]["permanently_banned"] is True
     await m.aclose()
 
 
 @pytest.mark.asyncio
-async def test_refresh_upsert_preserves_manual_disable(pg_dsn):
-    from gateway.proxydb import ProxyDB
-
-    db = ProxyDB(pg_dsn)
-    assert db.upsert_many(["http://h1:1"]) == 1
-    assert db.set_enabled("http://h1:1", False) is True
-    m = ProxyManager(build_settings(pg_dsn))
-    m.bind_db(db)
+async def test_refresh_upsert_preserves_manual_disable():
+    storage = FakeStorage(proxies=[
+        {"proxy": "http://h1:1", "enabled": False},
+    ])
+    m = ProxyManager(build_settings())
+    m.bind_storage(storage)
     await _fake_fetch(m, {"proxies": [{"host": "h1", "port": 1}, {"host": "h2", "port": 2}]})
     import types
     m._probe_proxy = types.MethodType(_alive_probe, m)
@@ -672,21 +666,20 @@ async def test_refresh_upsert_preserves_manual_disable(pg_dsn):
     by_url = {p.url: p for p in m.proxies}
     assert by_url["http://h1:1"].manually_disabled is True
     assert by_url["http://h2:2"].manually_disabled is True
-    db.close()
+    assert storage.proxies["http://h1:1"]["enabled"] is False
+    assert storage.proxies["http://h2:2"]["enabled"] is False
     await m.aclose()
 
 
 @pytest.mark.asyncio
-async def test_refresh_unlists_missing_proxies_and_restores_parking(pg_dsn):
-    """A proxy missing from PROXIES_URL leaves the live pool but keeps its DB
-    row, manual flag and ban, so it is never used even if it reappears."""
+async def test_refresh_unlists_missing_proxies_and_restores_parking():
+    """A proxy missing from PROXIES_URL leaves the live pool but keeps its
+    storage row, manual flag and ban, so it is never used even if it reappears."""
     import types
 
-    from gateway.proxydb import ProxyDB
-
-    db = ProxyDB(pg_dsn)
-    m = ProxyManager(build_settings(pg_dsn))
-    m.bind_db(db)
+    storage = FakeStorage()
+    m = ProxyManager(build_settings())
+    m.bind_storage(storage)
     m._probe_proxy = types.MethodType(_alive_probe, m)
 
     await _fake_fetch(m, {"proxies": [
@@ -696,23 +689,24 @@ async def test_refresh_unlists_missing_proxies_and_restores_parking(pg_dsn):
     assert await m.refresh_proxies() is True
     assert [p.url for p in m.proxies] == ["http://h1:1", "http://h2:2"]
 
-    assert db.set_enabled("http://h1:1", False) is True
+    # The operator explicitly leaves h1 out of rotation.
+    await storage.set_proxy_enabled("http://h1:1", False)
     h2 = next(g for g in m.egress_groups() if g.host == "h2:2")
     m.mark_permanently_banned(h2)
+    await m._drain_bg_tasks()
 
-    # h2 disappears from the source: not in the runtime pool or all(), but
-    # its row and the permanent ban remain in the table.
+    # h2 disappears from the source: gone from the runtime pool and from the
+    # listed snapshot, but its row and the permanent ban remain in storage.
     await _fake_fetch(m, {"proxies": [{"host": "h1", "port": 1}]})
     assert await m.refresh_proxies() is True
     assert [p.url for p in m.proxies] == ["http://h1:1"]
-    assert db.all() == [("http://h1:1", False)]
-    assert any(
-        proxy == "http://h2:2" and permanent
-        for proxy, _, _, permanent in db.parking_all()
-    )
+    listed = await storage.list_proxies(listed=True)
+    assert [row["proxy"] for row in listed] == ["http://h1:1"]
+    assert storage.proxies["http://h2:2"]["listed"] is False
+    assert storage.proxies["http://h2:2"]["permanently_banned"] is True
 
     # h2 returns: it is listed again, but the permanent ban is restored from
-    # the DB, so neither h2 (banned) nor h1 (manual off) can be selected.
+    # storage, so neither h2 (banned) nor h1 (manual off) can be selected.
     await _fake_fetch(m, {"proxies": [
         {"host": "h1", "port": 1},
         {"host": "h2", "port": 2},
@@ -725,7 +719,6 @@ async def test_refresh_unlists_missing_proxies_and_restores_parking(pg_dsn):
     with pytest.raises(NoReadyProxyError):
         m.next_proxy()
 
-    db.close()
     await m.aclose()
 
 

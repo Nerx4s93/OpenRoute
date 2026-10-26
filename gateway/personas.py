@@ -8,9 +8,10 @@ different callers / conversations share it.
 
 Balance and affinity are deliberately untouched: affinity still keys requests
 by the CLIENT session/fingerprint, and the persona is applied only after a
-proxy has been selected. The store is memory-only in the request hot path; DB
-writes happen on background tasks, retry after failures, and reconcile with a
-newer row already present in PostgreSQL (e.g. when startup load failed).
+proxy has been selected. The store is memory-only in the request hot path;
+storage-service writes happen on background tasks, retry after failures, and
+reconcile with a newer row already present in the store (e.g. when startup
+load failed).
 """
 
 from __future__ import annotations
@@ -18,13 +19,12 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import Any
 
 from . import opencode
-
-if TYPE_CHECKING:
-    from .personadb import PersonaDB
+from .storage import StorageClient
 
 logger = logging.getLogger("openroute.personas")
 
@@ -35,11 +35,11 @@ _PERSIST_RETRY_SECONDS = 30.0
 #: extra delay after a backoff expires).
 _FLUSH_INTERVAL_SECONDS = 5.0
 
-#: Hard upper bound for a graceful shutdown, including the DB close.
+#: Hard upper bound for a graceful shutdown, including the flush.
 _CLOSE_TIMEOUT_SECONDS = 5.0
 
 #: Safety valve for the reconcile loop: a single flush task never retries
-#: forever even if the DB keeps returning a different newer row.
+#: forever even if the store keeps returning a different newer row.
 _MAX_FLUSH_PASSES = 8
 
 
@@ -72,16 +72,15 @@ class Persona:
         )
 
 
-def _persona_from_row(row: tuple[str, str, str, str, float, int]) -> Persona:
-    """Build a ``Persona`` from a ``PersonaDB`` row tuple."""
-    quota_key, session_id, project_id, trace_id, created_at, generation = row
+def _persona_from_row(row: Mapping[str, Any]) -> Persona:
+    """Build a ``Persona`` from a storage-service row dict."""
     return Persona(
-        quota_key=quota_key,
-        session_id=session_id,
-        project_id=project_id,
-        trace_id=trace_id,
-        created_at=float(created_at),
-        generation=int(generation),
+        quota_key=str(row["quota_key"]),
+        session_id=str(row["session_id"]),
+        project_id=str(row["project_id"]),
+        trace_id=str(row["trace_id"]),
+        created_at=float(row["created_at"]),
+        generation=int(row["generation"]),
     )
 
 
@@ -98,14 +97,17 @@ class PersonaStore:
     """Cache of ``quota_key -> Persona`` with lazy, non-blocking persistence.
 
     Reads are lock-free on the hot path; creation/rotation are serialised by one
-    ``asyncio.Lock``. A missing/unreachable DB degrades to memory-only: the
-    request path never awaits synchronous database work. Dirty personas stay
-    queued until a background flush succeeds, so a transient DB outage does not
+    ``asyncio.Lock``. A missing/unreachable backend degrades to memory-only:
+    the request path never awaits persistence work. Dirty personas stay
+    queued until a background flush succeeds, so a transient outage does not
     lose the identity.
+
+    Persistence is ``storage-service`` (``storage``). The shared storage client
+    is owned by ``main`` and is never closed here.
     """
 
-    def __init__(self, db: PersonaDB | None) -> None:
-        self._db = db
+    def __init__(self, *, storage: StorageClient | None = None) -> None:
+        self._storage = storage
         self._cache: dict[str, Persona] = {}
         self._lock = asyncio.Lock()
         self._dirty: dict[str, Persona] = {}
@@ -115,20 +117,27 @@ class PersonaStore:
         self._tasks: set[asyncio.Task] = set()
         self._closed = False
 
+    def bind_storage(self, storage: StorageClient) -> None:
+        """Use ``storage`` for persistence."""
+        self._storage = storage
+
+    @property
+    def _persistent(self) -> bool:
+        return self._storage is not None
+
     async def load(self) -> None:
         """Restore persisted personas; failures leave the store empty.
+
+        A failed initial load is propagated: the gateway must not start
+        without its persistence.
 
         Rows with malformed identifiers are replaced by a fresh persona at
         ``generation + 1`` and queued for persistence: the upstream must never
         see a corrupt identity.
         """
-        if self._db is None:
+        if not self._persistent:
             return
-        try:
-            rows = await asyncio.to_thread(self._db.load_all)
-        except Exception as exc:
-            logger.warning("Persona load failed; starting empty: %s", exc)
-            return
+        rows = await self._storage.load_personas()
         pending: list[Persona] = []
         async with self._lock:
             for row in rows:
@@ -195,7 +204,7 @@ class PersonaStore:
 
     def _persist(self, persona: Persona) -> None:
         """Queue ``persona`` for a background write (sync, never blocks)."""
-        if self._db is None or self._closed:
+        if not self._persistent or self._closed:
             return
         key = persona.quota_key
         current = self._dirty.get(key)
@@ -211,7 +220,7 @@ class PersonaStore:
         """Retry a queued write for a cache hit once its backoff has expired."""
         if quota_key not in self._dirty:
             return
-        if self._db is None or self._closed:
+        if not self._persistent or self._closed:
             return
         if time.monotonic() < self._retry_at.get(quota_key, 0.0):
             return
@@ -220,7 +229,7 @@ class PersonaStore:
 
     def _ensure_flusher(self) -> None:
         """Start the periodic flusher once (no weak refs needed)."""
-        if self._db is None or self._closed:
+        if not self._persistent or self._closed:
             return
         if self._flusher is not None and not self._flusher.done():
             return
@@ -239,7 +248,7 @@ class PersonaStore:
     async def _flush_loop(self) -> None:
         """Periodically retry dirty personas whose backoff has expired."""
         try:
-            while not self._closed and self._db is not None:
+            while not self._closed and self._persistent:
                 await asyncio.sleep(_FLUSH_INTERVAL_SECONDS)
                 for key in list(self._dirty):
                     if time.monotonic() >= self._retry_at.get(key, 0.0):
@@ -252,7 +261,7 @@ class PersonaStore:
 
     def _schedule_flush(self, quota_key: str) -> None:
         """Start one writer for ``quota_key`` if none is in flight."""
-        if self._db is None or self._closed:
+        if not self._persistent or self._closed:
             return
         if quota_key in self._inflight:
             return
@@ -274,10 +283,10 @@ class PersonaStore:
         self._inflight.discard(quota_key)
 
     async def _flush_key(self, quota_key: str) -> None:
-        """Write the newest dirty persona; reconcile if the DB is ahead."""
-        db = self._db
+        """Write the newest dirty persona; reconcile if the store is ahead."""
+        storage = self._storage
         passes = 0
-        while db is not None and not self._closed:
+        while storage is not None and not self._closed:
             if passes >= _MAX_FLUSH_PASSES:
                 logger.warning(
                     "Persona flush for %s exceeded %d passes; leaving it "
@@ -290,7 +299,7 @@ class PersonaStore:
             if persona is None:
                 return
             try:
-                applied = await asyncio.to_thread(db.upsert, persona)
+                applied = await storage.upsert_persona(persona)
             except Exception as exc:
                 self._retry_at[quota_key] = (
                     time.monotonic() + _PERSIST_RETRY_SECONDS)
@@ -303,10 +312,10 @@ class PersonaStore:
                     self._dirty.pop(quota_key, None)
                     return
                 continue  # a newer generation was queued while writing
-            # The generation guard rejected the row: the DB already holds a
+            # The generation guard rejected the row: the store already holds a
             # newer persona (typically because load() failed at startup).
             try:
-                row = await asyncio.to_thread(db.load_one, quota_key)
+                row = await storage.get_persona(quota_key)
             except Exception as exc:
                 self._retry_at[quota_key] = (
                     time.monotonic() + _PERSIST_RETRY_SECONDS)
@@ -317,11 +326,11 @@ class PersonaStore:
                 self._retry_at[quota_key] = (
                     time.monotonic() + _PERSIST_RETRY_SECONDS)
                 return
-            db_persona = _persona_from_row(row)
-            if not _is_valid_persona(db_persona):
+            stored_persona = _persona_from_row(row)
+            if not _is_valid_persona(stored_persona):
                 replacement = Persona.create(
                     quota_key,
-                    generation=max(db_persona.generation, 0) + 1,
+                    generation=max(stored_persona.generation, 0) + 1,
                 )
                 self._dirty[quota_key] = replacement
                 async with self._lock:
@@ -330,31 +339,38 @@ class PersonaStore:
                             or replacement.generation >= current.generation):
                         self._cache[quota_key] = replacement
                 continue  # write the valid replacement immediately
-            # The DB wins: adopt its row and drop this dirty snapshot.
+            # The stored row wins: adopt it and drop this dirty snapshot.
             async with self._lock:
                 current = self._cache.get(quota_key)
                 if (current is None
-                        or db_persona.generation >= current.generation):
-                    self._cache[quota_key] = db_persona
+                        or stored_persona.generation >= current.generation):
+                    self._cache[quota_key] = stored_persona
                 if self._dirty.get(quota_key) is persona:
                     self._dirty.pop(quota_key, None)
             self._retry_at.pop(quota_key, None)
             return
 
-    async def _write_once(self, db: PersonaDB, persona: Persona) -> None:
+    async def _write_once(
+        self,
+        persona: Persona,
+        storage: StorageClient | None,
+    ) -> None:
         """One best-effort shutdown write: no reconcile, no retries."""
         try:
-            await asyncio.to_thread(db.upsert, persona)
+            if storage is not None:
+                await storage.upsert_persona(persona)
         except Exception as exc:
             logger.warning("Persona close write failed for %s: %s",
                            persona.quota_key, exc)
 
     async def close(self) -> None:
-        """Flush pending writes and close the DB within a fixed deadline.
+        """Flush pending writes within a fixed deadline.
 
         Idempotent and does not raise ordinary errors; cancellation of the
-        caller is propagated. The in-memory cache stays usable after close:
-        requests still need their persona, they just stop being persisted.
+        caller is propagated. The shared storage client is NOT closed here
+        (``main`` owns it and closes it last). The in-memory cache stays usable
+        after close: requests still need their persona, they just stop being
+        persisted.
         """
         if self._closed:
             return
@@ -382,8 +398,8 @@ class PersonaStore:
             except Exception:
                 logger.warning("Persona flusher stop failed", exc_info=True)
 
-        db = self._db
-        self._db = None
+        storage = self._storage
+        self._storage = None
 
         if self._tasks:
             try:
@@ -402,11 +418,11 @@ class PersonaStore:
 
         pending = dict(self._dirty)
         self._dirty.clear()
-        if db is not None and pending:
+        if storage is not None and pending:
             try:
                 await asyncio.wait_for(
                     asyncio.gather(
-                        *(self._write_once(db, persona)
+                        *(self._write_once(persona, storage)
                           for persona in pending.values()),
                         return_exceptions=True,
                     ),
@@ -416,17 +432,6 @@ class PersonaStore:
                 logger.warning("Persona close flush timed out")
             except Exception:
                 logger.warning("Persona close flush failed", exc_info=True)
-
-        if db is not None:
-            try:
-                await asyncio.wait_for(
-                    asyncio.to_thread(db.close),
-                    timeout=_remaining(deadline),
-                )
-            except TimeoutError:
-                logger.warning("PersonaDB close timed out")
-            except Exception:
-                logger.warning("PersonaDB close failed", exc_info=True)
 
 
 __all__ = ["Persona", "PersonaStore"]

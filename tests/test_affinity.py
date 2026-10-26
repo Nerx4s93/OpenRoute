@@ -1,7 +1,7 @@
 """Unit tests for gateway.affinity (no network, no PostgreSQL required).
 
 Covers score balancing, the 1-hour window, sticky bindings, temporary
-fallback, one-shot buffers and evacuation.
+fallback, one-shot buffers, evacuation and the storage-backed writer.
 """
 
 from __future__ import annotations
@@ -12,6 +12,7 @@ import time
 
 import pytest
 
+from fake_storage import FakeStorage
 from gateway.affinity import (
     AffinityManager,
     RequestEvent,
@@ -21,8 +22,6 @@ from gateway.affinity import (
 from gateway.proxies import ProxyManager
 
 from gw import build_settings
-
-_UNUSED_DSN = "postgresql://unused"
 
 
 class Clock:
@@ -44,7 +43,7 @@ class Clock:
 def make_affinity(proxies=("http://a.invalid:1", "http://b.invalid:1", "http://c.invalid:1"),
                   clock=None, **over):
     clock = clock or Clock()
-    settings = build_settings(_UNUSED_DSN, **over)
+    settings = build_settings(**over)
     manager = ProxyManager(settings)
     manager.apply_proxies([(p, True) for p in proxies])
     aff = AffinityManager(settings, manager, now_wall=clock.now_wall,
@@ -391,12 +390,17 @@ def test_status_counts_unbound():
 
 @pytest.mark.asyncio
 async def test_load_restores_bindings_without_events():
-    class FakeDB:
-        def load_all(self):
-            return [("sid:old", "http://a.invalid:1", 100.0, 200.0)]
-
-    aff, manager, _ = make_affinity(proxies=("http://a.invalid:1",))
-    aff.db = FakeDB()
+    storage = FakeStorage(
+        proxies=["http://a.invalid:1"],
+        affinity=[{
+            "session_key": "sid:old",
+            "proxy": "http://a.invalid:1",
+            "created_at": 100.0,
+            "last_used_at": 200.0,
+        }],
+    )
+    aff, manager, clock = make_affinity(proxies=("http://a.invalid:1",))
+    aff.bind_storage(storage)
     await aff.load()
     state = aff._sessions["sid:old"]
     assert state.proxy == "http://a.invalid:1"
@@ -412,31 +416,32 @@ async def test_flush_waits_for_a_writer_task_on_another_event_loop():
     """TestClient portals run on different loops; flush must still commit.
 
     A writer task created on a foreign loop can neither be awaited nor ignored:
-    flush has to poll it to completion, otherwise a immediately following
-    ``load_all()`` can read the previous row.
+    flush has to poll it to completion, otherwise an immediately following
+    read can see the previous row.
     """
 
-    class SlowDB:
+    class SlowStorage(FakeStorage):
         def __init__(self):
-            self.rows = []
+            super().__init__(proxies=["http://a.invalid:1"])
             self.started = threading.Event()
             self.done = threading.Event()
 
-        def upsert_many(self, rows):
+        async def upsert_affinity(self, rows):
             self.started.set()
-            time.sleep(0.2)
-            self.rows.extend(rows)
+            await asyncio.sleep(0.2)
+            result = await super().upsert_affinity(rows)
             self.done.set()
+            return result
 
-    db = SlowDB()
+    storage = SlowStorage()
     aff, manager, _ = make_affinity(proxies=("http://a.invalid:1",))
-    aff.db = db
+    aff.bind_storage(storage)
     state = seed_session(aff, "sid:cross", manager.proxies[0].url)
 
     def foreign_loop():
         async def go():
             aff._schedule_write(state)  # creates the writer on THIS loop
-            while not db.done.is_set():
+            while not storage.done.is_set():
                 await asyncio.sleep(0.01)
 
         asyncio.run(go())
@@ -444,53 +449,36 @@ async def test_flush_waits_for_a_writer_task_on_another_event_loop():
     thread = threading.Thread(target=foreign_loop)
     thread.start()
     try:
-        assert await asyncio.to_thread(db.started.wait, 2.0)
+        assert await asyncio.to_thread(storage.started.wait, 2.0)
         await aff.flush()
-        assert db.done.is_set()
+        assert storage.done.is_set()
     finally:
         thread.join(5.0)
-    assert db.rows == [("sid:cross", "http://a.invalid:1",
-                        state.created_at, state.last_used_at)]
-
-
-class ForeignKeyViolation(Exception):
-    """Stands in for psycopg.errors.ForeignKeyViolation (name-matched)."""
-
-
-class FkRejectingDB:
-    """Fake AffinityDB whose proxy FK rejects rows with vanished URLs."""
-
-    def __init__(self, missing):
-        self.missing = set(missing)
-        self.rows = []
-
-    def upsert_many(self, rows):
-        for _key, proxy, _created, _used in rows:
-            if proxy in self.missing:
-                raise ForeignKeyViolation(f"proxy row vanished: {proxy}")
-        keys = {row[0] for row in rows}
-        self.rows = [r for r in self.rows if r[0] not in keys] + list(rows)
-        return len(rows)
+    row = storage.affinity["sid:cross"]
+    assert row["proxy"] == "http://a.invalid:1"
+    assert row["created_at"] == state.created_at
+    assert row["last_used_at"] == state.last_used_at
 
 
 @pytest.mark.asyncio
-async def test_fk_violation_retry_nulls_only_the_vanished_binding():
+async def test_unbound_reconcile_nulls_only_the_vanished_binding():
     """One deleted proxy must not unbind healthy sessions in the same batch.
 
-    The writer retries a FK-rejected batch row by row; a batch-wide NULL retry
-    would silently wipe the live binding of every session that merely shared
-    one coalesced write with the vanished proxy.
+    storage-service reports how many rows lost their proxy (FK SET NULL); the
+    gateway re-reads the bindings and only clears the sessions whose persisted
+    proxy is now NULL, leaving healthy sessions in the same coalesced write.
     """
+    storage = FakeStorage(proxies=["http://b.invalid:1"])
     aff, _manager, _ = make_affinity(
         proxies=("http://a.invalid:1", "http://b.invalid:1"))
-    aff.db = FkRejectingDB(missing={"http://a.invalid:1"})
+    aff.bind_storage(storage)
     gone = seed_session(aff, "sid:1", "http://a.invalid:1", created=1.0, last=2.0)
     live = seed_session(aff, "sid:2", "http://b.invalid:1", created=1.0, last=2.0)
     aff._schedule_write(gone)
     aff._schedule_write(live)
     await aff.flush()
 
-    assert {key: proxy for key, proxy, *_ in aff.db.rows} == {
-        "sid:1": None, "sid:2": "http://b.invalid:1"}
+    assert storage.affinity["sid:1"]["proxy"] is None
+    assert storage.affinity["sid:2"]["proxy"] == "http://b.invalid:1"
     assert gone.proxy is None
     assert live.proxy == "http://b.invalid:1"

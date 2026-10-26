@@ -1,11 +1,10 @@
 """Shared helpers for OpenRoute hermetic tests.
 
 No real network: upstream clients go to a ``ScriptedTransport`` and the
-background proxy fetch is replaced with a quiet no-op. All data lives in an
-isolated PostgreSQL database created by the ``pg_dsn`` fixture (conftest.py):
-tables ``request_log``/``proxies``/``keys``, as after a "first run" — the pool
-upserted exactly like ``refresh_proxies`` does it, client keys as if added via
-the admin UI. The project directory is never used for writes.
+background proxy fetch is replaced with a quiet no-op. Proxies, client keys,
+affinity bindings, personas and the request log live in an in-memory
+``FakeStorage`` injected as ``main.storage`` (no PostgreSQL at all). The
+project directory is never used for writes.
 
 Edge routing is modelled with ``_EdgeShim``: like nginx in production, it
 forwards ``/v1/*``, ``/health``, ``/docs`` to the gateway and hides
@@ -14,6 +13,7 @@ forwards ``/v1/*``, ``/health``, ``/docs`` to the gateway and hides
 """
 
 import asyncio
+import functools
 import sys
 import time
 from pathlib import Path
@@ -29,25 +29,24 @@ for _p in (str(PROJECT_ROOT), str(TESTS_DIR)):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
+from fake_storage import FakeStorage  # noqa: E402
 from gateway.affinity import AffinityManager  # noqa: E402
-from gateway.affinitydb import AffinityDB  # noqa: E402
 from gateway.config import Settings  # noqa: E402
-from gateway.keydb import KeyDB  # noqa: E402
 from gateway.keys import KeyStore, hash_key  # noqa: E402
 from gateway.personas import PersonaStore  # noqa: E402
 from gateway.proxies import ProxyManager  # noqa: E402
-from gateway.proxydb import ProxyDB  # noqa: E402
 from gateway.reqlog import RequestLog  # noqa: E402
 
 
-def build_settings(pg_dsn, **over):
-    """Settings with every side effect pointed at an isolated DB.
+def build_settings(**over):
+    """Settings for a hermetic gateway.
 
-    Explicit kwargs override env/.env, so tests do not depend on its contents.
+    The gateway has no database DSN: every store, the request log included,
+    goes through storage-service. Explicit kwargs override env/.env, so tests
+    do not depend on its contents.
     """
     s = dict(
         internal_api_token="test-internal-token",
-        postgres_dsn=pg_dsn,
         proxies_url="http://127.0.0.1:1/proxies",  # closed port (refresh is a no-op)
         opencode_base_url="http://upstream.invalid/v1",
         opencode_models_url="http://upstream.invalid/models",
@@ -58,6 +57,18 @@ def build_settings(pg_dsn, **over):
     )
     s.update(over)
     return Settings(**s)
+
+
+def _key_row(entry):
+    """One key row in the storage-service / ``KeyStore.load`` shape."""
+    return {
+        "key_hash": hash_key(entry["key"]),
+        "key_id": entry.get("key_id") or "",
+        "rpm": entry.get("rpm"),
+        "tpm": entry.get("tpm"),
+        "models": entry.get("models"),
+        "enabled": bool(entry.get("enabled", True)),
+    }
 
 
 class ScriptedTransport(httpx.AsyncBaseTransport):
@@ -105,7 +116,7 @@ class _AsyncioShim:
 
     create_task = staticmethod(asyncio.create_task)
     CancelledError = asyncio.CancelledError
-    to_thread = staticmethod(asyncio.to_thread)  # admin: SQL writes via ProxyDB/KeyDB
+    to_thread = staticmethod(asyncio.to_thread)
 
     def __init__(self, log):
         self._log = log
@@ -156,66 +167,62 @@ class _EdgeShim:
 
 
 class Gateway:
-    """Hermetic gateway instance (proxies + keys in an isolated PostgreSQL DB).
+    """Hermetic gateway instance (FakeStorage for every persisted domain).
 
     ``self.client`` — the edge-facing client (``/internal/*`` is 404);
     ``self.internal`` — exposes ``/internal/*``.
     """
 
-    def __init__(self, monkeypatch, pg_dsn, *, keys=None,
+    def __init__(self, monkeypatch, *, keys=None,
                  proxies=("http://proxy-a.invalid:8080", "http://proxy-b.invalid:8080"),
-                 settings_over=None, affinity_rows=None):
+                 settings_over=None, affinity_rows=None, inject_reqlog=True):
         settings_over = dict(settings_over or {})
-        self.settings = build_settings(pg_dsn, **settings_over)
+        self.settings = build_settings(**settings_over)
         entries = keys if keys is not None else [
             {"key": "test-key", "key_id": "default"},
         ]
+        key_rows = [_key_row(e) for e in entries]
 
-        # "First run": fill PostgreSQL and close the pools — the lifespan will
-        # open its own on the same DB (main.proxydb / main.keydb).
-        pdb = ProxyDB(self.settings.postgres_dsn)
-        written = pdb.upsert_many(proxies)
-        assert written == len(set(proxies)), "proxies were not written to proxies"
-        pdb.close()
-        kdb = KeyDB(self.settings.postgres_dsn)
-        for e in entries:
-            assert kdb.add(
-                hash_key(e["key"]), e.get("key_id") or "",
-                rpm=e.get("rpm"), tpm=e.get("tpm"), models=e.get("models"),
-            ), f"key {e.get('key_id')!r} was not written to keys"
-        key_rows = kdb.all()
-        kdb.close()
+        # Proxy/key/affinity/persona state lives in storage-service: the fake is
+        # seeded like a "first run" and injected into main.storage before the
+        # lifespan.
+        self.storage = FakeStorage(
+            proxies=proxies,
+            keys=key_rows,
+            affinity=affinity_rows or (),
+        )
 
         self.manager = ProxyManager(self.settings)
-        self.manager.apply_proxies([(p, True) for p in proxies])
+        self.manager.bind_storage(self.storage)
+        self.manager.apply_proxies(
+            [{"proxy": p, "enabled": True} for p in proxies])
         assert len(self.manager.proxies) == len(proxies), "proxies did not load"
 
         # Affinity is built here (before the lifespan) so tests can seed
-        # bindings and drive a deterministic wall clock. main.affinity /
-        # main.affinitydb are pre-set; the lifespan reuses them.
+        # bindings and drive a deterministic wall clock. main.affinity is
+        # pre-set; the lifespan reuses it and loads the fake's rows.
         self.wall_clock = {"value": None}  # None -> real time.time()
-        self.affinitydb = AffinityDB(self.settings.postgres_dsn)
-        if affinity_rows:
-            self.affinitydb.upsert_many(list(affinity_rows))
         self.affinity = AffinityManager(
-            self.settings, self.manager, db=self.affinitydb,
+            self.settings, self.manager, storage=self.storage,
             now_wall=self.wall_now,
         )
 
         self.keystore = KeyStore()
         self.keystore.load(key_rows)
-        self.reqlog = RequestLog(self.settings.postgres_dsn)
-        # Memory-only persona store: the lifespan reuses it (``if personas is
-        # None``), so the tests never write proxy_personas to PostgreSQL.
-        self.personas = PersonaStore(None)
+        # Request log: storage-backed. ``inject_reqlog=False`` leaves
+        # ``main.reqlog`` unset so the test can assert the lifespan creates one.
+        self.reqlog = RequestLog(self.storage) if inject_reqlog else None
+        # Storage-backed persona store: the lifespan reuses it and loads the
+        # fake's rows, so tests never touch PostgreSQL for personas.
+        self.personas = PersonaStore(storage=self.storage)
         self.sleeps: list[float] = []
         self._mp = monkeypatch
         monkeypatch.setattr(main, "settings", self.settings)
         monkeypatch.setattr(main, "manager", self.manager)
         monkeypatch.setattr(main, "keystore", self.keystore)
+        monkeypatch.setattr(main, "storage", self.storage)
         monkeypatch.setattr(main, "reqlog", self.reqlog)
         monkeypatch.setattr(main, "affinity", self.affinity)
-        monkeypatch.setattr(main, "affinitydb", self.affinitydb)
         monkeypatch.setattr(main, "personas", self.personas)
         monkeypatch.setattr(main, "refresh_loop", _quiet_refresh_loop)
         monkeypatch.setattr(main, "asyncio", _AsyncioShim(self.sleeps))
@@ -228,6 +235,8 @@ class Gateway:
         # A dedicated client to run the gateway lifespan (not used for requests).
         self._gw_lifespan_client = TestClient(main.app)
         self._gw_lifespan_client.__enter__()
+        if self.reqlog is None:  # created by the lifespan from the injected storage
+            self.reqlog = main.reqlog
 
         self.client = TestClient(_EdgeShim(main.app))
         self.client.__enter__()
@@ -240,6 +249,10 @@ class Gateway:
 
     def proxy(self, url):
         return next(p for p in self.manager.proxies if p.url == url)
+
+    def affinity_binding(self, session_key):
+        """The binding persisted in the fake storage (or ``None``)."""
+        return self.storage.affinity.get(session_key)
 
     # --- wall clock control (affinity quota/ban/window tests) ---
 
@@ -275,6 +288,16 @@ class Gateway:
     def flush_affinity(self):
         """Run the coalescing affinity writer to completion in the gateway loop."""
         self._gw_lifespan_client.portal.call(self.affinity.flush)
+
+    def call(self, func, /, *args, **kwargs):
+        """Run an async gateway helper in the gateway loop from sync test code.
+
+        The request log facade is async-only (storage-service), and its writes
+        live on the lifespan loop; ``gw.call(gw.reqlog.summary_async)`` is the
+        sync-test equivalent of the old blocking call.
+        """
+        return self._gw_lifespan_client.portal.call(
+            functools.partial(func, *args, **kwargs))
 
     def close(self):
         self.internal.__exit__(None, None, None)

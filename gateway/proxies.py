@@ -18,9 +18,9 @@ CONTRACT (stable signatures used by ``main.py``):
 - ``mark_success(proxy)`` / ``mark_failure(proxy, reason, retry_after=None)``
   / ``status() -> dict``.
 - ``refresh_proxies()`` — fetch from ``PROXIES_URL``, sync membership into
-  ``ProxyDB`` (when bound; missing rows are soft-removed), health-probe, rebuild
-  the runtime pool. Returns ``True`` on a successful fetch, ``False`` on fetch
-  error (caller retries sooner).
+  storage-service (when bound; missing rows are soft-removed), health-probe,
+  rebuild the runtime pool. Returns ``True`` on a successful fetch, ``False``
+  on fetch error (caller retries sooner).
 
 Upstream probe target: ``GET {opencode_models_url}`` (the public catalogue,
 which does not count against the chat quota).
@@ -51,10 +51,10 @@ _USERINFO_RE = re.compile(r"([a-zA-Z][a-zA-Z0-9+.\-]*://)[^/\s@]*@")
 def redact_url(value: str | None, secret: str | None = None) -> str:
     """Strip credentials from a URL (or any text containing one) for logs/status.
 
-    Removes ``user:pass@`` userinfo (proxy and DSN credentials) and, when given,
-    every occurrence of ``secret``. Used so ``PROXIES_URL``/``POSTGRES_DSN`` can
-    never leak through ``last_proxies_fetch`` (``/health``)
-    or the logs.
+    Removes ``user:pass@`` userinfo (proxy and service credentials) and, when
+    given, every occurrence of ``secret``. Used so ``PROXIES_URL`` and storage
+    errors can never leak through ``last_proxies_fetch`` (``/health``) or the
+    logs.
     """
     out = value or ""
     if secret:
@@ -142,7 +142,7 @@ class Proxy:
     errors: int = 0
     consecutive_errors: int = 0
     cooldown_until: float = 0.0  # time.monotonic(); 0 = not cooling
-    manually_disabled: bool = False  # disabled via admin UI (lives in ProxyDB)
+    manually_disabled: bool = False  # disabled via admin UI (persisted by storage-service)
     disabled: bool = False  # reserved; proxies are never permanently dead
     last_error: Optional[str] = None
     # --- non-secret px6.net catalog metadata (for the admin Proxies page) ---
@@ -247,7 +247,10 @@ class ProxyManager:
         self._group_by_key: dict[str, EgressGroup] = {}
         self._group_by_url: dict[str, EgressGroup] = {}
         self.last_fetch_status: Optional[str] = None
-        self.db = None  # optional ProxyDB (duck-typed); bound via bind_db()
+        # storage-service client (production, see bind_storage()). Duck-typed
+        # so tests can inject ``FakeStorage``; this is the only persistence
+        # backend the manager knows about.
+        self.storage = None  # duck-typed StorageClient; bound via bind_storage()
         self._lock = asyncio.Lock()
         # Serializes whole refreshes (fetch + probe + apply), so the periodic
         # loop and a manual "refresh" request cannot overwrite each other.
@@ -257,22 +260,68 @@ class ProxyManager:
         self._closed = False
         self._bg_tasks: set[asyncio.Task] = set()  # strong refs to fire-and-forget tasks
 
-    def bind_db(self, db) -> None:
-        """Attach a ``ProxyDB`` so ``refresh_proxies`` can sync members."""
-        self.db = db
+    def bind_storage(self, storage) -> None:
+        """Attach a ``StorageClient`` (the production persistence backend).
 
-    # --- pool membership (source of truth: ProxyDB) ---
+        Duck-typed on purpose: the gateway passes
+        :class:`gateway.storage.StorageClient`, tests pass ``FakeStorage``.
+        """
+        self.storage = storage
 
-    def apply_proxies(self, rows: list[tuple[str, bool]]) -> None:
-        """Sync the runtime pool with ``ProxyDB.all()`` ``[(proxy, enabled)]``.
+    # --- pool membership (source of truth: storage-service) ---
 
-        Existing objects are preserved (runtime counters/breaker survive);
-        rows no longer listed by the source are dropped from the runtime pool
-        and their clients closed.
+    @staticmethod
+    def _row_pair(row) -> tuple[str, bool] | None:
+        """Normalise one pool row: storage dict or a simple ``(url, enabled)``."""
+        if isinstance(row, dict):
+            url = row.get("proxy")
+            enabled = row.get("enabled", False)
+            listed = row.get("listed", True)
+            if not listed:
+                return None
+        else:
+            try:
+                url, enabled = row
+            except (TypeError, ValueError):
+                return None
+        if not url:
+            return None
+        return str(url), bool(enabled)
+
+    @staticmethod
+    def _parking_row(row) -> tuple[str, float, float, bool] | None:
+        """Normalise one parking row: storage dict or ``(url, q, b, perm)``."""
+        if isinstance(row, dict):
+            url = row.get("proxy")
+            quota_until = row.get("quota_until", 0.0)
+            banned_until = row.get("banned_until", 0.0)
+            permanently_banned = row.get("permanently_banned", False)
+        else:
+            try:
+                url, quota_until, banned_until, permanently_banned = row
+            except (TypeError, ValueError):
+                return None
+        if not url:
+            return None
+        return (str(url), float(quota_until or 0.0),
+                float(banned_until or 0.0), bool(permanently_banned))
+
+    def apply_proxies(self, rows: list) -> None:
+        """Sync the runtime pool with persisted rows.
+
+        Accepts the storage-service shape ``[{"proxy": ..., "enabled": ...}]``
+        (and a plain ``(url, enabled)`` pair for unit tests). Existing objects
+        are preserved (runtime counters/breaker survive); rows no longer listed
+        by the source are dropped from the runtime pool and their clients
+        closed.
         """
         by_url = {p.url: p for p in self.proxies}
         new: list[Proxy] = []
-        for url, enabled in rows:
+        for row in rows:
+            pair = self._row_pair(row)
+            if pair is None:
+                continue
+            url, enabled = pair
             p = by_url.pop(url, None) or Proxy(url)
             p.manually_disabled = not enabled
             new.append(p)
@@ -284,24 +333,29 @@ class ProxyManager:
         self._rr = self._rr % len(new) if new else 0
         self._rebuild_groups()
 
-    def load_parking(self, rows: list[tuple[str, float, float, bool]]) -> None:
-        """Restore persisted ``(proxy, quota_until, banned_until, permanent)``.
+    def load_parking(self, rows: list) -> None:
+        """Restore persisted parking from storage rows.
 
-        Called once at startup after :meth:`apply_proxies`. Rows are grouped by
-        the canonical quota key; the maximum epoch wins and a permanent ban
-        ORs together, matching the runtime invariant that parking may only move
-        forward and never expires for abusive traffic.
+        Called once at startup after :meth:`apply_proxies` (and after every
+        refresh). Rows are grouped by the canonical quota key; the maximum
+        epoch wins and a permanent ban ORs together, matching the runtime
+        invariant that parking may only move forward and never expires for
+        abusive traffic.
         """
         by_key: dict[str, tuple[float, float, bool]] = {}
-        for proxy, quota_until, banned_until, permanently_banned in rows:
+        for row in rows:
+            parsed = self._parking_row(row)
+            if parsed is None:
+                continue
+            proxy, quota_until, banned_until, permanently_banned = parsed
             key = canonical_quota_key(proxy)
             if not key:
                 continue
             old_q, old_b, old_perm = by_key.get(key, (0.0, 0.0, False))
             by_key[key] = (
-                max(old_q, float(quota_until or 0.0)),
-                max(old_b, float(banned_until or 0.0)),
-                old_perm or bool(permanently_banned),
+                max(old_q, quota_until),
+                max(old_b, banned_until),
+                old_perm or permanently_banned,
             )
         for group in self._groups:
             quota_until, banned_until, permanently_banned = by_key.get(
@@ -368,7 +422,7 @@ class ProxyManager:
         return self._group_by_key.get(canonical_quota_key(raw))
 
     def set_manually_disabled(self, proxy: str, disabled: bool) -> bool:
-        """Manual enable/disable from the admin UI (persisted in ProxyDB)."""
+        """Manual enable/disable from the admin UI (persisted by the caller)."""
         for p in self.proxies:
             if p.url == proxy:
                 p.manually_disabled = disabled
@@ -376,11 +430,11 @@ class ProxyManager:
         return False
 
     def _rows_preserving_enabled(self, urls: list[str]) -> list[tuple[str, bool]]:
-        """Fallback rows when the DB is unavailable.
+        """Fallback rows when the persistence backend is unavailable.
 
         Preserve the in-memory operator choices for proxies we already know;
         every new proxy is disabled. This keeps the "only explicitly enabled
-        proxies carry traffic" rule fail-closed even without PostgreSQL.
+        proxies carry traffic" rule fail-closed even without storage-service.
         """
         known = {p.url: not p.manually_disabled for p in self.proxies}
         return [(url, known.get(url, False)) for url in urls]
@@ -525,18 +579,23 @@ class ProxyManager:
         urls = list(dict.fromkeys(urls))  # dedupe by URL
 
         # Persist the source snapshot first (source of truth), then rebuild
-        # the pool. Proxies missing from the source are soft-removed in the DB
-        # (listed = FALSE), never deleted.
+        # the pool. Proxies missing from the source are soft-removed in the
+        # store (listed = FALSE), never deleted.
         parking = None
-        if self.db is not None:
+        if self.storage is not None:
             try:
-                await asyncio.to_thread(self.db.sync_many, urls)
-                rows = await asyncio.to_thread(self.db.all)
-                parking = await asyncio.to_thread(self.db.parking_all)
+                synced = await self.storage.sync_proxies(urls)
+                all_rows = synced.get("proxies") if isinstance(synced, dict) else None
+                if not isinstance(all_rows, list):
+                    raise RuntimeError("storage sync returned no rows")
+                rows = [row for row in all_rows
+                        if not isinstance(row, dict) or row.get("listed", True)]
+                parking = all_rows
             except Exception as exc:
                 logger.error(
-                    "ProxyDB sync/all failed (%s); keeping current enable flags, "
-                    "new proxies stay disabled", exc,
+                    "storage-service proxy sync failed (%s); keeping current "
+                    "enable flags, new proxies stay disabled",
+                    type(exc).__name__,
                 )
                 rows = self._rows_preserving_enabled(urls)
         else:
@@ -747,21 +806,40 @@ class ProxyManager:
         return any(self._proxy_ready(p, now_mono) for p in group.proxies)
 
     def _persist_parking(self, group: EgressGroup) -> None:
-        """Write parking to ``ProxyDB`` when bound; never break the request path."""
-        db = self.db
-        save = getattr(db, "save_parking", None) if db is not None else None
+        """Persist parking; never block or break the request path.
+
+        Fire-and-forget write to storage-service. The group's URL list and
+        epochs are snapshotted before scheduling, so a later refresh/mutation
+        cannot change what gets written. Failures are logged as warnings and
+        never surface to the caller.
+        """
+        storage = self.storage
+        save = getattr(storage, "save_parking", None) if storage is not None else None
         if save is None:
             return
+        proxies = [p.url for p in group.proxies]
+        quota_until = float(group.quota_until)
+        banned_until = float(group.banned_until)
+        permanently_banned = bool(group.permanently_banned)
+        host = group.host
+
+        async def _persist() -> None:
+            try:
+                await save(proxies, quota_until, banned_until,
+                           permanently_banned)
+            except Exception as exc:
+                # Type only: storage errors never carry a body/token.
+                logger.warning("Storage parking write failed for %s: %s",
+                               host, type(exc).__name__)
+
         try:
-            save(
-                [p.url for p in group.proxies],
-                group.quota_until,
-                group.banned_until,
-                group.permanently_banned,
-            )
-        except Exception as exc:
-            logger.warning("ProxyDB parking write failed for %s: %s",
-                           group.host, exc)
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            logger.debug("No running loop: parking for %s not persisted", host)
+            return
+        task = loop.create_task(_persist())
+        self._bg_tasks.add(task)  # strong ref: never GC'd in flight
+        task.add_done_callback(self._bg_tasks.discard)
 
     def mark_quota_exhausted(self, group: EgressGroup, until: float) -> None:
         """Park this proxy's quota bucket (daily FreeUsageLimit) until an epoch.
@@ -1120,7 +1198,7 @@ class ProxyManager:
             "egress_groups_banned": sum(
                 1 for g in groups
                 if g.permanently_banned or g.banned_until > now_wall),
-            # Defensive: never expose userinfo/DSN credentials in the snapshot.
+            # Defensive: never expose userinfo/service credentials in the snapshot.
             "last_proxies_fetch": redact_url(self.last_fetch_status) if self.last_fetch_status else None,
             "proxies": proxy_rows,
             "egress_groups": [
@@ -1142,12 +1220,29 @@ class ProxyManager:
         }
 
     async def aclose(self) -> None:
-        """Close the fetcher and all clients; safe to call twice."""
+        """Drain background writes, then close the fetcher and all clients.
+
+        Parking persistence is fire-and-forget, so shutdown must wait for the
+        scheduled writes before the storage client is closed by the caller.
+        Safe to call twice.
+        """
         if self._closed:
             return
         self._closed = True
+        await self._drain_bg_tasks()
         for p in self.proxies:
             client, p.client, p._client_proxy = p.client, None, None
             if client is not None:
                 await client.aclose()
         await self._fetcher.aclose()
+
+    async def _drain_bg_tasks(self) -> None:
+        """Consume every fire-and-forget task (errors are already handled)."""
+        pending = [task for task in self._bg_tasks if not task.done()]
+        if not pending:
+            return
+        results = await asyncio.gather(*pending, return_exceptions=True)
+        for result in results:
+            if isinstance(result, BaseException):
+                logger.debug("Background proxy task failed: %s",
+                             type(result).__name__)

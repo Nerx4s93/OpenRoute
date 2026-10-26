@@ -1,10 +1,12 @@
 """pytest configuration: project paths, isolated PostgreSQL DBs + gateway factory.
 
-Tests need a live PostgreSQL (gateway stores are no longer SQLite files): by
-default it is the container from docker-compose.test.yml (127.0.0.1:55433).
-Each test gets its own DB: it is created in the ``pg_dsn`` fixture and dropped
-afterwards (``WITH (FORCE)`` severs forgotten connections). The instance can be
-overridden with the ``OPENROUTE_TEST_DSN`` env var.
+Gateway tests are hermetic: every persistent domain goes through the in-memory
+``FakeStorage``, so no database is needed for them. Only the real-SQL suite for
+``storage-service`` (``test_storage_service.py``) uses the ``pg_dsn`` fixture:
+by default it is the container from docker-compose.test.yml
+(127.0.0.1:55433). Each such test gets its own DB: it is created in the fixture
+and dropped afterwards (``WITH (FORCE)`` severs forgotten connections). The
+instance can be overridden with the ``OPENROUTE_TEST_DSN`` env var.
 """
 
 import os
@@ -14,7 +16,9 @@ from pathlib import Path
 
 TESTS_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = TESTS_DIR.parent
-for _p in (str(PROJECT_ROOT), str(TESTS_DIR)):
+# storage-service/ is on PYTHONPATH so tests import openroute_storage exactly
+# like the container does (WORKDIR /srv, package at /srv/openroute_storage).
+for _p in (str(PROJECT_ROOT), str(TESTS_DIR), str(PROJECT_ROOT / "storage-service")):
     if _p not in sys.path:
         sys.path.insert(0, _p)
 
@@ -38,7 +42,7 @@ def _admin_connect():
 
 @pytest.fixture()
 def pg_dsn():
-    """An isolated DB per test: the DSN the gateway connects to PostgreSQL with."""
+    """An isolated DB per test (storage-service real-SQL suite only)."""
     dbname = f"openroute_test_{uuid.uuid4().hex[:12]}"
     try:
         with _admin_connect() as admin:
@@ -56,28 +60,32 @@ def pg_dsn():
 
 @pytest.fixture(scope="session", autouse=True)
 def _close_import_time_pools():
-    """Close the reqlog pool created when gateway.main was imported (DSN from .env).
+    """Nothing is opened at import time: the request log is storage-backed and
+    created in the lifespan.
 
-    Otherwise psycopg_pool workers "say goodbye" via __del__ on an already
-    closed stderr at interpreter exit — a flood of Logging errors in pytest's
-    output. By then monkeypatch is undone, so main.reqlog is the import-time
-    instance.
+    Kept as a safety net: if a test leaked a facade bound to a closed loop, mark
+    it closed here so no fire-and-forget task is left pending at interpreter
+    exit. ``main.reqlog`` is ``None`` after every clean shutdown.
     """
     yield
+    import asyncio
+
     import gateway.main as main
-    try:
-        main.reqlog.close()
-    except Exception:
-        pass
+    log = main.reqlog
+    if log is not None:
+        try:
+            asyncio.run(log.close())
+        except Exception:
+            pass
 
 
 @pytest.fixture()
-def make_gateway(monkeypatch, pg_dsn):
+def make_gateway(monkeypatch):
     """Gateway factory; every TestClient is closed carefully after the test."""
     made = []
 
     def _make(**kwargs):
-        gw = Gateway(monkeypatch, pg_dsn, **kwargs)
+        gw = Gateway(monkeypatch, **kwargs)
         made.append(gw)
         return gw
 
