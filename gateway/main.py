@@ -1256,7 +1256,10 @@ async def _stats_panel_data(days: int = 30, period: str | None = None) -> dict:
             "errors_total": int(rec.get("errors") or 0),
         })
         proxies.append(out)
-    proxies.sort(key=lambda row: (-row["tokens_total"], row["proxy"]))
+    # Active pool first, then archived/unknown proxies; each group by spend.
+    proxies.sort(
+        key=lambda row: (not row["in_pool"], -row["tokens_total"], row["proxy"])
+    )
 
     totals = {
         "tokens_total": sum(row["tokens_total"] for row in proxies),

@@ -481,7 +481,11 @@ class GatewayClient:
                 "requests_total": _as_int(raw.get("requests_total")),
                 "errors_total": _as_int(raw.get("errors_total")),
             })
-        proxies.sort(key=lambda item: (-item["tokens_total"], item["proxy"]))
+        proxies.sort(
+            key=lambda item: (
+                not item["in_pool"], -item["tokens_total"], item["proxy"],
+            )
+        )
 
         series_by_proxy: dict[str, dict] = {}
         raw_by_proxy = data.get("series_by_proxy")

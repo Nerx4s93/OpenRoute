@@ -1,7 +1,8 @@
 import { useState } from "react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import type { ApiError } from "../api/client";
-import type { StatsSeries, StatsSnapshot } from "../api/types";
+import type { StatsProxyRow, StatsSeries, StatsSnapshot } from "../api/types";
+import { compareStatsProxies } from "../lib/stats";
 import { ErrorBanner } from "./Feedback";
 import { Section } from "./Section";
 import { TokenChart, type TokenChartSeries } from "./TokenChart";
@@ -15,6 +16,7 @@ function tokensFor(series: StatsSeries | undefined, length: number): number[] {
 function buildChartSeries(
   data: StatsSnapshot | undefined,
   selected: string,
+  rows: StatsProxyRow[],
 ): TokenChartSeries[] {
   if (!data) return [];
   const length = data.dates?.length ?? 0;
@@ -30,10 +32,6 @@ function buildChartSeries(
     ];
   }
 
-  // Sort defensively: the server already returns rows by tokens_total desc.
-  const rows = [...(data.proxies ?? [])].sort(
-    (a, b) => (b.tokens_total ?? 0) - (a.tokens_total ?? 0),
-  );
   const chartSeries: TokenChartSeries[] = rows.slice(0, TOP_PROXIES).map((row, index) => ({
     label: row.proxy,
     values: tokensFor(data.series_by_proxy?.[row.proxy], length),
@@ -61,9 +59,10 @@ export function TokenStatsPanel({
 }) {
   const [selected, setSelected] = useState("");
   const data = query.data;
-  const proxyRows = data?.proxies ?? [];
+  // Sort defensively; the server uses the same in-pool-first ordering.
+  const proxyRows = [...(data?.proxies ?? [])].sort(compareStatsProxies);
   const activeProxy = proxyRows.some((row) => row.proxy === selected) ? selected : "";
-  const chartSeries = buildChartSeries(data, activeProxy);
+  const chartSeries = buildChartSeries(data, activeProxy, proxyRows);
 
   return (
     <Section id="chart-title" icon="▦" title="Токены по дням" note="Дни — UTC">

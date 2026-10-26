@@ -858,13 +858,13 @@ def test_stats_snapshot_normalized(panel):
             {
                 "proxy": "http://user:secret@10.0.0.1:3128",
                 "in_pool": True,
-                "tokens_total": 500,
+                "tokens_total": 200,
                 "requests_total": 2, "errors_total": 1,
             },
             {
                 "proxy": "old:8080",
                 "in_pool": False,
-                "tokens_total": 200,
+                "tokens_total": 500,
                 "requests_total": 1, "errors_total": 0,
                 # Unknown gateway fields must never reach the browser.
                 "real_proxy": "http://user:secret@old:8080",

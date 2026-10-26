@@ -1806,9 +1806,9 @@ def test_internal_stats_data_totals_and_archived(make_gateway):
 
     by_name = {row["proxy"]: row for row in data["proxies"]}
     assert set(by_name) == {prox, archived, "proxy-b.invalid:8080"}
-    # Sorted by tokens_total DESC (then name).
+    # In-pool proxies first, then archived; each group by tokens_total DESC.
     assert [row["proxy"] for row in data["proxies"]] == [
-        prox, archived, "proxy-b.invalid:8080"]
+        prox, "proxy-b.invalid:8080", archived]
 
     a = by_name[prox]
     assert a["in_pool"] is True

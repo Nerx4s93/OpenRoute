@@ -3,6 +3,7 @@ import { EmptyRow, LoadingRows } from "./Feedback";
 import { Section } from "./Section";
 import { StatusBadge } from "./StatusBadge";
 import { formatNumber } from "../lib/format";
+import { compareStatsProxies } from "../lib/stats";
 
 interface ProxyStatsPanelProps {
   rows: StatsProxyRow[];
@@ -17,9 +18,7 @@ export function ProxyStatsPanel({
   id = "proxy-stats-title",
   note = "За всё время",
 }: ProxyStatsPanelProps) {
-  const sortedProxies = [...rows].sort(
-    (a, b) => (b.tokens_total ?? 0) - (a.tokens_total ?? 0),
-  );
+  const sortedProxies = [...rows].sort(compareStatsProxies);
 
   return (
     <Section id={id} icon="↗" title="Прокси" note={note}>
