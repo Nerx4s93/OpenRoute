@@ -243,7 +243,7 @@ async def test_no_retention_old_entries_kept_forever(pg_dsn):
     rl2.close()
 
 
-# --- per-proxy token statistics (quota-event cutoffs, daily series) --------
+# --- per-proxy lifetime statistics and daily series ------------------------
 
 
 def _entry(ts, account="1.2.3.4:8080", prompt=10, completion=5, status=200,
@@ -256,8 +256,8 @@ def _entry(ts, account="1.2.3.4:8080", prompt=10, completion=5, status=200,
     )
 
 
-def test_proxy_stats_since_limit_split(pg_dsn):
-    """All-time totals per account plus the split since the last quota event."""
+def test_proxy_stats_lifetime(pg_dsn):
+    """All-time totals per account."""
     rl = RequestLog(pg_dsn)
     base = time.time()
     rl._insert(_entry(base - 100, account="a:1", prompt=100, completion=0))
@@ -267,19 +267,10 @@ def test_proxy_stats_since_limit_split(pg_dsn):
     rl._insert(_entry(base - 10, account="b:2", prompt=1, completion=1))
     rl._insert(_entry(base - 300, account="c:3", prompt=7, completion=7))
 
-    stats = rl.proxy_stats({"a:1": base - 60})
-    assert stats["a:1"] == {
-        "requests": 3, "errors": 1, "tokens": 115, "tokens_since_limit": 15,
-    }
-    # No quota event for these accounts -> no since-limit value.
-    assert stats["b:2"]["tokens_since_limit"] is None
-    assert stats["c:3"]["tokens"] == 14
-    assert stats["c:3"]["tokens_since_limit"] is None
-
-    # A limit newer than every row still means "0 since the limit", not None.
-    newer = rl.proxy_stats({"c:3": base - 5})
-    assert newer["c:3"]["tokens_since_limit"] == 0
-    assert newer["a:1"]["tokens_since_limit"] is None  # not in limits now
+    stats = rl.proxy_stats()
+    assert stats["a:1"] == {"requests": 3, "errors": 1, "tokens": 115}
+    assert stats["b:2"] == {"requests": 1, "errors": 0, "tokens": 2}
+    assert stats["c:3"] == {"requests": 1, "errors": 0, "tokens": 14}
     rl.close()
 
 
@@ -288,24 +279,22 @@ def test_proxy_stats_ttl_cache_and_fresh_query(pg_dsn):
     now = time.time()
     rl._insert(_entry(now, account="a:1", prompt=10, completion=0))
 
-    first = rl.proxy_stats({}, ttl_seconds=60.0)
+    first = rl.proxy_stats(ttl_seconds=60.0)
     assert first["a:1"]["requests"] == 1
     rl._insert(_entry(now + 1, account="a:1", prompt=10, completion=0))
 
-    cached = rl.proxy_stats({}, ttl_seconds=60.0)
+    cached = rl.proxy_stats(ttl_seconds=60.0)
     assert cached["a:1"]["requests"] == 1  # served from the TTL cache
 
     # Callers get copies: mutating the result cannot poison the cache.
     cached["a:1"]["requests"] = 999
-    again = rl.proxy_stats({}, ttl_seconds=60.0)
+    again = rl.proxy_stats(ttl_seconds=60.0)
     assert again["a:1"]["requests"] == 1
 
-    # ttl <= 0 always queries; a different limits mapping is a different key.
-    fresh = rl.proxy_stats({}, ttl_seconds=0.0)
+    # ttl <= 0 always queries.
+    fresh = rl.proxy_stats(ttl_seconds=0.0)
     assert fresh["a:1"]["requests"] == 2
     assert fresh["a:1"]["tokens"] == 20
-    limited = rl.proxy_stats({"a:1": now + 0.5}, ttl_seconds=60.0)
-    assert limited["a:1"]["tokens_since_limit"] == 10
     rl.close()
 
 
@@ -342,9 +331,8 @@ async def test_stats_async_wrappers(pg_dsn):
     now = time.time()
     await rl.log(_entry(now, account="a:1", prompt=3, completion=4))
 
-    stats = await rl.proxy_stats_async({"a:1": now - 1}, ttl_seconds=0.0)
+    stats = await rl.proxy_stats_async(ttl_seconds=0.0)
     assert stats["a:1"]["tokens"] == 7
-    assert stats["a:1"]["tokens_since_limit"] == 7
 
     rows = await rl.daily_by_account_async(now - 86400)
     assert len(rows) == 1 and rows[0]["account"] == "a:1"
@@ -354,6 +342,6 @@ async def test_stats_async_wrappers(pg_dsn):
 def test_stats_reads_fail_soft_without_db():
     """Unreachable PostgreSQL: helpers log and return empty, never raise."""
     rl = RequestLog("postgresql://openroute:openroute@127.0.0.1:1/none")
-    assert rl.proxy_stats({}) == {}
+    assert rl.proxy_stats() == {}
     assert rl.daily_by_account(0.0) == []
     rl.close()

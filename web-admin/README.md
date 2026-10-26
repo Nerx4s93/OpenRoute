@@ -39,15 +39,12 @@ Backend админки OpenRoute (control plane). Отдаёт **только JS
 - Прокси: `{server_time, summary, totals, proxies[], recent[]}`. У каждой строки
   есть `display` (`host:port`), `usage`, состояние (`enabled`, `manual`,
   `disabled`, `banned`, таймеры) и `id` — HMAC от полного URL. `totals` —
-  `{tokens_total, tokens_since_limit, limits_total}`, в строке добавлен
-  `lifetime` (`tokens_total`, `tokens_since_limit`, `last_limit_at`,
-  `limits_total`). `summary` и `usage` строки не изменились. **Полный URL с
+  `{tokens_total}`. `summary` и `usage` строки не изменились. **Полный URL с
   логином и паролем никогда не попадает в браузер**; backend хранит его
   только в памяти процесса и резолвит `proxy_id` при мутации.
 - Статистика: `{server_time, days, dates[], totals, proxies[], series_total,
   series_by_proxy}` — `server_time` в ISO-8601 UTC, `dates` — UTC-дни,
-  серии выровнены по `dates`, только masked `host:port`,
-  `tokens_since_limit = null` при отсутствии события квоты.
+  серии выровнены по `dates`, только masked `host:port`.
 - Ключи: `{server_time, keys[], stats[]}`. `keys` — активные записи
   (`key_hash`, `key_id`, лимиты, модели), `stats` — usage из журнала запросов,
   включая `state: "deleted"` для удалённых ключей.

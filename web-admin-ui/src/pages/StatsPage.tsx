@@ -9,7 +9,7 @@ import { Section } from "../components/Section";
 import { StatCard } from "../components/StatCard";
 import { StatusBadge } from "../components/StatusBadge";
 import { TokenChart, type TokenChartSeries } from "../components/TokenChart";
-import { formatLimit, formatNumber, formatTimestamp } from "../lib/format";
+import { formatNumber } from "../lib/format";
 
 const TOP_PROXIES = 8;
 
@@ -74,9 +74,6 @@ export function StatsPage() {
   const data = query.data;
   const totals = data?.totals;
   const proxyRows = data?.proxies ?? [];
-  const limitedProxies = proxyRows.filter(
-    (row) => typeof row.last_limit_at === "number",
-  ).length;
   const sortedProxies = [...proxyRows].sort(
     (a, b) => (b.tokens_total ?? 0) - (a.tokens_total ?? 0),
   );
@@ -88,7 +85,6 @@ export function StatsPage() {
         <div className="hero-content">
           <div className="eyebrow">Система / статистика</div>
           <h1>Статистика</h1>
-          <p>Расход токенов по прокси и дням. Данные обновляются автоматически.</p>
         </div>
       </div>
 
@@ -109,21 +105,14 @@ export function StatsPage() {
           title="Суммарный расход токенов за всё время"
         />
         <StatCard
-          glyph="↺"
-          value={formatNumber(totals?.tokens_since_limit ?? 0)}
-          label="Токенов после последнего лимита"
-          title="С момента последнего 429 FreeUsageLimitError; у прокси без лимита — «—»"
-        />
-        <StatCard
           glyph="↗"
           value={formatNumber(totals?.requests_total ?? 0)}
           label="Запросов за всё время"
         />
         <StatCard
           glyph="⚑"
-          value={`${limitedProxies}/${proxyRows.length}`}
-          label="Прокси с лимитом"
-          title="Сколько прокси хотя бы раз получали 429 FreeUsageLimitError / всего прокси"
+          value={formatNumber(totals?.errors_total ?? 0)}
+          label="Ошибок за всё время"
         />
       </div>
 
@@ -148,13 +137,10 @@ export function StatsPage() {
           ) : (
             <TokenChart dates={data?.dates ?? []} series={chartSeries} />
           )}
-          <p className="chart-hint">
-            После лимита — с момента последнего 429 FreeUsageLimitError; у прокси без лимита — «—»
-          </p>
         </div>
       </Section>
 
-      <Section id="stats-title" icon="↗" title="Прокси и лимиты" note="За всё время">
+      <Section id="stats-title" icon="↗" title="Прокси" note="За всё время">
         <div className="table-scroll">
           <table>
             <thead>
@@ -162,15 +148,13 @@ export function StatsPage() {
                 <th>Прокси</th>
                 <th>В пуле</th>
                 <th>Всего токенов</th>
-                <th>После лимита</th>
                 <th>Запросов</th>
-                <th>Лимитов</th>
-                <th>Последний лимит</th>
+                <th>Ошибок</th>
               </tr>
             </thead>
             <tbody>
               {query.isLoading ? (
-                <LoadingRows colSpan={7} />
+                <LoadingRows colSpan={5} />
               ) : sortedProxies.length ? (
                 sortedProxies.map((row) => (
                   <tr key={row.proxy} className={row.in_pool ? undefined : "dead"}>
@@ -183,18 +167,12 @@ export function StatsPage() {
                       )}
                     </td>
                     <td>{formatNumber(row.tokens_total)}</td>
-                    <td>{formatLimit(row.tokens_since_limit)}</td>
                     <td>{formatNumber(row.requests_total)}</td>
-                    <td>{formatNumber(row.limits_total)}</td>
-                    <td className="mono muted">
-                      {typeof row.last_limit_at === "number"
-                        ? formatTimestamp(row.last_limit_at)
-                        : "—"}
-                    </td>
+                    <td>{formatNumber(row.errors_total)}</td>
                   </tr>
                 ))
               ) : (
-                <EmptyRow colSpan={7}>Прокси нет</EmptyRow>
+                <EmptyRow colSpan={5}>Прокси нет</EmptyRow>
               )}
             </tbody>
           </table>

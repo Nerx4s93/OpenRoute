@@ -21,24 +21,15 @@ never expires. They are written by ``ProxyManager`` and loaded at startup, so a
 gateway restart does not lose the “quota exhausted” / “banned” state shown in
 the admin panel. Expired epochs are harmless and are overwritten by the next
 mark.
-
-The ``proxy_quota_events`` table (DDL in ``pg.py``) is an append-only history of
-observed quota resets, keyed by the masked proxy. ``record_quota_event`` writes
-one row per quota window (idempotent) and ``last_limits`` serves per-proxy
-“last hit / count” aggregates for the token-usage statistics; the history
-survives manager and store restarts.
 """
 
 from __future__ import annotations
 
-import logging
 import threading
 import time
 from collections.abc import Iterable
 
 from .pg import ensure_schema, make_pool
-
-logger = logging.getLogger(__name__)
 
 
 class ProxyDB:
@@ -60,11 +51,6 @@ class ProxyDB:
         self._schema_lock = threading.Lock()  # one-shot DDL init
         self._schema_ready = False
         self._closed = False
-        # Quota-event history cache (``last_limits``): a short TTL keeps the
-        # ~1 Hz admin panel from querying per request; writes invalidate it.
-        self._limits_cache: dict[str, dict] | None = None
-        self._limits_cache_ts = 0.0
-        self._limits_lock = threading.Lock()
 
     def _ensure(self) -> None:
         """Create tables on a connection of THIS pool: the COMMIT happens
@@ -133,66 +119,6 @@ class ProxyDB:
                  bool(permanently_banned), urls),
             )
             return cur.rowcount
-
-    def record_quota_event(self, proxy_key: str, hit_at: float, quota_until: float,
-                           kind: str = "quota") -> bool:
-        """Persist one observed quota event; True if a new row was inserted.
-
-        ``(proxy_key, kind, quota_until)`` is unique, so a repeated mark for the
-        same quota window is a no-op instead of inflating the history. The
-        ``last_limits`` cache is invalidated after a successful write. DB errors
-        propagate: the caller (``ProxyManager.mark_quota_exhausted``) guards the
-        request path and logs instead of failing it.
-        """
-        self._ensure()
-        with self._pool.connection() as conn:
-            cur = conn.execute(
-                "INSERT INTO proxy_quota_events"
-                " (proxy_key, kind, hit_at, quota_until)"
-                " VALUES (%s, %s, %s, %s)"
-                " ON CONFLICT (proxy_key, kind, quota_until) DO NOTHING",
-                (str(proxy_key), str(kind), float(hit_at), float(quota_until)),
-            )
-            inserted = cur.rowcount > 0
-        with self._limits_lock:
-            self._limits_cache = None
-        return inserted
-
-    def last_limits(self, ttl_seconds: float = 0.0) -> dict[str, dict]:
-        """``{proxy_key: {"last_at": float, "count": int}}`` from the history.
-
-        ``last_at`` is the newest ``hit_at`` and ``count`` the number of quota
-        events for that proxy. ``ttl_seconds > 0`` serves a per-instance cached
-        snapshot younger than the TTL (invalidated by
-        :meth:`record_quota_event`); ``ttl_seconds <= 0`` always queries. Any
-        DB error is logged and yields an empty mapping — the admin panel must
-        never fail because the history is unavailable.
-        """
-        now = time.monotonic()
-        if ttl_seconds > 0:
-            with self._limits_lock:
-                cached = self._limits_cache
-                if cached is not None and now - self._limits_cache_ts < ttl_seconds:
-                    return {key: dict(row) for key, row in cached.items()}
-        try:
-            self._ensure()
-            with self._pool.connection() as conn:
-                rows = conn.execute(
-                    "SELECT proxy_key, MAX(hit_at), COUNT(*)"
-                    " FROM proxy_quota_events GROUP BY proxy_key"
-                ).fetchall()
-        except Exception:
-            logger.exception("last_limits() failed")
-            return {}
-        out = {
-            str(key): {"last_at": float(last_at), "count": int(count)}
-            for key, last_at, count in rows
-        }
-        if ttl_seconds > 0:
-            with self._limits_lock:
-                self._limits_cache = out
-                self._limits_cache_ts = now
-        return {key: dict(row) for key, row in out.items()}
 
     def upsert_many(self, proxies: Iterable[str]) -> int:
         """Insert every not-yet-known proxy with ``enabled = TRUE``; keep the

@@ -1111,32 +1111,15 @@ def _period_since(period: str) -> float | None:
     return start.timestamp()
 
 
-async def _proxy_limits(ttl_seconds: float = 10.0) -> dict[str, dict]:
-    """Per-proxy quota-event history from ProxyDB (``last_limits``).
-
-    Returns ``{masked_proxy: {"last_at": float, "count": int}}``; an absent
-    store (no startup / DB down) yields ``{}`` so panel data never fails.
-    """
-    db = proxydb
-    if db is None:
-        return {}
-    try:
-        return await asyncio.to_thread(db.last_limits, ttl_seconds)
-    except Exception:
-        logger.exception("Failed to load proxy quota limits")
-        return {}
-
-
 async def _proxies_panel_data(period: str = "all") -> dict:
     """Snapshot for the "Proxies" page: awaits first (the pool may change from
     another tab's POST), then ``status()`` and the zip over ``manager.proxies``
     — so the table and counters are consistent. ``period`` filters the request
     log aggregates (day/week/month = current UTC day/week/month).
 
-    Additive keys: ``usage_by_proxy_lifetime`` (all-time tokens/requests and
-    the since-last-quota-event split) and ``proxy_limits`` (quota-event
-    history). The existing keys keep their contracts and the SSE payload stays
-    free of the heavy per-day series.
+    Additive key: ``usage_by_proxy_lifetime`` (all-time tokens/requests).
+    The existing keys keep their contracts and the SSE payload stays free of
+    the heavy per-day series.
     """
     since = _period_since(period)
     per_proxy = await reqlog.summary_by_account_async(since)
@@ -1150,36 +1133,24 @@ async def _proxies_panel_data(period: str = "all") -> dict:
         rows.append(s2)
     st["proxies"] = rows
 
-    limits = await _proxy_limits(10.0)
     try:
-        stats = await reqlog.proxy_stats_async(
-            {key: value["last_at"] for key, value in limits.items()},
-            ttl_seconds=10.0,
-        )
+        stats = await reqlog.proxy_stats_async(ttl_seconds=10.0)
     except Exception:
         logger.exception("Failed to load per-proxy lifetime statistics")
         stats = {}
 
-    def _lifetime(display: str, rec: dict | None) -> dict:
-        if rec is None:
-            return {
-                "requests": 0,
-                "errors": 0,
-                "tokens": 0,
-                "tokens_since_limit": 0 if display in limits else None,
-            }
-        return {
+    lifetime = {
+        display: {
             "requests": int(rec.get("requests") or 0),
             "errors": int(rec.get("errors") or 0),
             "tokens": int(rec.get("tokens") or 0),
-            "tokens_since_limit": rec.get("tokens_since_limit"),
         }
-
-    lifetime = {display: _lifetime(display, rec) for display, rec in stats.items()}
+        for display, rec in stats.items()
+    }
     for row in rows:
         display = row["proxy"]
         if display not in lifetime:  # pool member with no requests yet
-            lifetime[display] = _lifetime(display, None)
+            lifetime[display] = {"requests": 0, "errors": 0, "tokens": 0}
 
     return {
         "status": st,
@@ -1187,7 +1158,6 @@ async def _proxies_panel_data(period: str = "all") -> dict:
         "usage_by_proxy": per_proxy,
         "recent": recent,
         "usage_by_proxy_lifetime": lifetime,
-        "proxy_limits": limits,
     }
 
 
@@ -1204,9 +1174,8 @@ async def _stats_panel_data(days: int) -> dict:
 
     ``days`` is clamped to ``1..365``. ``dates`` always has exactly ``days``
     UTC calendar days, ascending and ending today; every series is aligned to
-    it. Per-proxy lifetime counters come from the request log plus the quota
-    events in PostgreSQL (``tokens_since_limit`` = tokens after the last
-    observed quota reset). Only masked proxy names are exposed.
+    it. Per-proxy lifetime counters come from the request log. Only masked
+    proxy names are exposed.
 
     Robustness: missing/unreachable stores degrade to zeros and empty series —
     the endpoint still answers 200.
@@ -1221,12 +1190,8 @@ async def _stats_panel_data(days: int) -> dict:
              for i in range(days)]
     day_index = {day: i for i, day in enumerate(dates)}
 
-    limits = await _proxy_limits(10.0)
     try:
-        stats = await reqlog.proxy_stats_async(
-            {key: value["last_at"] for key, value in limits.items()},
-            ttl_seconds=10.0,
-        )
+        stats = await reqlog.proxy_stats_async(ttl_seconds=10.0)
     except Exception:
         logger.exception("Failed to load per-proxy statistics")
         stats = {}
@@ -1242,24 +1207,14 @@ async def _stats_panel_data(days: int) -> dict:
         display = str(item.get("proxy") or "")
         if not display:
             continue
-        rows[display] = {
-            "proxy": display,
-            "in_pool": True,
-            "enabled": bool(item.get("enabled")),
-            "banned": bool(item.get("banned")),
-            "quota_seconds_left": float(item.get("quota_seconds_left") or 0.0),
-        }
+        rows[display] = {"proxy": display, "in_pool": True}
     seen: list[str] = list(stats) + [str(r.get("account")) for r in daily]
-    seen += list(limits)
     for display in seen:
         if not display or display in rows:
             continue
         rows[display] = {
             "proxy": display,
             "in_pool": False,  # archived/unknown: no runtime object any more
-            "enabled": False,
-            "banned": False,
-            "quota_seconds_left": 0.0,
         }
 
     series_by_proxy = {
@@ -1282,31 +1237,19 @@ async def _stats_panel_data(days: int) -> dict:
     proxies: list[dict] = []
     for display, base in rows.items():
         rec = stats.get(display) or {}
-        limit = limits.get(display)
         out = dict(base)
         out.update({
             "tokens_total": int(rec.get("tokens") or 0),
-            "tokens_since_limit": (
-                None if limit is None
-                else int(rec.get("tokens_since_limit") or 0)
-            ),
             "requests_total": int(rec.get("requests") or 0),
             "errors_total": int(rec.get("errors") or 0),
-            "last_limit_at": float(limit["last_at"]) if limit else None,
-            "limits_total": int(limit["count"]) if limit else 0,
         })
         proxies.append(out)
     proxies.sort(key=lambda row: (-row["tokens_total"], row["proxy"]))
 
     totals = {
         "tokens_total": sum(row["tokens_total"] for row in proxies),
-        "tokens_since_limit": sum(
-            row["tokens_since_limit"] for row in proxies
-            if row["tokens_since_limit"] is not None
-        ),
         "requests_total": sum(row["requests_total"] for row in proxies),
         "errors_total": sum(row["errors_total"] for row in proxies),
-        "limits_total": sum(row["limits_total"] for row in proxies),
     }
     return {
         "days": days,

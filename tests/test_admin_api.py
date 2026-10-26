@@ -73,8 +73,7 @@ def _stats_payload() -> dict:
         "server_time": STATS_SERVER_TIME,
         "dates": list(STATS_DATES),
         "totals": {
-            "tokens_total": 0, "tokens_since_limit": 0,
-            "requests_total": 0, "errors_total": 0, "limits_total": 0,
+            "tokens_total": 0, "requests_total": 0, "errors_total": 0,
         },
         "proxies": [],
         "series_total": {
@@ -111,7 +110,6 @@ class FakeState:
         self.keys: dict[str, dict] = {}  # key_hash -> row
         self.usage_by_proxy: dict[str, dict] = {}  # masked -> stats
         self.usage_by_proxy_lifetime: dict[str, dict] = {}  # masked -> lifetime
-        self.proxy_limits: dict[str, dict] = {}  # masked -> last limit
         self.usage_by_key: dict[str, dict] = {}  # key_id -> stats
         self.recent: list[dict] = []
         self.stats_payload: dict = _stats_payload()  # /internal/stats-data
@@ -218,7 +216,6 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
             "usage": {"total": _stats(state.usage_by_proxy)},
             "usage_by_proxy": state.usage_by_proxy,
             "usage_by_proxy_lifetime": state.usage_by_proxy_lifetime,
-            "proxy_limits": state.proxy_limits,
             "recent": state.recent,
         }
 
@@ -564,10 +561,7 @@ def test_proxies_snapshot_and_period(panel):
         "requests": 4, "errors": 1, "tokens": 110,
     }
     panel.state.usage_by_proxy_lifetime["10.0.0.1:3128"] = {
-        "requests": 9, "errors": 2, "tokens": 110, "tokens_since_limit": 60,
-    }
-    panel.state.proxy_limits["10.0.0.1:3128"] = {
-        "last_at": 1_700_000_500.0, "count": 1,
+        "requests": 9, "errors": 2, "tokens": 110,
     }
     panel.state.recent = [{
         "ts": 1_700_000_000.0, "key_id": "default", "method": "POST",
@@ -592,13 +586,8 @@ def test_proxies_snapshot_and_period(panel):
     assert [p["display"] for p in body["proxies"]] == ["10.0.0.1:3128", "10.0.0.2:3128"]
     first = body["proxies"][0]
     assert first["usage"] == {"requests": 4, "errors": 1, "tokens": 110}
-    assert first["lifetime"] == {
-        "tokens_total": 110, "tokens_since_limit": 60,
-        "last_limit_at": 1_700_000_500.0, "limits_total": 1,
-    }
-    assert body["totals"] == {
-        "tokens_total": 110, "tokens_since_limit": 60, "limits_total": 1,
-    }
+    assert "lifetime" not in first
+    assert body["totals"] == {"tokens_total": 110}
     assert first["id"] and len(first["id"]) == 64
     # The full credentialised URL must never reach the browser.
     assert "secret" not in response.text
@@ -608,47 +597,27 @@ def test_proxies_snapshot_and_period(panel):
     assert "url" not in body["recent"][0]
 
 
-def test_proxies_lifetime_and_totals(panel):
+def test_proxies_lifetime_totals(panel):
     panel.login_ok()
     panel.seed_proxy("http://user:secret@10.0.0.1:3128")
     panel.seed_proxy("http://u:p@10.0.0.2:3128")
     panel.seed_proxy("http://u:p@10.0.0.3:3128")
     panel.state.usage_by_proxy_lifetime["10.0.0.1:3128"] = {
-        "requests": 10, "errors": 2, "tokens": 900, "tokens_since_limit": 400,
+        "requests": 10, "errors": 2, "tokens": 900,
     }
     panel.state.usage_by_proxy_lifetime["10.0.0.2:3128"] = {
-        "requests": 3, "errors": 0, "tokens": 100, "tokens_since_limit": None,
+        "requests": 3, "errors": 0, "tokens": 100,
     }
     # An archived proxy (not in the pool anymore) still counts in the totals.
     panel.state.usage_by_proxy_lifetime["archived:8080"] = {
-        "requests": 1, "errors": 0, "tokens": 50, "tokens_since_limit": 25,
+        "requests": 1, "errors": 0, "tokens": 50,
     }
-    panel.state.proxy_limits["10.0.0.1:3128"] = {
-        "last_at": 1_700_000_500.0, "count": 2,
-    }
-    panel.state.proxy_limits["10.0.0.2:3128"] = {"last_at": None, "count": 0}
 
     response = panel.client.get("/api/admin/proxies")
     assert response.status_code == 200
     body = response.json()
-    by_display = {row["display"]: row for row in body["proxies"]}
-    assert by_display["10.0.0.1:3128"]["lifetime"] == {
-        "tokens_total": 900, "tokens_since_limit": 400,
-        "last_limit_at": 1_700_000_500.0, "limits_total": 2,
-    }
-    # No limit was reached for this proxy: "since limit" stays null, not zero.
-    assert by_display["10.0.0.2:3128"]["lifetime"] == {
-        "tokens_total": 100, "tokens_since_limit": None,
-        "last_limit_at": None, "limits_total": 0,
-    }
-    # No lifetime counters at all -> zeros, but still null "since limit".
-    assert by_display["10.0.0.3:3128"]["lifetime"] == {
-        "tokens_total": 0, "tokens_since_limit": None,
-        "last_limit_at": None, "limits_total": 0,
-    }
-    assert body["totals"] == {
-        "tokens_total": 1050, "tokens_since_limit": 425, "limits_total": 2,
-    }
+    assert body["totals"] == {"tokens_total": 1050}
+    assert all("lifetime" not in row for row in body["proxies"])
     assert "secret" not in response.text
     assert "real_proxy" not in response.text
 
@@ -758,25 +727,20 @@ def test_stats_snapshot_normalized(panel):
         "server_time": STATS_SERVER_TIME,
         "dates": dates,
         "totals": {
-            "tokens_total": 700, "tokens_since_limit": 250,
-            "requests_total": 2, "errors_total": 1, "limits_total": 3,
+            "tokens_total": 700, "requests_total": 2, "errors_total": 1,
         },
         "proxies": [
             {
                 "proxy": "http://user:secret@10.0.0.1:3128",
-                "in_pool": True, "enabled": True, "banned": False,
-                "quota_seconds_left": 0.0,
-                "tokens_total": 500, "tokens_since_limit": 250,
+                "in_pool": True,
+                "tokens_total": 500,
                 "requests_total": 2, "errors_total": 1,
-                "last_limit_at": 1_700_000_500.0, "limits_total": 3,
             },
             {
                 "proxy": "old:8080",
-                "in_pool": False, "enabled": False, "banned": True,
-                "quota_seconds_left": 12.5,
-                "tokens_total": 200, "tokens_since_limit": None,
+                "in_pool": False,
+                "tokens_total": 200,
                 "requests_total": 1, "errors_total": 0,
-                "last_limit_at": None, "limits_total": 0,
                 # Unknown gateway fields must never reach the browser.
                 "real_proxy": "http://user:secret@old:8080",
             },
@@ -798,24 +762,17 @@ def test_stats_snapshot_normalized(panel):
     assert body["server_time"] == "2026-01-01T00:00:00+00:00"
     assert body["dates"] == dates
     assert body["totals"] == {
-        "tokens_total": 700, "tokens_since_limit": 250,
-        "requests_total": 2, "errors_total": 1, "limits_total": 3,
+        "tokens_total": 700, "requests_total": 2, "errors_total": 1,
     }
     assert [row["proxy"] for row in body["proxies"]] == ["10.0.0.1:3128", "old:8080"]
     live, archived = body["proxies"]
-    assert set(live) == {
-        "proxy", "in_pool", "enabled", "banned", "quota_seconds_left",
-        "tokens_total", "tokens_since_limit", "requests_total",
-        "errors_total", "last_limit_at", "limits_total",
+    expected_fields = {
+        "proxy", "in_pool", "tokens_total", "requests_total", "errors_total",
     }
-    assert live["in_pool"] is True and live["enabled"] is True
-    assert live["tokens_since_limit"] == 250
-    assert live["last_limit_at"] == 1_700_000_500.0
-    # Archived proxies stay visible but out of the pool; nulls are preserved.
-    assert archived["in_pool"] is False and archived["banned"] is True
-    assert archived["tokens_since_limit"] is None
-    assert archived["last_limit_at"] is None
-    assert archived["quota_seconds_left"] == pytest.approx(12.5)
+    assert set(live) == expected_fields
+    assert live["in_pool"] is True
+    # Archived proxies stay visible but out of the pool.
+    assert archived["in_pool"] is False
     assert len(body["series_total"]["tokens"]) == days
     assert body["series_total"]["tokens"][-1] == 700
     assert len(body["series_total"]["errors"]) == days
@@ -835,8 +792,7 @@ def test_stats_snapshot_tolerates_missing_fields(panel):
     assert body["days"] == 30
     assert body["dates"] == []
     assert body["totals"] == {
-        "tokens_total": 0, "tokens_since_limit": 0, "requests_total": 0,
-        "errors_total": 0, "limits_total": 0,
+        "tokens_total": 0, "requests_total": 0, "errors_total": 0,
     }
     assert body["proxies"] == []
     assert body["series_total"] == {"tokens": [], "requests": [], "errors": []}

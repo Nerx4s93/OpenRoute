@@ -68,10 +68,10 @@ class RequestLog:
         self._schema_ready = False
         self._closed = False
         self._dropped = 0  # entries silently dropped after close()
-        # Per-proxy token statistics cache: key = stable copy of the limits
-        # mapping, value = (monotonic timestamp, rows). The admin panel polls
-        # ~1 Hz, so a short TTL avoids a DB query per poll.
-        self._stats_cache: dict[tuple, tuple[float, dict[str, dict]]] = {}
+        # Per-proxy lifetime statistics cache. The admin panel polls ~1 Hz,
+        # so a short TTL avoids a full request_log aggregate per poll.
+        self._stats_cache: dict[str, dict] | None = None
+        self._stats_cache_ts = 0.0
         self._stats_lock = threading.Lock()
 
     # --- schema (lazy, on first use; idempotent) ---
@@ -217,99 +217,29 @@ class RequestLog:
         """async wrapper: the blocking query goes to a thread."""
         return await asyncio.to_thread(self.summary_by_account, since)
 
-    def proxy_stats(self, limits: dict[str, float],
-                    ttl_seconds: float = 0.0) -> dict[str, dict]:
-        """Per-account lifetime and since-limit token usage.
+    def proxy_stats(self, ttl_seconds: float = 0.0) -> dict[str, dict]:
+        """Per-account lifetime counters: ``{account: {requests, errors, tokens}}``.
 
-        ``limits`` maps account (masked proxy ``host:port``) -> quota-event
-        epoch (``last_at``). Returns
-        ``{account: {"requests", "errors", "tokens", "tokens_since_limit"}}``:
-
-        - ``tokens`` is the all-time token sum;
-        - ``tokens_since_limit`` sums requests with ``ts >= since`` for accounts
-          present in ``limits`` (0 when no such rows exist) and is ``None`` for
-          accounts without a quota event. With an empty ``limits`` mapping no
-          join is made and every ``tokens_since_limit`` is ``None``.
-
-        Results are cached per instance for ``ttl_seconds > 0``, keyed by a
-        stable form of ``limits``; callers always get copies. A DB error
-        returns ``{}`` without caching.
+        ``ttl_seconds > 0`` serves a cached snapshot younger than the TTL;
+        callers always get copies. A DB error yields ``{}``.
         """
-        try:
-            key = tuple(sorted((str(k), float(v)) for k, v in (limits or {}).items()))
-        except (TypeError, ValueError):
-            logger.exception("proxy_stats() received bad limits: %r", limits)
-            return {}
         now = time.monotonic()
         if ttl_seconds > 0:
             with self._stats_lock:
-                hit = self._stats_cache.get(key)
-                if hit is not None and now - hit[0] < ttl_seconds:
-                    return {acc: dict(row) for acc, row in hit[1].items()}
-        try:
-            self._ensure_schema()
-            with self._pool.connection() as conn:
-                if key:
-                    values = ", ".join(
-                        ["(%s::text, %s::double precision)"] * len(key))
-                    params = tuple(x for pair in key for x in pair)
-                    rows = conn.execute(
-                        "SELECT r.account, COUNT(*),"
-                        " SUM(CASE WHEN r.status >= 400 OR r.error IS NOT NULL"
-                        " THEN 1 ELSE 0 END),"
-                        " SUM(COALESCE(r.prompt_tokens,0)"
-                        " + COALESCE(r.completion_tokens,0)),"
-                        " SUM(COALESCE(r.prompt_tokens,0)"
-                        " + COALESCE(r.completion_tokens,0))"
-                        " FILTER (WHERE r.ts >= l.since),"
-                        " (MAX(l.since) IS NOT NULL)"
-                        " FROM request_log r"
-                        " LEFT JOIN (VALUES " + values + ") AS l(account, since)"
-                        " ON r.account = l.account"
-                        " WHERE r.account IS NOT NULL GROUP BY r.account",
-                        params,
-                    ).fetchall()
-                else:
-                    rows = conn.execute(
-                        "SELECT account, COUNT(*),"
-                        " SUM(CASE WHEN status >= 400 OR error IS NOT NULL"
-                        " THEN 1 ELSE 0 END),"
-                        " SUM(COALESCE(prompt_tokens,0)"
-                        " + COALESCE(completion_tokens,0))"
-                        " FROM request_log WHERE account IS NOT NULL"
-                        " GROUP BY account",
-                    ).fetchall()
-        except Exception:
-            logger.exception("proxy_stats() failed")
-            return {}
-        out: dict[str, dict] = {}
-        for row in rows:
-            if key:
-                acc, reqs, errs, toks, since_toks, has_limit = row
-                since_value = int(since_toks or 0) if has_limit else None
-            else:
-                acc, reqs, errs, toks = row
-                since_value = None
-            out[acc] = {
-                "requests": int(reqs),
-                "errors": int(errs or 0),
-                "tokens": int(toks or 0),
-                "tokens_since_limit": since_value,
-            }
+                cached = self._stats_cache
+                if cached is not None and now - self._stats_cache_ts < ttl_seconds:
+                    return {acc: dict(row) for acc, row in cached.items()}
+        out = self.summary_by_account(None)
         if ttl_seconds > 0:
             with self._stats_lock:
-                self._stats_cache[key] = (now, out)
-                if len(self._stats_cache) > 32:  # bounded: drop the oldest half
-                    kept = sorted(self._stats_cache.items(),
-                                  key=lambda item: item[1][0])[-16:]
-                    self._stats_cache = dict(kept)
+                self._stats_cache = out
+                self._stats_cache_ts = now
         return {acc: dict(row) for acc, row in out.items()}
 
-    async def proxy_stats_async(self, limits: dict[str, float],
-                                ttl_seconds: float = 0.0) -> dict[str, dict]:
+    async def proxy_stats_async(self, ttl_seconds: float = 0.0) -> dict[str, dict]:
         """async wrapper: the blocking query goes to a thread. Never raises."""
         try:
-            return await asyncio.to_thread(self.proxy_stats, limits, ttl_seconds)
+            return await asyncio.to_thread(self.proxy_stats, ttl_seconds)
         except Exception:
             logger.exception("proxy_stats_async() failed")
             return {}

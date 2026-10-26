@@ -14,8 +14,7 @@ OpenAI-совместимый API-шлюз, который балансируе�
   `px6-service` с `?refresh=true` (сброс TTL-кэша), сразу обновить пул и
   перепроверить прокси.
 - В админке есть вкладка **«Статистика»**: расход токенов по прокси и UTC-дням
-  за 7/30/90 дней, «токены после последнего лимита» и история
-  `429 FreeUsageLimitError` по каждому прокси-URL (см. «Статистика токенов»).
+  за 7/30/90 дней и суммарные токены/запросы/ошибки (см. «Статистика токенов»).
 - **Sticky-сессии**: задача (`x-opencode-session`, либо fingerprint диалога)
   закрепляется за одним прокси-URL — все её реплики идут через один и тот же
   выходной адрес, а новые задачи балансируются по score (сессии/запросы/токены).
@@ -80,7 +79,7 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
                                                                          │
    (web-admin-ui — только статика; браузер сам ходит в /api/admin/* через edge)
    [gateway] ──► [openroute-px6] ──► px6.net       (список прокси, descr=OPENROUTE)
-   [gateway] ──► [PostgreSQL]                       (request_log + proxies + keys + session_affinity + proxy_personas + proxy_quota_events)
+   [gateway] ──► [PostgreSQL]                       (request_log + proxies + keys + session_affinity + proxy_personas)
    [gateway] ──► opencode.ai                        (free-tier инференс через прокси)
    [web-admin] ──► [Redis]                          (серверные сессии админки)
    [web-admin] ──► [gateway] /internal/*            (X-Internal-Token, только внутри сети)
@@ -100,7 +99,7 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
 - **`px6-service/`** — микросервис списка прокси: обёртка над API px6.net с
   TTL-кэшем, фильтр `descr == "OPENROUTE"`.
 - **`postgres`** — PostgreSQL 17: хранилище шлюза (`request_log`, `proxies`,
-  `keys`, `session_affinity`, `proxy_personas`, `proxy_quota_events`). Том
+  `keys`, `session_affinity`, `proxy_personas`). Том
   `pgdata`; порт наружу не публикуется.
 - **`redis`** — Redis 7: сессии админки (том `redisdata`), порт наружу не публикуется.
 
@@ -275,29 +274,15 @@ OpenRoute/
 
 - В админке — вкладка **«Статистика»** (`/admin/ui/stats`): график расхода
   токенов по **UTC-дням**, переключатель периода **7 / 30 / 90 дней**, таблица
-  прокси (всего токенов, после лимита, запросов, лимитов, время последнего
-  лимита) и сводные карточки: токены за всё время, токены после последнего
-  лимита, запросы за всё время, «прокси с лимитом» (сколько прокси хотя бы
-  раз получали 429 / всего прокси). В графике можно выбрать один прокси;
+  прокси (всего токенов, запросов, ошибок) и сводные карточки: токены,
+  запросы и ошибки за всё время. В графике можно выбрать один прокси;
   без выбора показываются топ-8 по расходу и строка «Другие». Вкладка только
   читает данные.
-- На странице **«Прокси»** — пять карточек (запросы и токены за выбранный
-  период, токены за всё время, токены после последнего лимита, прокси в
-  ротации); в таблице добавлены столбцы «После лимита» и «Последний лимит».
-- **«После последнего лимита»** — токены запросов с `ts >= hit_at`
-  последнего зафиксированного `429 FreeUsageLimitError` этого прокси-URL. Если
-  прокси ни разу не упирался в лимит — `null` в API и «—» в интерфейсе.
-- История квот пишется **только с момента установки этой версии**: прошлые
-  записи `request_log` не пересчитываются, поэтому у прокси, который ещё не
-  получал `FreeUsageLimitError` в этой версии, значение «после лимита» пустое.
-  Повторные отметки одного окна квоты дедуплицируются
-  (`UNIQUE(proxy_key, kind, quota_until)`), abusive-баны (`403`) событий
-  квоты не создают, и рестарт/ретраи историю не раздувают.
-- **Хранилище**: таблица `proxy_quota_events(proxy_key, kind, hit_at,
-  quota_until)` — одна строка на наблюдённое окно квоты, `proxy_key` — тот же
-  masked `host:port`, что и `request_log.account`; индекс
-  `(proxy_key, hit_at DESC)`. Для дневных агрегатов добавлен индекс
-  `request_log(account, ts)`. DDL идемпотентен и применяется при старте
+- На странице **«Прокси»** — три карточки (запросы и токены за выбранный
+  период, прокси в ротации); в таблице есть столбец «Токены» за выбранный
+  период.
+- **Хранилище**: дневные агрегаты строятся по `request_log`; для них добавлен
+  индекс `request_log(account, ts)`. DDL идемпотентен и применяется при старте
   gateway; отдельная миграция не нужна, достаточно перезапуска.
 - **API шлюза**: `GET /internal/stats-data?days=30` (`X-Internal-Token`,
   `days` зажимается в `1..365`) отдаёт `days`, `server_time` (epoch), `dates`
@@ -309,9 +294,7 @@ OpenRoute/
   `Cache-Control: no-store`) отдаёт те же поля с нормализованным ISO-8601
   `server_time` (UTC).
 - **`GET /api/admin/proxies`** расширен аддитивно: на верхнем уровне появился
-  `totals` (`tokens_total`, `tokens_since_limit`, `limits_total`), в каждой
-  строке — `lifetime` (`tokens_total`, `tokens_since_limit`,
-  `last_limit_at`, `limits_total`). Прежние поля не изменились: `summary` и
+  `totals` (`tokens_total`). Прежние поля не изменились: `summary` и
   `usage` строки сохраняют контракт.
 - **Устойчивость**: при недоступном PostgreSQL эндпоинты статистики всё равно
   отвечают 200 — нулями и пустыми сериями. Опрос панели
@@ -365,7 +348,7 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 | GET | `/api/admin/session` | web-admin | Текущая сессия + CSRF-токен (200 и без входа) |
 | POST | `/api/admin/login` | web-admin | Вход по паролю; HttpOnly cookie сессии |
 | POST | `/api/admin/logout` | web-admin | Выход (CSRF; сессия удаляется в Redis) |
-| GET | `/api/admin/proxies?period=` | web-admin | JSON-снапшот пула: статусы, расходы, последние запросы, `totals`/`lifetime` |
+| GET | `/api/admin/proxies?period=` | web-admin | JSON-снапшот пула: статусы, расходы, последние запросы, `totals` |
 | GET | `/api/admin/stats?days=` | web-admin | Токены по прокси и UTC-дням за 1..365 дней (по умолчанию 30) |
 | GET | `/api/admin/keys?period=` | web-admin | JSON-снапшот ключей и статистики |
 | GET | `/api/admin/{proxies,keys}/events?period=` | web-admin | SSE с JSON-снапшотами (fallback — polling) |
@@ -448,9 +431,8 @@ uvicorn gateway.main:app --host 127.0.0.1 --port 8000   # шлюз: /v1/*, /admi
 запускается отдельно (`web-admin/`), а SPA — через `npm run dev` в
 `web-admin-ui/` (Vite проксирует `/api` на `127.0.0.1:8000`).
 
-Обновление с предыдущей версии — только перезапуск: новая таблица
-`proxy_quota_events` и индекс `request_log(account, ts)` создаются
-идемпотентно при старте gateway (схема журнала — при первом обращении к нему).
+Обновление с предыдущей версии — только перезапуск: индекс
+`request_log(account, ts)` создаётся идемпотентно при старте gateway.
 Отдельных шагов миграции и правок compose/`.env` не требуется.
 
 ---
@@ -464,7 +446,7 @@ uvicorn gateway.main:app --host 127.0.0.1 --port 8000   # шлюз: /v1/*, /admi
 | `web-admin-ui/` (React SPA: Vite, React Router, TanStack Query, SSE) | **реализовано** |
 | `px6-service/` | **реализовано** (px6.net → `descr=OPENROUTE`) |
 | edge / compose / Dockerfile / requirements / .env.example | **готово** |
-| `tests/` (`test_gateway`, `test_proxies`, `test_proxydb`, `test_affinity`, `test_affinitydb`, `test_persona`, `test_personadb`, `test_keys`, `test_reqlog`, `test_admin_api`, `test_opencode`) | **реализовано** |
+| `tests/` (`test_gateway`, `test_proxies`, `test_affinity`, `test_affinitydb`, `test_persona`, `test_personadb`, `test_keys`, `test_reqlog`, `test_admin_api`, `test_opencode`) | **реализовано** |
 
 ## Тесты
 
@@ -484,12 +466,10 @@ npm run typecheck
 ротация, retry/reconcile, fail-open, без БД); `tests/test_admin_api.py` —
 герметичные тесты JSON API админки (fake gateway + in-memory sessions, без
 Redis/PostgreSQL). Остальные наборы (`test_gateway`, `test_proxies`,
-`test_proxydb`, `test_affinitydb`, `test_personadb`, `test_keys`,
-`test_reqlog`) работают герметично: upstream и админка подменяются, а живой
-PostgreSQL для хранилищ шлюза (включая `session_affinity` и `proxy_personas`)
-поднимается из `docker-compose.test.yml` (`127.0.0.1:55433`), DSN
-переопределяется `OPENROUTE_TEST_DSN`. `test_personadb` проверяет
-generation-гард и загрузку после рестарта. `test_proxydb` покрывает историю
-`proxy_quota_events` (идемпотентность, MAX/COUNT по прокси, TTL и
-инвалидацию кэша, fail-soft при недоступной БД). Фронтенд-тесты
-(`web-admin-ui`) — Vitest + Testing Library, без сети и без backend.
+`test_affinitydb`, `test_personadb`, `test_keys`, `test_reqlog`) работают
+герметично: upstream и админка подменяются, а живой PostgreSQL для хранилищ
+шлюза (включая `session_affinity` и `proxy_personas`) поднимается из
+`docker-compose.test.yml` (`127.0.0.1:55433`), DSN переопределяется
+`OPENROUTE_TEST_DSN`. `test_personadb` проверяет generation-гард и загрузку
+после рестарта. Фронтенд-тесты (`web-admin-ui`) — Vitest + Testing Library,
+без сети и без backend.

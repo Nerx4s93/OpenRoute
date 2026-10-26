@@ -11,7 +11,7 @@ import type { KeysSnapshot, ProxiesSnapshot, StatsSnapshot } from "./api/types";
 const proxies: ProxiesSnapshot = {
   server_time: "2026-10-20T10:00:00+00:00",
   summary: { requests: 12, errors: 1, tokens: 340, proxies_ready: 1, proxies_total: 1 },
-  totals: { tokens_total: 3400, tokens_since_limit: 1200, limits_total: 1 },
+  totals: { tokens_total: 3400 },
   proxies: [
     {
       id: "proxy-1",
@@ -26,12 +26,6 @@ const proxies: ProxiesSnapshot = {
       rpm_capped: false,
       last_error: null,
       usage: { requests: 12, errors: 1, tokens: 340 },
-      lifetime: {
-        tokens_total: 3400,
-        tokens_since_limit: 1200,
-        last_limit_at: 1_760_000_000,
-        limits_total: 1,
-      },
     },
   ],
   recent: [],
@@ -51,37 +45,23 @@ const stats: StatsSnapshot = {
   ],
   totals: {
     tokens_total: 3500,
-    tokens_since_limit: 1200,
     requests_total: 36,
     errors_total: 2,
-    limits_total: 2,
   },
   proxies: [
     {
       proxy: "203.0.113.10:8080",
       in_pool: true,
-      enabled: true,
-      banned: false,
-      quota_seconds_left: 0,
       tokens_total: 3400,
-      tokens_since_limit: 1200,
       requests_total: 34,
       errors_total: 2,
-      last_limit_at: 1_760_000_000,
-      limits_total: 2,
     },
     {
       proxy: "203.0.113.7:8080",
       in_pool: false,
-      enabled: false,
-      banned: false,
-      quota_seconds_left: 0,
       tokens_total: 100,
-      tokens_since_limit: null,
       requests_total: 2,
       errors_total: 0,
-      last_limit_at: null,
-      limits_total: 0,
     },
   ],
   series_total: {
@@ -187,8 +167,8 @@ describe("App", () => {
     ).toBeInTheDocument();
     expect(await screen.findByText("203.0.113.10:8080")).toBeInTheDocument();
     expect(screen.getByText("Прокси в ротации")).toBeInTheDocument();
-    expect(screen.getByText("Токенов за всё время")).toBeInTheDocument();
-    expect(screen.getByText("После лимита")).toBeInTheDocument();
+    expect(screen.queryByText("Токенов за всё время")).not.toBeInTheDocument();
+    expect(screen.getAllByRole("columnheader", { name: "Токены" })).toHaveLength(2);
   });
 
   it("refreshes the proxy list on demand", async () => {
@@ -260,10 +240,10 @@ describe("App", () => {
       await screen.findByRole("heading", { name: "Статистика", level: 1 }),
     ).toBeInTheDocument();
     expect(await screen.findByRole("cell", { name: "203.0.113.10:8080" })).toBeInTheDocument();
-    expect(screen.getByText("Прокси с лимитом")).toBeInTheDocument();
-    expect(screen.getByText("1/2")).toBeInTheDocument();
+    expect(screen.getByText("Ошибок за всё время")).toBeInTheDocument();
     expect(screen.getByText("Вне пула")).toBeInTheDocument();
     expect(screen.getByRole("heading", { name: "Токены по дням" })).toBeInTheDocument();
+    expect(screen.getByRole("columnheader", { name: "Всего токенов" })).toBeInTheDocument();
   });
 
   it("navigates to stats from the sidebar", async () => {

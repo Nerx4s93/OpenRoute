@@ -151,15 +151,6 @@ def _as_float(value: object, default: float = 0.0) -> float:
         return default
 
 
-def _as_optional_float(value: object) -> float | None:
-    if value is None or value == "":
-        return None
-    try:
-        return float(value)  # type: ignore[arg-type]
-    except (TypeError, ValueError):
-        return None
-
-
 def _iso_from_epoch(value: object) -> str:
     """Render a gateway epoch timestamp as an ISO-8601 UTC clock label."""
     try:
@@ -169,36 +160,13 @@ def _iso_from_epoch(value: object) -> str:
     return moment.isoformat(timespec="seconds")
 
 
-def _lifetime_fields(lifetime: dict, limits: dict) -> dict:
-    """Lifetime counters for one proxy; absent counters stay ``None``/zero."""
-    return {
-        "tokens_total": _as_int(lifetime.get("tokens")),
-        "tokens_since_limit": _as_optional_int(lifetime.get("tokens_since_limit")),
-        "last_limit_at": _as_optional_float(limits.get("last_at")),
-        "limits_total": _as_int(limits.get("count")),
-    }
-
-
-def _lifetime_totals(lifetime_by_proxy: dict, limits_by_proxy: dict) -> dict:
-    """Aggregate lifetime counters over ALL entries, archived proxies included."""
+def _lifetime_totals(lifetime_by_proxy: dict) -> dict:
+    """Aggregate lifetime tokens over ALL entries, archived proxies included."""
     tokens_total = 0
-    tokens_since_limit = 0
-    limits_total = 0
     for lifetime in lifetime_by_proxy.values():
-        if not isinstance(lifetime, dict):
-            continue
-        tokens_total += _as_int(lifetime.get("tokens"))
-        since_limit = _as_optional_int(lifetime.get("tokens_since_limit"))
-        if since_limit is not None:
-            tokens_since_limit += since_limit
-    for limits in limits_by_proxy.values():
-        if isinstance(limits, dict):
-            limits_total += _as_int(limits.get("count"))
-    return {
-        "tokens_total": tokens_total,
-        "tokens_since_limit": tokens_since_limit,
-        "limits_total": limits_total,
-    }
+        if isinstance(lifetime, dict):
+            tokens_total += _as_int(lifetime.get("tokens"))
+    return {"tokens_total": tokens_total}
 
 
 def _series(raw: object, length: int) -> list[int]:
@@ -323,9 +291,6 @@ class GatewayClient:
         lifetime_by_proxy = data.get("usage_by_proxy_lifetime")
         if not isinstance(lifetime_by_proxy, dict):
             lifetime_by_proxy = {}
-        limits_by_proxy = data.get("proxy_limits")
-        if not isinstance(limits_by_proxy, dict):
-            limits_by_proxy = {}
 
         raw_rows = status.get("proxies")
         if not isinstance(raw_rows, list):
@@ -338,12 +303,6 @@ class GatewayClient:
                 continue
             display = _masked_display(raw.get("proxy") or raw.get("url"))
             per_proxy = usage_by_proxy.get(display) or {}
-            lifetime = lifetime_by_proxy.get(display)
-            if not isinstance(lifetime, dict):
-                lifetime = {}
-            limits = limits_by_proxy.get(display)
-            if not isinstance(limits, dict):
-                limits = {}
             real = str(raw.get("real_proxy") or raw.get("real_url") or "")
             row = {
                 "id": self.proxy_token(real) if real else None,
@@ -354,7 +313,6 @@ class GatewayClient:
                     "errors": _as_int(per_proxy.get("errors", raw.get("errors", 0))),
                     "tokens": _as_int(per_proxy.get("tokens", 0)),
                 },
-                "lifetime": _lifetime_fields(lifetime, limits),
             }
             rows.append(row)
 
@@ -367,13 +325,13 @@ class GatewayClient:
                 "proxies_ready": _as_int(status.get("proxies_ready")),
                 "proxies_total": _as_int(status.get("proxies_total"), len(rows)),
             },
-            "totals": _lifetime_totals(lifetime_by_proxy, limits_by_proxy),
+            "totals": _lifetime_totals(lifetime_by_proxy),
             "proxies": rows,
             "recent": _sanitize_recent(data.get("recent")),
         }
 
     async def stats_snapshot(self, days: int = 30) -> dict:
-        """Lifetime/since-limit statistics for the last ``days`` days.
+        """Token statistics for the last ``days`` days.
 
         The gateway sends an epoch ``server_time`` and parallel per-day arrays;
         the browser gets an ISO-8601 UTC clock label, masked proxy names and
@@ -402,15 +360,9 @@ class GatewayClient:
             proxies.append({
                 "proxy": _masked_display(raw.get("proxy") or raw.get("url")),
                 "in_pool": bool(raw.get("in_pool", False)),
-                "enabled": bool(raw.get("enabled", False)),
-                "banned": bool(raw.get("banned", False)),
-                "quota_seconds_left": _as_float(raw.get("quota_seconds_left")),
                 "tokens_total": _as_int(raw.get("tokens_total")),
-                "tokens_since_limit": _as_optional_int(raw.get("tokens_since_limit")),
                 "requests_total": _as_int(raw.get("requests_total")),
                 "errors_total": _as_int(raw.get("errors_total")),
-                "last_limit_at": _as_optional_float(raw.get("last_limit_at")),
-                "limits_total": _as_int(raw.get("limits_total")),
             })
         proxies.sort(key=lambda item: (-item["tokens_total"], item["proxy"]))
 
@@ -431,10 +383,8 @@ class GatewayClient:
             "dates": dates,
             "totals": {
                 "tokens_total": _as_int(raw_totals.get("tokens_total")),
-                "tokens_since_limit": _as_int(raw_totals.get("tokens_since_limit")),
                 "requests_total": _as_int(raw_totals.get("requests_total")),
                 "errors_total": _as_int(raw_totals.get("errors_total")),
-                "limits_total": _as_int(raw_totals.get("limits_total")),
             },
             "proxies": proxies,
             "series_total": _series_block(data.get("series_total"), length),

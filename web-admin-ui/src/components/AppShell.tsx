@@ -57,16 +57,16 @@ function ShellLayout({ children }: { children: ReactNode }) {
             Прокси
           </NavLink>
           <NavLink
-            to={`/admin/ui/keys${search}`}
-            className={(state) => `nav-keys ${navClass(state)}`}
-          >
-            Ключи
-          </NavLink>
-          <NavLink
             to={`/admin/ui/stats${search}`}
             className={(state) => `nav-stats ${navClass(state)}`}
           >
             Статистика
+          </NavLink>
+          <NavLink
+            to={`/admin/ui/keys${search}`}
+            className={(state) => `nav-keys ${navClass(state)}`}
+          >
+            Ключи
           </NavLink>
         </nav>
         <div className="sidebar-bottom">

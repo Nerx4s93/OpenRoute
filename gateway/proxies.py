@@ -710,29 +710,13 @@ class ProxyManager:
     def mark_quota_exhausted(self, group: EgressGroup, until: float) -> None:
         """Park this proxy's quota bucket (daily FreeUsageLimit) until an epoch.
 
-        Only forward movement: a shorter or equal value never shortens existing
-        parking and produces no duplicate quota event. ``mark_success``/health
-        probes never clear it (only expiry does). The value is persisted
-        immediately so a gateway restart keeps ``лимит`` in the admin panel, and
-        the event history records one row per quota window for the token
-        statistics. The history write is guarded: it must never break serving.
+        Only forward movement: a shorter value never shortens existing parking.
+        ``mark_success``/health probes never clear it (only expiry does). The
+        value is persisted immediately so a gateway restart keeps ``лимит`` in
+        the admin panel.
         """
-        until = float(until)
-        if until <= group.quota_until:
-            return
-        group.quota_until = until
+        group.quota_until = max(group.quota_until, float(until))
         self._persist_parking(group)
-        db = self.db
-        record = getattr(db, "record_quota_event", None) if db is not None else None
-        if record is not None:
-            try:
-                # request_log.account uses the masked host:port form; the event
-                # history must use the SAME key so statistics line up.
-                proxy_key = mask_proxy(group.proxies[0].url) if group.proxies else group.host
-                record(proxy_key, time.time(), until)
-            except Exception as exc:
-                logger.warning("ProxyDB quota event write failed for %s: %s",
-                               group.host, exc)
 
     def mark_banned(self, group: EgressGroup, until: float) -> None:
         """Ban this proxy's quota bucket temporarily until a wall-clock epoch."""

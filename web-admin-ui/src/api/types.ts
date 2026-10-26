@@ -31,17 +31,8 @@ export interface Usage {
   tokens: number;
 }
 
-export interface ProxyLifetime {
-  tokens_total: number;
-  tokens_since_limit: number | null;
-  last_limit_at: number | null;
-  limits_total: number;
-}
-
 export interface ProxiesTotals {
   tokens_total: number;
-  tokens_since_limit: number;
-  limits_total: number;
 }
 
 export interface ProxyRow {
@@ -57,8 +48,6 @@ export interface ProxyRow {
   rpm_capped: boolean;
   last_error: string | null;
   usage: Usage;
-  // Optional because old SSE frames and cached snapshots may not carry it yet.
-  lifetime?: ProxyLifetime;
 }
 
 export interface RecentRequest {
@@ -143,24 +132,16 @@ export type StatsRange = 7 | 30 | 90;
 
 export interface StatsTotals {
   tokens_total: number;
-  tokens_since_limit: number;
   requests_total: number;
   errors_total: number;
-  limits_total: number;
 }
 
 export interface StatsProxyRow {
   proxy: string;
   in_pool: boolean;
-  enabled: boolean;
-  banned: boolean;
-  quota_seconds_left: number;
   tokens_total: number;
-  tokens_since_limit: number | null;
   requests_total: number;
   errors_total: number;
-  last_limit_at: number | null;
-  limits_total: number;
 }
 
 export interface StatsSeries {

@@ -1628,8 +1628,7 @@ def test_internal_stats_data_auth_and_days_clamp(make_gateway):
     assert len(one["series_total"]["tokens"]) == 1
     assert one["dates"][-1] == _today_utc().strftime("%Y-%m-%d")
     assert one["totals"] == {
-        "tokens_total": 0, "tokens_since_limit": 0, "requests_total": 0,
-        "errors_total": 0, "limits_total": 0,
+        "tokens_total": 0, "requests_total": 0, "errors_total": 0,
     }
 
     big = gw.internal.get("/internal/stats-data?days=9999", headers=h).json()
@@ -1643,21 +1642,19 @@ def test_internal_stats_data_auth_and_days_clamp(make_gateway):
     assert all(row["in_pool"] and row["tokens_total"] == 0 for row in big["proxies"])
 
 
-def test_internal_stats_data_totals_split_and_archived(make_gateway):
-    """Per-proxy all-time vs since-last-limit tokens, archived accounts marked
-    out of the pool, and zero-filled day series aligned to ``dates``."""
+def test_internal_stats_data_totals_and_archived(make_gateway):
+    """Per-proxy all-time tokens, archived accounts marked out of the pool,
+    and zero-filled day series aligned to ``dates``."""
     gw = make_gateway()
     today = _today_utc()
 
     def at(days_ago: int) -> float:
         return (today - timedelta(days=days_ago)).timestamp() + 12 * 3600
 
-    hit_at = at(3)
     prox = "proxy-a.invalid:8080"
     archived = "9.9.9.9:9000"
 
     async def seed():
-        main.proxydb.record_quota_event(prox, hit_at, hit_at + 86400)
         rows = [
             LogEntry(ts=at(4), key_id="k1", method="POST",
                      path="chat/completions", model=FREE_MODEL, status=200,
@@ -1684,10 +1681,8 @@ def test_internal_stats_data_totals_split_and_archived(make_gateway):
     assert data["dates"][-1] == today.strftime("%Y-%m-%d")
     assert data["totals"] == {
         "tokens_total": 115,
-        "tokens_since_limit": 10,  # only accounts with a quota event
         "requests_total": 3,
         "errors_total": 1,
-        "limits_total": 1,
     }
 
     by_name = {row["proxy"]: row for row in data["proxies"]}
@@ -1697,22 +1692,17 @@ def test_internal_stats_data_totals_split_and_archived(make_gateway):
         prox, archived, "proxy-b.invalid:8080"]
 
     a = by_name[prox]
-    assert a["in_pool"] is True and a["enabled"] is True and a["banned"] is False
+    assert a["in_pool"] is True
     assert a["tokens_total"] == 110
-    assert a["tokens_since_limit"] == 10  # the 4-days-ago row is before the event
     assert a["requests_total"] == 2 and a["errors_total"] == 0
-    assert a["last_limit_at"] == hit_at and a["limits_total"] == 1
 
     old = by_name[archived]
-    assert old["in_pool"] is False and old["enabled"] is False
-    assert old["banned"] is False and old["quota_seconds_left"] == 0.0
-    assert old["tokens_total"] == 5 and old["tokens_since_limit"] is None
+    assert old["in_pool"] is False
+    assert old["tokens_total"] == 5
     assert old["requests_total"] == 1 and old["errors_total"] == 1
-    assert old["last_limit_at"] is None and old["limits_total"] == 0
 
     idle = by_name["proxy-b.invalid:8080"]
     assert idle["in_pool"] is True and idle["tokens_total"] == 0
-    assert idle["tokens_since_limit"] is None
 
     assert set(data["series_by_proxy"]) == set(by_name)
     for series in data["series_by_proxy"].values():
@@ -1745,45 +1735,23 @@ def test_internal_stats_data_fail_soft(make_gateway, monkeypatch):
         "tokens": [0, 0, 0], "requests": [0, 0, 0], "errors": [0, 0, 0]}
 
 
-def test_internal_proxies_data_adds_lifetime_stats_and_limits(make_gateway):
-    """The SSE snapshot keeps the old keys and adds lifetime counters plus the
-    quota-event history; a pool proxy with no requests gets a zero record
-    (``tokens_since_limit`` None without a limit, 0 with one)."""
+def test_internal_proxies_data_adds_lifetime_stats(make_gateway):
+    """The SSE snapshot keeps the old keys and adds lifetime counters; a pool
+    proxy with no requests gets a zero record."""
     gw = make_gateway()
     h = {"X-Internal-Token": "test-internal-token"}
 
     first = gw.internal.get("/internal/proxies-data", headers=h).json()
     assert set(first) >= {"status", "usage", "usage_by_proxy", "recent",
-                          "usage_by_proxy_lifetime", "proxy_limits"}
+                          "usage_by_proxy_lifetime"}
     assert first["usage"]["total"]["requests"] == 0
     assert first["usage_by_proxy"] == {}
     assert first["recent"] == []
-    assert first["proxy_limits"] == {}
     assert len(first["status"]["proxies"]) == 2
     for row in first["status"]["proxies"]:
         assert first["usage_by_proxy_lifetime"][row["proxy"]] == {
-            "requests": 0, "errors": 0, "tokens": 0, "tokens_since_limit": None,
+            "requests": 0, "errors": 0, "tokens": 0,
         }
-
-    prox = "proxy-a.invalid:8080"
-
-    async def seed():
-        now = time.time()
-        main.proxydb.record_quota_event(prox, now - 60, now + 3600)
-
-    gw._gw_lifespan_client.portal.call(seed)
-
-    second = gw.internal.get("/internal/proxies-data", headers=h).json()
-    limits = second["proxy_limits"]
-    assert set(limits) == {prox}
-    assert limits[prox]["count"] == 1
-    records = second["usage_by_proxy_lifetime"]
-    assert records[prox] == {
-        "requests": 0, "errors": 0, "tokens": 0, "tokens_since_limit": 0,
-    }
-    other = next(row["proxy"] for row in second["status"]["proxies"]
-                 if row["proxy"] != prox)
-    assert records[other]["tokens_since_limit"] is None
 
 
 def test_internal_proxies_data_lifetime_tokens(make_gateway):
@@ -1801,11 +1769,9 @@ def test_internal_proxies_data_lifetime_tokens(make_gateway):
     data = gw.internal.get("/internal/proxies-data",
                            headers={"X-Internal-Token": "test-internal-token"}).json()
     rec = data["usage_by_proxy_lifetime"]["proxy-a.invalid:8080"]
-    assert rec == {"requests": 1, "errors": 0, "tokens": 10,
-                   "tokens_since_limit": None}
+    assert rec == {"requests": 1, "errors": 0, "tokens": 10}
     other = data["usage_by_proxy_lifetime"]["proxy-b.invalid:8080"]
-    assert other == {"requests": 0, "errors": 0, "tokens": 0,
-                     "tokens_since_limit": None}
+    assert other == {"requests": 0, "errors": 0, "tokens": 0}
 
 
 # --- non-chat passthrough ---

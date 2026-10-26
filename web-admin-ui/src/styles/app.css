@@ -135,7 +135,6 @@ h1 { margin: 7px 0 5px; font-size: clamp(27px, 3vw, 38px); line-height: 1.16;
   font-size: 12px; }
 .chart-axis { fill: #7d8e9c; font-size: 10px; font-variant-numeric: tabular-nums; }
 .chart-grid-line { stroke: #22303d; stroke-width: 1; }
-.chart-hint { margin: 12px 0 0; color: #6e818e; font-size: 11px; }
 .chart-bar { transition: opacity .2s; }
 .chart-bar:hover { opacity: .82; }
 .chart-c0 { fill: #91e8ce; background: #91e8ce; }

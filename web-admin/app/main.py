@@ -344,7 +344,7 @@ async def api_proxy_events(request: Request, period: str = "all",
 
 @app.get(f"{_PANEL_API}/stats")
 async def api_stats(days: int = 30, session: dict = Depends(require_panel)) -> dict:
-    """Lifetime / since-limit statistics for the last ``days`` days."""
+    """Token statistics for the last ``days`` days."""
     return await gateway.stats_snapshot(_normalize_days(days))
 
 
