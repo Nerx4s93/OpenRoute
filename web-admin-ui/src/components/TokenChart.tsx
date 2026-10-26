@@ -1,3 +1,4 @@
+import { useState } from "react";
 import { formatCompact, formatNumber } from "../lib/format";
 
 export interface TokenChartSeries {
@@ -18,6 +19,9 @@ const PLOT_BOTTOM = PAD_TOP + PLOT_HEIGHT;
 const GRID_STEPS = 4;
 const MAX_X_LABELS = 8;
 const PALETTE_SIZE = 9;
+const TOOLTIP_WIDTH = 250;
+const TOOLTIP_HEIGHT = 62;
+const TOOLTIP_GAP = 10;
 
 function positive(value: number | undefined): number {
   return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
@@ -38,6 +42,20 @@ function shortDate(value: string): string {
   return month && day ? `${day}.${month}` : value;
 }
 
+const fullDateFormatter = new Intl.DateTimeFormat("ru-RU", {
+  weekday: "short",
+  day: "numeric",
+  month: "long",
+  year: "numeric",
+  timeZone: "UTC",
+});
+
+function fullDate(value: string): string {
+  const [year, month, day] = value.split("-").map(Number);
+  if (!year || !month || !day) return value;
+  return fullDateFormatter.format(new Date(Date.UTC(year, month - 1, day)));
+}
+
 function labelIndices(count: number, limit: number): number[] {
   if (count <= limit) return Array.from({ length: count }, (_, index) => index);
   const step = (count - 1) / (limit - 1);
@@ -55,6 +73,7 @@ export function TokenChart({
   dates: string[];
   series: TokenChartSeries[];
 }) {
+  const [activeDay, setActiveDay] = useState<number | null>(null);
   const totals = dates.map((_, index) =>
     series.reduce((sum, item) => sum + positive(item.values?.[index]), 0),
   );
@@ -68,6 +87,25 @@ export function TokenChart({
   const slotWidth = PLOT_WIDTH / dates.length;
   const barWidth = Math.max(2, Math.min(slotWidth * 0.68, 48));
   const xLabelIndices = labelIndices(dates.length, MAX_X_LABELS);
+
+  const activeIndex =
+    activeDay !== null && activeDay < dates.length ? activeDay : null;
+  const activeSlotX = activeIndex === null ? 0 : PAD_LEFT + activeIndex * slotWidth;
+  const activeSlotCenter = activeSlotX + slotWidth / 2;
+  const activeTotal = activeIndex === null ? 0 : totals[activeIndex];
+  const activeBarTop =
+    PLOT_BOTTOM - (activeTotal / axisMax) * PLOT_HEIGHT;
+  const tooltipX = Math.min(
+    Math.max(PAD_LEFT, activeSlotCenter - TOOLTIP_WIDTH / 2),
+    VIEW_WIDTH - PAD_RIGHT - TOOLTIP_WIDTH,
+  );
+  const tooltipY = Math.max(
+    PAD_TOP,
+    Math.min(
+      PLOT_BOTTOM - TOOLTIP_HEIGHT,
+      activeBarTop - TOOLTIP_HEIGHT - TOOLTIP_GAP,
+    ),
+  );
 
   const gridLines = Array.from({ length: GRID_STEPS + 1 }, (_, tick) => {
     const value = (axisMax / GRID_STEPS) * tick;
@@ -106,12 +144,26 @@ export function TokenChart({
           width={barWidth}
           height={height}
           rx={1}
-        >
-          <title>{`${date} · ${item.label}: ${formatNumber(value)} токенов`}</title>
-        </rect>
+        />
       );
     });
-    return <g key={date}>{segments}</g>;
+    return (
+      <g
+        key={date}
+        onMouseEnter={() => setActiveDay(dayIndex)}
+        onMouseLeave={() => setActiveDay(null)}
+      >
+        <rect
+          className="chart-hover-zone"
+          x={PAD_LEFT + dayIndex * slotWidth}
+          y={PAD_TOP}
+          width={slotWidth}
+          height={PLOT_HEIGHT}
+          aria-hidden="true"
+        />
+        {segments}
+      </g>
+    );
   });
 
   const xLabels = xLabelIndices.map((index) => {
@@ -153,8 +205,61 @@ export function TokenChart({
         aria-label="Токены по дням (UTC)"
       >
         {gridLines}
+        {activeIndex !== null ? (
+          <g className="chart-hover-guide" pointerEvents="none">
+            <rect
+              className="chart-hover-highlight"
+              x={activeSlotX + 1}
+              y={PAD_TOP}
+              width={Math.max(0, slotWidth - 2)}
+              height={PLOT_HEIGHT}
+              rx={5}
+            />
+            <line
+              className="chart-hover-line"
+              x1={activeSlotCenter}
+              x2={activeSlotCenter}
+              y1={PAD_TOP}
+              y2={PLOT_BOTTOM}
+            />
+          </g>
+        ) : null}
         {bars}
         {xLabels}
+        {activeIndex !== null ? (
+          <g className="chart-tooltip" pointerEvents="none">
+            <rect
+              className="chart-tooltip-bg"
+              x={tooltipX}
+              y={tooltipY}
+              width={TOOLTIP_WIDTH}
+              height={TOOLTIP_HEIGHT}
+              rx={9}
+            />
+            <rect
+              className="chart-tooltip-accent"
+              x={tooltipX}
+              y={tooltipY + 9}
+              width={3}
+              height={TOOLTIP_HEIGHT - 18}
+              rx={2}
+            />
+            <text
+              className="chart-tooltip-date"
+              x={tooltipX + 14}
+              y={tooltipY + 23}
+            >
+              {fullDate(dates[activeIndex])}
+            </text>
+            <text
+              className="chart-tooltip-value"
+              x={tooltipX + 14}
+              y={tooltipY + 45}
+            >
+              Расход: {formatNumber(activeTotal)} токенов
+            </text>
+          </g>
+        ) : null}
       </svg>
     </div>
   );
