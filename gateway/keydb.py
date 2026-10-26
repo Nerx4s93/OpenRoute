@@ -18,8 +18,8 @@ from .pg import ensure_schema, make_pool
 
 
 class KeyDB:
-    """``keys(id, key_hash UNIQUE, key_id, name, rpm, tpm, models,
-    enabled, added_at)``.
+    """``keys(id, key_hash UNIQUE, key_id, rpm, tpm, models, enabled,
+    added_at)``.
 
     ``rpm``/``tpm`` NULL = unlimited; ``models`` JSONB array (NULL = all);
     ``enabled = FALSE`` = revoked (401) and survives a restart. ``id`` is
@@ -51,18 +51,17 @@ class KeyDB:
         self._ensure()
         with self._pool.connection() as conn:
             rows = conn.execute(
-                "SELECT key_hash, key_id, name, rpm, tpm, models, enabled"
+                "SELECT key_hash, key_id, rpm, tpm, models, enabled"
                 " FROM keys ORDER BY id"
             ).fetchall()
         out = []
-        for h, kid, name, rpm, tpm, models, enabled in rows:
+        for h, kid, rpm, tpm, models, enabled in rows:
             # psycopg reads jsonb into a Python object; validate: array or None
             if not isinstance(models, list):
                 models = None
             out.append({
                 "key_hash": h,
                 "key_id": kid,
-                "name": name,
                 "rpm": rpm,
                 "tpm": tpm,
                 "models": models,
@@ -70,17 +69,17 @@ class KeyDB:
             })
         return out
 
-    def add(self, key_hash: str, key_id: str, name: str, *,
+    def add(self, key_hash: str, key_id: str, *,
             rpm: int | None = None, tpm: int | None = None,
             models: list[str] | None = None) -> bool:
         """True = inserted, False = duplicate hash (``ON CONFLICT DO NOTHING``)."""
         self._ensure()
         with self._pool.connection() as conn:
             cur = conn.execute(
-                "INSERT INTO keys (key_hash, key_id, name, rpm, tpm, models,"
-                " enabled, added_at) VALUES (%s, %s, %s, %s, %s, %s, TRUE, %s)"
+                "INSERT INTO keys (key_hash, key_id, rpm, tpm, models,"
+                " enabled, added_at) VALUES (%s, %s, %s, %s, %s, TRUE, %s)"
                 " ON CONFLICT (key_hash) DO NOTHING",
-                (key_hash, key_id, name, rpm, tpm,
+                (key_hash, key_id, rpm, tpm,
                  Jsonb(models) if models is not None else None, time.time()),
             )
             return cur.rowcount > 0

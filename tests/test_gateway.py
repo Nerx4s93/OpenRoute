@@ -1703,7 +1703,7 @@ def test_internal_keys_add_set_delete_and_persist(make_gateway):
 
     data = gw.internal.get("/internal/keys-data", headers=h).json()
     row = next(k for k in data["keys"] if k["key_id"] == "n1")
-    assert "admin" not in row and row["rpm"] == 5
+    assert "admin" not in row and "name" not in row and row["rpm"] == 5
 
     r2 = gw.internal.post("/internal/keys/set",
                           json={"key_hash": row["key_hash"], "enabled": False}, headers=h)

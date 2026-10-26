@@ -100,7 +100,6 @@ export interface ProxiesSnapshot {
 export interface KeyRow {
   key_hash: string;
   key_id: string;
-  name: string;
   rpm: number | null;
   tpm: number | null;
   models: string[] | null;
@@ -180,7 +179,6 @@ export interface ProxyBuyResult extends ApiMessage {
 export interface KeyAddPayload {
   key: string;
   key_id?: string;
-  name?: string;
   rpm?: number | null;
   tpm?: number | null;
   models?: string[] | null;

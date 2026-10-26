@@ -539,7 +539,6 @@ class GatewayClient:
             row = {
                 "key_hash": str(raw.get("key_hash", "")),
                 "key_id": key_id,
-                "name": str(raw.get("name", "")),
                 "rpm": _as_optional_int(raw.get("rpm")),
                 "tpm": _as_optional_int(raw.get("tpm")),
                 "models": models,
@@ -600,7 +599,6 @@ class GatewayClient:
         return {
             "key": body.key,
             "key_id": body.key_id.strip(),
-            "name": body.name.strip(),
             "rpm": body.rpm,
             "tpm": body.tpm,
             "models": models,

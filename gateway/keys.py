@@ -56,7 +56,6 @@ class RateLimitError(Exception):
 @dataclass
 class KeyInfo:
     key_id: str
-    name: str
     rpm: int | None  # requests/min, None = unlimited
     tpm: int | None  # tokens/min, None = unlimited
     models: list[str] | None  # allow-list, None = all
@@ -85,7 +84,6 @@ class KeyStore:
         for r in rows:
             info = KeyInfo(
                 key_id=r["key_id"],
-                name=r["name"] or r["key_id"],
                 rpm=r["rpm"],
                 tpm=r["tpm"],
                 models=list(r["models"]) if r["models"] else None,

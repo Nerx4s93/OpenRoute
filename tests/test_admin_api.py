@@ -349,7 +349,6 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
             return {"ok": False, "message": "Such a key already exists"}
         state.keys[kh] = {
             "key_hash": kh, "key_id": key_id,
-            "name": str(data.get("name", "")).strip(),
             "rpm": rpm, "tpm": tpm, "models": models, "enabled": True,
         }
         return {"ok": True, "message": f"Key {key_id} added"}
@@ -441,7 +440,7 @@ class Panel:
         # seed a default client key (like a fresh deployment)
         kh = hash_key(DEFAULT_KEY)
         self.state.keys[kh] = {
-            "key_hash": kh, "key_id": "default", "name": "",
+            "key_hash": kh, "key_id": "default",
             "rpm": None, "tpm": None, "models": None, "enabled": True,
         }
         self.client = TestClient(admin_main.app)
@@ -992,7 +991,8 @@ def test_add_toggle_delete_key(panel):
     assert response.status_code == 200
     assert response.json()["message"] == "Ключ k1 добавлен"
     k1 = next(v for v in panel.state.keys.values() if v["key_id"] == "k1")
-    assert "admin" not in k1 and k1["rpm"] == 30 and k1["tpm"] == 500
+    assert "admin" not in k1 and "name" not in k1
+    assert k1["rpm"] == 30 and k1["tpm"] == 500
     assert k1["models"] == ["deepseek-v4.1-flash-free", "gpt-oss"]
 
     # duplicate plaintext rejected

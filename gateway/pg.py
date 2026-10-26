@@ -92,7 +92,6 @@ SCHEMA: tuple[str, ...] = (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         key_hash TEXT NOT NULL UNIQUE,
         key_id TEXT NOT NULL,
-        name TEXT NOT NULL DEFAULT '',
         rpm INTEGER,
         tpm INTEGER,
         models JSONB,
@@ -103,6 +102,8 @@ SCHEMA: tuple[str, ...] = (
     # Client keys are ordinary API credentials with no roles. Drop the legacy
     # admin flag from existing installations so a key can only call /v1/*.
     "ALTER TABLE keys DROP COLUMN IF EXISTS admin",
+    # key_id is the only key identifier; the separate display name was removed.
+    "ALTER TABLE keys DROP COLUMN IF EXISTS name",
     # One synthetic "persona" (session/project/trace ids) per proxy quota
     # bucket. It survives a restart; ``generation`` orders rotations so a
     # stale fire-and-forget write can never overwrite a newer persona.

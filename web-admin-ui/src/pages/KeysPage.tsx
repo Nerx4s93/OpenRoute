@@ -14,7 +14,6 @@ import { keyStateLabel } from "../lib/proxyState";
 interface KeyForm {
   key: string;
   key_id: string;
-  name: string;
   rpm: string;
   tpm: string;
   models: string;
@@ -23,7 +22,6 @@ interface KeyForm {
 const EMPTY_FORM: KeyForm = {
   key: "",
   key_id: "",
-  name: "",
   rpm: "",
   tpm: "",
   models: "",
@@ -83,7 +81,6 @@ export function KeysPage() {
       {
         key,
         key_id: form.key_id.trim(),
-        name: form.name.trim(),
         rpm: rpm.value,
         tpm: tpm.value,
         models: form.models
@@ -132,18 +129,6 @@ export function KeysPage() {
                 autoComplete="off"
                 value={form.key_id}
                 onChange={(event) => update("key_id", event.target.value)}
-              />
-            </div>
-            <div className="field">
-              <label htmlFor="key_name">Имя</label>
-              <input
-                id="key_name"
-                name="name"
-                type="text"
-                placeholder="Например, Frontend"
-                autoComplete="off"
-                value={form.name}
-                onChange={(event) => update("name", event.target.value)}
               />
             </div>
             <div className="field">
@@ -207,7 +192,6 @@ export function KeysPage() {
             <thead>
               <tr>
                 <th>Key ID</th>
-                <th>Имя</th>
                 <th>RPM</th>
                 <th>TPM</th>
                 <th>Модели</th>
@@ -217,7 +201,7 @@ export function KeysPage() {
             </thead>
             <tbody>
               {query.isLoading ? (
-                <LoadingRows colSpan={7} />
+                <LoadingRows colSpan={6} />
               ) : snapshot && snapshot.keys.length ? (
                 snapshot.keys.map((key) => {
                   const state = keyStateLabel(key.enabled ? "active" : "revoked");
@@ -226,7 +210,6 @@ export function KeysPage() {
                   return (
                     <tr key={key.key_hash} className={key.enabled ? undefined : "dead"}>
                       <td className="mono">{key.key_id}</td>
-                      <td>{key.name}</td>
                       <td>{formatLimit(key.rpm)}</td>
                       <td>{formatLimit(key.tpm)}</td>
                       <td className="mono">{formatModels(key.models)}</td>
@@ -253,7 +236,7 @@ export function KeysPage() {
                   );
                 })
               ) : (
-                <EmptyRow colSpan={7}>Ключей нет — добавьте выше</EmptyRow>
+                <EmptyRow colSpan={6}>Ключей нет — добавьте выше</EmptyRow>
               )}
             </tbody>
           </table>

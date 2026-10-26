@@ -13,7 +13,6 @@ def row(e):
     return {
         "key_hash": hash_key(e["key"]),
         "key_id": e.get("key_id", "k1"),
-        "name": e.get("name") or e.get("key_id", "k1"),
         "rpm": e.get("rpm"),
         "tpm": e.get("tpm"),
         "models": e.get("models"),
@@ -32,12 +31,12 @@ def make_store(entries):
 
 def test_authenticate_ok_and_limits():
     ks = make_store([
-        {"key": "sk-abc", "key_id": "k1", "name": "Front",
+        {"key": "sk-abc", "key_id": "k1",
          "rpm": 10, "tpm": 1000, "models": ["m1"]},
         {"key": "sk-xyz", "key_id": "k2"},
     ])
     info = ks.authenticate("Bearer sk-abc")
-    assert info.key_id == "k1" and info.name == "Front"
+    assert info.key_id == "k1"
     assert info.rpm == 10 and info.tpm == 1000 and info.models == ["m1"]
     assert info.enabled is True
 
@@ -236,10 +235,10 @@ def test_upsert_remove_set_enabled_without_window_reset():
     ks.count_tokens(a, 70)
 
     h = hash_key("sk-new")
-    assert ks.upsert(h, KeyInfo(key_id="n1", name="n1",
+    assert ks.upsert(h, KeyInfo(key_id="n1",
                                 rpm=None, tpm=None, models=None, enabled=True)) is True
     assert ks.authenticate("Bearer sk-new").key_id == "n1"
-    assert ks.upsert(h, KeyInfo(key_id="n1", name="n1",
+    assert ks.upsert(h, KeyInfo(key_id="n1",
                                 rpm=None, tpm=None, models=None, enabled=True)) is False
     assert ks.authenticate("Bearer sk-new").key_id == "n1"
 
@@ -275,9 +274,9 @@ def test_set_enabled_revokes_and_restores():
 def test_keydb_crud(pg_dsn):
     db = KeyDB(pg_dsn)
     h1 = hash_key("sk-one")
-    assert db.add(h1, "k1", "Front", rpm=60, tpm=1000, models=["m1", "m2"]) is True
-    assert db.add(h1, "k1-dup", "Dup") is False
-    assert db.add(hash_key("sk-two"), "k2", "") is True
+    assert db.add(h1, "k1", rpm=60, tpm=1000, models=["m1", "m2"]) is True
+    assert db.add(h1, "k1-dup") is False
+    assert db.add(hash_key("sk-two"), "k2") is True
 
     rows = db.all()
     assert [r["key_id"] for r in rows] == ["k1", "k2"]
@@ -298,8 +297,8 @@ def test_keydb_crud(pg_dsn):
 
 def test_keydb_persists_across_instances(pg_dsn):
     db1 = KeyDB(pg_dsn)
-    db1.add(hash_key("sk-a"), "a1", "Alpha")
-    db1.add(hash_key("sk-b"), "b1", "Beta")
+    db1.add(hash_key("sk-a"), "a1")
+    db1.add(hash_key("sk-b"), "b1")
     db1.set_enabled(hash_key("sk-b"), False)
     db1.close()
 
@@ -310,8 +309,8 @@ def test_keydb_persists_across_instances(pg_dsn):
     db2.close()
 
 
-def test_keydb_drops_legacy_admin_column(pg_dsn):
-    """Existing installations lose the key-level administrator role in place."""
+def test_keydb_drops_legacy_columns(pg_dsn):
+    """Existing installations lose the admin flag and redundant display name."""
     import psycopg
 
     with psycopg.connect(pg_dsn) as conn:
@@ -340,7 +339,7 @@ def test_keydb_drops_legacy_admin_column(pg_dsn):
     db = KeyDB(pg_dsn)
     rows = db.all()
     assert len(rows) == 1 and rows[0]["key_id"] == "legacy"
-    assert "admin" not in rows[0]
+    assert "admin" not in rows[0] and "name" not in rows[0]
     with psycopg.connect(pg_dsn) as conn:
         columns = {
             row[0]
@@ -349,7 +348,7 @@ def test_keydb_drops_legacy_admin_column(pg_dsn):
                 " WHERE table_name = 'keys'"
             ).fetchall()
         }
-    assert "admin" not in columns
+    assert "admin" not in columns and "name" not in columns
     db.close()
 
 
@@ -358,11 +357,11 @@ def test_keydb_stores_hash_not_plaintext(pg_dsn):
 
     secret = "sk-very-secret-plaintext"
     db = KeyDB(pg_dsn)
-    db.add(hash_key(secret), "k1", "n")
+    db.add(hash_key(secret), "k1")
     db.close()
 
     with psycopg.connect(pg_dsn) as conn:
-        rows = conn.execute("SELECT key_hash, key_id, name FROM keys").fetchall()
+        rows = conn.execute("SELECT key_hash, key_id FROM keys").fetchall()
     blob = "\n".join(" ".join(str(v) for v in r) for r in rows)
     assert secret not in blob
     assert hash_key(secret) in blob

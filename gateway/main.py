@@ -1439,7 +1439,7 @@ async def internal_px6_buy(request: Request) -> dict:
 
 
 async def internal_keys_add(request: Request) -> dict:
-    """``{"key": plaintext, "key_id"?, "name"?, "rpm"?, "tpm"?, "models"?}``.
+    """``{"key": plaintext, "key_id"?, "rpm"?, "tpm"?, "models"?}``.
     Plaintext is hashed immediately (keys.py) and never stored."""
     _require_internal(request)
     data = await _read_json(request)
@@ -1461,7 +1461,6 @@ async def internal_keys_add(request: Request) -> dict:
         models = [m.strip() for m in raw_models.split(",") if m.strip()] or None
     else:
         models = None
-    name = str(data.get("name", "")).strip()
     key_id = str(data.get("key_id", "")).strip()
     if not key_id:
         # auto-generate without colliding with existing key_ids
@@ -1472,10 +1471,10 @@ async def internal_keys_add(request: Request) -> dict:
         key_id = f"k{i}"
     h = hash_key(plaintext)
     db = _require_keydb()
-    if await asyncio.to_thread(db.add, h, key_id, name or key_id,
+    if await asyncio.to_thread(db.add, h, key_id,
                                rpm=rpm, tpm=tpm, models=models):
         keystore.upsert(h, KeyInfo(
-            key_id=key_id, name=name or key_id,
+            key_id=key_id,
             rpm=rpm, tpm=tpm, models=models, enabled=True,
         ))
         return {"ok": True, "message": f"Key {key_id} added"}

@@ -89,7 +89,6 @@ const keys: KeysSnapshot = {
     {
       key_hash: "hash-1",
       key_id: "default",
-      name: "Default",
       rpm: null,
       tpm: null,
       models: null,
@@ -443,8 +442,12 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { name: "Клиентские ключи", level: 1 }),
     ).toBeInTheDocument();
-    expect(await screen.findByText("Default")).toBeInTheDocument();
+    expect((await screen.findAllByText("default")).length).toBeGreaterThan(0);
     expect(screen.getByLabelText("Ключ доступа")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "Имя" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Имя")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("columnheader", { name: "Admin" }),
     ).not.toBeInTheDocument();

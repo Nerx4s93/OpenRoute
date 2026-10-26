@@ -90,7 +90,6 @@ class KeyAddBody(BaseModel):
 
     key: str
     key_id: str = ""
-    name: str = ""
     rpm: int | None = None
     tpm: int | None = None
     # The UI sends a list; a comma-separated string is accepted for curl/tests.

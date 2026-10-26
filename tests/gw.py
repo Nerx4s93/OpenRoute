@@ -180,7 +180,7 @@ class Gateway:
         kdb = KeyDB(self.settings.postgres_dsn)
         for e in entries:
             assert kdb.add(
-                hash_key(e["key"]), e.get("key_id") or "", e.get("name") or "",
+                hash_key(e["key"]), e.get("key_id") or "",
                 rpm=e.get("rpm"), tpm=e.get("tpm"), models=e.get("models"),
             ), f"key {e.get('key_id')!r} was not written to keys"
         key_rows = kdb.all()
