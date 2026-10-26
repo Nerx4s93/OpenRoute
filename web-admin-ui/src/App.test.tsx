@@ -124,6 +124,7 @@ function renderApp(path: string) {
 }
 
 beforeEach(() => {
+  window.localStorage.clear();
   vi.stubGlobal("EventSource", undefined);
 });
 
@@ -224,6 +225,45 @@ describe("App", () => {
 
     await user.click(screen.getByRole("button", { name: "7д" }));
 
+    await waitFor(() => {
+      expect(
+        fetchMock.mock.calls.some(([url]) =>
+          String(url).includes("/api/admin/stats?period=7d"),
+        ),
+      ).toBe(true);
+    });
+  });
+
+  it("restores the last selected statistics period after reopening", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/admin/session")) {
+        return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
+      }
+      if (url.includes("/api/admin/proxies")) return json(proxies);
+      if (url.includes("/api/admin/stats")) return json(stats);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    const first = renderApp("/admin/ui");
+    await screen.findByRole("heading", { name: "Токены по дням" });
+    await user.click(screen.getByRole("button", { name: "7д" }));
+    expect(screen.getByRole("button", { name: "7д" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+
+    first.unmount();
+    fetchMock.mockClear();
+    renderApp("/admin/ui");
+
+    await screen.findByRole("heading", { name: "Токены по дням" });
+    expect(screen.getByRole("button", { name: "7д" })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
     await waitFor(() => {
       expect(
         fetchMock.mock.calls.some(([url]) =>
