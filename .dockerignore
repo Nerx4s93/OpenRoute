@@ -11,6 +11,7 @@ __pycache__
 .ruff_cache
 *.egg-info
 README.md
+AGENTS.md
 Dockerfile
 docker-compose.yml
 docker-compose.test.yml
