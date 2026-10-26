@@ -5,7 +5,6 @@ import { ProxyStatsPanel } from "../components/ProxyStatsPanel";
 import { Section } from "../components/Section";
 import { StatCard } from "../components/StatCard";
 import { TokenStatsPanel } from "../components/TokenStatsPanel";
-import { useRefreshProxies } from "../hooks/useAdminMutations";
 import { useProxiesLive } from "../hooks/useLiveSnapshot";
 import { usePeriod } from "../hooks/usePeriod";
 import { useStatsPeriod } from "../hooks/useStatsPeriod";
@@ -15,7 +14,6 @@ export function StatsPage() {
   const [period, setPeriod] = usePeriod();
   const query = useProxiesLive(period);
   const statsQuery = useStatsPeriod(period);
-  const refreshProxies = useRefreshProxies();
   const snapshot = query.data;
   const caption = PERIOD_CAPTIONS[period];
   const requestsLabel = caption ? `Запросов ${caption}` : "Запросов всего";
@@ -29,17 +27,6 @@ export function StatsPage() {
           <div className="eyebrow">Система / статистика</div>
           <h1>Статистика</h1>
         </div>
-        <button
-          type="button"
-          className="hero-refresh"
-          disabled={refreshProxies.isPending}
-          title="Запросить свежий список из px6 и сбросить кэш"
-          aria-busy={refreshProxies.isPending}
-          onClick={() => refreshProxies.mutate()}
-        >
-          <span aria-hidden="true">↻</span>
-          {refreshProxies.isPending ? "Обновляю…" : "Обновить список"}
-        </button>
       </div>
 
       <PeriodTabs active={period} onChange={setPeriod} />

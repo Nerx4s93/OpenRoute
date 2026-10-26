@@ -166,6 +166,9 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { name: "Статистика", level: 1 }),
     ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: /Обновить список/ }),
+    ).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Прокси" })).toHaveClass("nav-proxies");
     expect(screen.getByRole("link", { name: "Статистика" })).toHaveClass("nav-stats");
     expect(
@@ -231,7 +234,7 @@ describe("App", () => {
     });
   });
 
-  it("refreshes the proxy list on demand", async () => {
+  it("refreshes the proxy list from the proxies page", async () => {
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       const url = String(input);
       if (url.includes("/api/admin/session")) {
@@ -240,13 +243,25 @@ describe("App", () => {
       if (url.includes("/api/admin/proxies/refresh")) {
         return json({ ok: true, message: "Список прокси обновлён" });
       }
+      if (url.includes("/api/admin/proxies/account")) {
+        return json({ user_id: "px6-user", balance: 250.5, currency: "RUB" });
+      }
+      if (url.includes("/api/admin/proxies/countries")) {
+        return json({ version: 6, countries: ["de", "ru"] });
+      }
+      if (url.includes("/api/admin/proxies/price")) {
+        return json({
+          user_id: "px6-user", balance: 250.5, currency: "RUB",
+          price: 12.5, price_single: 12.5, period: 30, count: 1, version: 6,
+        });
+      }
       if (url.includes("/api/admin/proxies")) return json(proxies);
       return json({});
     });
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
 
-    renderApp("/admin/ui");
+    renderApp("/admin/ui/proxies");
 
     const button = await screen.findByRole("button", { name: /Обновить список/ });
     await user.click(button);
