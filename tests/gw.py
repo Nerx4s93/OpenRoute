@@ -8,9 +8,9 @@ upserted exactly like ``refresh_proxies`` does it, client keys as if added via
 the admin UI. The project directory is never used for writes.
 
 Edge routing is modelled with ``_EdgeShim``: like nginx in production, it
-forwards ``/v1/*``, ``/admin/*``, ``/health``, ``/docs`` to the gateway and
-hides ``/internal/*`` (404). The ``internal`` client exposes ``/internal/*``
-for tests of that surface.
+forwards ``/v1/*``, ``/health``, ``/docs`` to the gateway and hides
+``/internal/*`` and legacy ``/admin/*`` (404). The ``internal`` client exposes
+``/internal/*`` for tests of that surface.
 """
 
 import asyncio
@@ -115,17 +115,17 @@ class _AsyncioShim:
         await asyncio.sleep(0)
 
 
-_GATEWAY_PREFIXES = ("/v1/", "/admin/", "/openapi.json", "/docs", "/redoc", "/health")
+_GATEWAY_PREFIXES = ("/v1/", "/openapi.json", "/docs", "/redoc", "/health")
 
 
 class _EdgeShim:
     """ASGI composite modelling the edge (nginx) routing.
 
-    ``/v1/*``, ``/admin/*``, ``/health``, ``/docs`` go to the gateway;
-    ``/internal/*`` is hidden (404) unless ``expose_internal`` is set (the
-    tests' stand-in for the internal port). The lifespan scope is completed
-    locally so that the gateway lifespan is run exactly once (by the dedicated
-    lifespan client in ``Gateway``).
+    ``/v1/*``, ``/health``, ``/docs`` go to the gateway; ``/internal/*`` and
+    the removed ``/admin/*`` surface are hidden (404) unless ``expose_internal``
+    is set (the tests' stand-in for the internal port). The lifespan scope is
+    completed locally so that the gateway lifespan is run exactly once (by the
+    dedicated lifespan client in ``Gateway``).
     """
 
     def __init__(self, gw_app, *, expose_internal: bool = False):
@@ -168,7 +168,7 @@ class Gateway:
         settings_over = dict(settings_over or {})
         self.settings = build_settings(pg_dsn, **settings_over)
         entries = keys if keys is not None else [
-            {"key": "test-key", "key_id": "default", "admin": True},
+            {"key": "test-key", "key_id": "default"},
         ]
 
         # "First run": fill PostgreSQL and close the pools — the lifespan will
@@ -181,8 +181,7 @@ class Gateway:
         for e in entries:
             assert kdb.add(
                 hash_key(e["key"]), e.get("key_id") or "", e.get("name") or "",
-                admin=bool(e.get("admin")), rpm=e.get("rpm"), tpm=e.get("tpm"),
-                models=e.get("models"),
+                rpm=e.get("rpm"), tpm=e.get("tpm"), models=e.get("models"),
             ), f"key {e.get('key_id')!r} was not written to keys"
         key_rows = kdb.all()
         kdb.close()
@@ -234,6 +233,8 @@ class Gateway:
         self.client.__enter__()
         self.internal = TestClient(_EdgeShim(main.app, expose_internal=True))
         self.internal.__enter__()
+        # Direct gateway app (no edge filtering) for checking removed routes.
+        self.direct = self._gw_lifespan_client
 
     # --- helpers ---
 

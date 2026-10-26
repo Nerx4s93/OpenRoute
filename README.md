@@ -34,9 +34,11 @@ OpenAI-совместимый API-шлюз, который балансируе�
   эвакуирует его сессии, и больше никогда его не выбирает.
 - Round-robin по готовым прокси; при сбое запрос немедленно уходит на следующий
   прокси (каждый пробуется за запрос максимум один раз).
-- Клиентская поверхность как у NVRoute: `/v1/*` (OpenAI passthrough) за
-  клиентскими ключами (RPM/TPM, allow-list моделей), `/admin/status`,
-  `/admin/logs`, `/health`, `/internal/*` (X-Internal-Token) и веб-админка.
+- Клиентская поверхность: `/v1/*` (OpenAI passthrough) за клиентскими
+  ключами (RPM/TPM, allow-list моделей). У ключей нет ролей или админ-флагов:
+  они дают доступ только к `/v1/*`. `/health` и `/docs` публичны,
+  `/internal/*` (X-Internal-Token) доступен только web-admin, а веб-админка —
+  по отдельному паролю.
 
 Требования к клиенту — как у OpenAI SDK:
 
@@ -77,8 +79,7 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
 ```
  Клиент/браузер ──► 0.0.0.0:53202 (edge, nginx — «стена», единственный
                      публичный порт; хост-порт задаёт OPENROUTE_EDGE_PORT)
-                        ├─ /v1/*, /admin/status, /admin/logs, /health, /docs,
-                        │    /openapi.json ─────────────────────────► [gateway] (data plane)
+                        ├─ /v1/*, /health, /docs, /openapi.json ───► [gateway] (data plane)
                         ├─ /login, /admin/ui*, /assets/* ──────────► [web-admin-ui] (React SPA)
                         └─ /api/admin/* ───────────────────────────► [web-admin] (JSON API)
                                                                          │
@@ -230,8 +231,9 @@ OpenRoute/
 - Переменные: `AFFINITY_ENABLED`, `AFFINITY_WINDOW_SECONDS`,
   `AFFINITY_WEIGHT_SESSIONS`, `AFFINITY_WEIGHT_REQUESTS`,
   `AFFINITY_WEIGHT_TOKENS`, `QUOTA_RESET_MARGIN_SECONDS`. Abusive-бан не имеет
-  настройки срока: он постоянный. В `/admin/status` — блок `affinity`
-  (host-only), в `/health` — счётчики `egress_groups_*` и `sessions_*`.
+  настройки срока: он постоянный. В `/health` — счётчики `egress_groups_*`
+  и `sessions_*`; полный host-only снапшот affinity доступен только внутри
+  gateway и больше не публикуется по HTTP.
 
 ---
 
@@ -412,15 +414,13 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 | GET | `/api/admin/proxies/price?version=&count=&period=` | web-admin | Оценка стоимости заказа |
 | POST | `/api/admin/proxies/buy` | web-admin | Купить прокси и обновить пул (CSRF) |
 | POST | `/api/admin/keys/{add,set,delete}` | web-admin | Добавить/отозвать/удалить ключ (CSRF) |
-| GET | `/admin/status` | gateway | Состояние пула: прокси, egress-группы, session affinity, счётчики, usage по ключам |
-| GET | `/admin/logs?limit=N` | gateway | Последние запросы из лога (1..500, по умолчанию 100) |
 | GET | `/health` | gateway | Liveness + счётчики пула, egress-групп и привязанных сессий |
 | GET | `/docs`, `/openapi.json` | gateway | Swagger UI / схема |
 | ANY | `/internal/*` | — (нет наружу) | Internal API шлюза; доступен только web-admin по `X-Internal-Token` |
 
-`/admin/status` и `/admin/logs` требуют клиентский ключ с `"admin": true`.
-`/internal/*` при пустом `INTERNAL_API_TOKEN` отвечает 404, при неверном токене
-— 403.
+Клиентские ключи не имеют ролей и дают доступ только к `/v1/*`; маршруты
+`/admin/status` и `/admin/logs` удалены. `/internal/*` при пустом
+`INTERNAL_API_TOKEN` отвечает 404, при неверном токене — 403.
 
 ---
 

@@ -1,5 +1,5 @@
-"""Tests for keys.py + keydb.py: auth, admin flag, RPM/TPM, model allow-list,
-hashing; KeyDB CRUD/persistence; incremental KeyStore mutations."""
+"""Tests for keys.py + keydb.py: auth, RPM/TPM, model allow-list, hashing;
+KeyDB CRUD/persistence/schema migration; incremental KeyStore mutations."""
 
 import pytest
 
@@ -14,7 +14,6 @@ def row(e):
         "key_hash": hash_key(e["key"]),
         "key_id": e.get("key_id", "k1"),
         "name": e.get("name") or e.get("key_id", "k1"),
-        "admin": bool(e.get("admin", False)),
         "rpm": e.get("rpm"),
         "tpm": e.get("tpm"),
         "models": e.get("models"),
@@ -31,19 +30,19 @@ def make_store(entries):
 # --- auth ---
 
 
-def test_authenticate_ok_and_admin_flag():
+def test_authenticate_ok_and_limits():
     ks = make_store([
-        {"key": "sk-abc", "key_id": "k1", "name": "Front", "admin": True,
+        {"key": "sk-abc", "key_id": "k1", "name": "Front",
          "rpm": 10, "tpm": 1000, "models": ["m1"]},
         {"key": "sk-xyz", "key_id": "k2"},
     ])
     info = ks.authenticate("Bearer sk-abc")
     assert info.key_id == "k1" and info.name == "Front"
-    assert info.is_admin is True and info.rpm == 10 and info.tpm == 1000 and info.models == ["m1"]
+    assert info.rpm == 10 and info.tpm == 1000 and info.models == ["m1"]
     assert info.enabled is True
 
     info2 = ks.authenticate("Bearer sk-xyz")
-    assert info2.is_admin is False and info2.rpm is None and info2.tpm is None
+    assert info2.rpm is None and info2.tpm is None
     assert info2.models is None and info2.enabled is True
 
 
@@ -237,12 +236,12 @@ def test_upsert_remove_set_enabled_without_window_reset():
     ks.count_tokens(a, 70)
 
     h = hash_key("sk-new")
-    assert ks.upsert(h, KeyInfo(key_id="n1", name="n1", is_admin=True,
+    assert ks.upsert(h, KeyInfo(key_id="n1", name="n1",
                                 rpm=None, tpm=None, models=None, enabled=True)) is True
     assert ks.authenticate("Bearer sk-new").key_id == "n1"
-    assert ks.upsert(h, KeyInfo(key_id="n1", name="n1", is_admin=False,
+    assert ks.upsert(h, KeyInfo(key_id="n1", name="n1",
                                 rpm=None, tpm=None, models=None, enabled=True)) is False
-    assert ks.authenticate("Bearer sk-new").is_admin is False
+    assert ks.authenticate("Bearer sk-new").key_id == "n1"
 
     ks.check_tpm("a1")  # a1's window survived the upsert: 70 < 100
 
@@ -283,7 +282,7 @@ def test_keydb_crud(pg_dsn):
     rows = db.all()
     assert [r["key_id"] for r in rows] == ["k1", "k2"]
     r1 = rows[0]
-    assert r1["key_hash"] == h1 and r1["admin"] is False and r1["enabled"] is True
+    assert r1["key_hash"] == h1 and r1["enabled"] is True
     assert r1["rpm"] == 60 and r1["tpm"] == 1000 and r1["models"] == ["m1", "m2"]
     assert rows[1]["rpm"] is None and rows[1]["models"] is None
 
@@ -299,16 +298,59 @@ def test_keydb_crud(pg_dsn):
 
 def test_keydb_persists_across_instances(pg_dsn):
     db1 = KeyDB(pg_dsn)
-    db1.add(hash_key("sk-a"), "a1", "Alpha", admin=True)
+    db1.add(hash_key("sk-a"), "a1", "Alpha")
     db1.add(hash_key("sk-b"), "b1", "Beta")
     db1.set_enabled(hash_key("sk-b"), False)
     db1.close()
 
     db2 = KeyDB(pg_dsn)
     rows = {r["key_id"]: r for r in db2.all()}
-    assert rows["a1"]["admin"] is True and rows["a1"]["enabled"] is True
+    assert rows["a1"]["enabled"] is True
     assert rows["b1"]["enabled"] is False
     db2.close()
+
+
+def test_keydb_drops_legacy_admin_column(pg_dsn):
+    """Existing installations lose the key-level administrator role in place."""
+    import psycopg
+
+    with psycopg.connect(pg_dsn) as conn:
+        conn.execute(
+            """
+            CREATE TABLE keys (
+                id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+                key_hash TEXT NOT NULL UNIQUE,
+                key_id TEXT NOT NULL,
+                name TEXT NOT NULL DEFAULT '',
+                admin BOOLEAN NOT NULL DEFAULT FALSE,
+                rpm INTEGER,
+                tpm INTEGER,
+                models JSONB,
+                enabled BOOLEAN NOT NULL DEFAULT TRUE,
+                added_at DOUBLE PRECISION NOT NULL
+            )
+            """
+        )
+        conn.execute(
+            "INSERT INTO keys (key_hash, key_id, name, admin, enabled, added_at)"
+            " VALUES (%s, 'legacy', 'Legacy', TRUE, TRUE, 1.0)",
+            (hash_key("sk-legacy"),),
+        )
+
+    db = KeyDB(pg_dsn)
+    rows = db.all()
+    assert len(rows) == 1 and rows[0]["key_id"] == "legacy"
+    assert "admin" not in rows[0]
+    with psycopg.connect(pg_dsn) as conn:
+        columns = {
+            row[0]
+            for row in conn.execute(
+                "SELECT column_name FROM information_schema.columns"
+                " WHERE table_name = 'keys'"
+            ).fetchall()
+        }
+    assert "admin" not in columns
+    db.close()
 
 
 def test_keydb_stores_hash_not_plaintext(pg_dsn):

@@ -18,7 +18,6 @@ interface KeyForm {
   rpm: string;
   tpm: string;
   models: string;
-  admin: boolean;
 }
 
 const EMPTY_FORM: KeyForm = {
@@ -28,7 +27,6 @@ const EMPTY_FORM: KeyForm = {
   rpm: "",
   tpm: "",
   models: "",
-  admin: false,
 };
 
 function parseLimit(value: string, field: "RPM" | "TPM"): { value: number | null; error?: string } {
@@ -86,7 +84,6 @@ export function KeysPage() {
         key,
         key_id: form.key_id.trim(),
         name: form.name.trim(),
-        admin: form.admin,
         rpm: rpm.value,
         tpm: tpm.value,
         models: form.models
@@ -187,16 +184,7 @@ export function KeysPage() {
                 onChange={(event) => update("models", event.target.value)}
               />
             </div>
-            <div className="form-footer">
-              <label className="check-field">
-                <input
-                  type="checkbox"
-                  name="admin"
-                  checked={form.admin}
-                  onChange={(event) => update("admin", event.target.checked)}
-                />
-                Администратор
-              </label>
+            <div className="form-footer key-form-footer">
               <button type="submit" disabled={addKey.isPending}>
                 {addKey.isPending ? "Добавление…" : "＋   Добавить ключ"}
               </button>
@@ -220,7 +208,6 @@ export function KeysPage() {
               <tr>
                 <th>Key ID</th>
                 <th>Имя</th>
-                <th>Admin</th>
                 <th>RPM</th>
                 <th>TPM</th>
                 <th>Модели</th>
@@ -230,7 +217,7 @@ export function KeysPage() {
             </thead>
             <tbody>
               {query.isLoading ? (
-                <LoadingRows colSpan={8} />
+                <LoadingRows colSpan={7} />
               ) : snapshot && snapshot.keys.length ? (
                 snapshot.keys.map((key) => {
                   const state = keyStateLabel(key.enabled ? "active" : "revoked");
@@ -240,9 +227,6 @@ export function KeysPage() {
                     <tr key={key.key_hash} className={key.enabled ? undefined : "dead"}>
                       <td className="mono">{key.key_id}</td>
                       <td>{key.name}</td>
-                      <td>
-                        {key.admin ? <span className="badge b-ok">admin</span> : <span className="muted">—</span>}
-                      </td>
                       <td>{formatLimit(key.rpm)}</td>
                       <td>{formatLimit(key.tpm)}</td>
                       <td className="mono">{formatModels(key.models)}</td>
@@ -269,7 +253,7 @@ export function KeysPage() {
                   );
                 })
               ) : (
-                <EmptyRow colSpan={8}>Ключей нет — добавьте выше</EmptyRow>
+                <EmptyRow colSpan={7}>Ключей нет — добавьте выше</EmptyRow>
               )}
             </tbody>
           </table>

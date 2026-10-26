@@ -57,7 +57,6 @@ class RateLimitError(Exception):
 class KeyInfo:
     key_id: str
     name: str
-    is_admin: bool
     rpm: int | None  # requests/min, None = unlimited
     tpm: int | None  # tokens/min, None = unlimited
     models: list[str] | None  # allow-list, None = all
@@ -87,7 +86,6 @@ class KeyStore:
             info = KeyInfo(
                 key_id=r["key_id"],
                 name=r["name"] or r["key_id"],
-                is_admin=bool(r["admin"]),
                 rpm=r["rpm"],
                 tpm=r["tpm"],
                 models=list(r["models"]) if r["models"] else None,

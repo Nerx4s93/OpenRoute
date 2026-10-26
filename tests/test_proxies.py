@@ -489,7 +489,7 @@ async def test_refresh_proxies_bad_payload_is_fetch_failure():
 @pytest.mark.asyncio
 async def test_refresh_failure_redacts_credentials_in_last_fetch_status():
     """A fetch/HTTP error message may embed PROXIES_URL with credentials; the
-    status payload (exposed via /health and /admin/status) must be redacted."""
+    status payload (exposed via /health) must be redacted."""
     m = mgr()
     url = "http://svc:topsecret@px6-service:8000/proxies"
 
@@ -511,7 +511,7 @@ async def test_refresh_failure_redacts_credentials_in_last_fetch_status():
     assert await m.refresh_proxies() is False
     assert "topsecret" not in (m.last_fetch_status or "")
     assert "http://***@px6-service:8000/proxies" in (m.last_fetch_status or "")
-    # status() is the payload /health and /admin/status return
+    # status() is the payload /health returns
     assert "topsecret" not in json.dumps(m.status())
     assert "http://***@px6-service:8000/proxies" in m.status()["last_proxies_fetch"]
     await m.aclose()

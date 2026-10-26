@@ -101,7 +101,7 @@ services:
     networks:
       - net
 
-  # --- шлюз OpenRoute: data plane (/v1/*, /admin/status, /admin/logs, /health)
+  # --- шлюз OpenRoute: data plane (/v1/*, /health, /docs)
   # + internal API (/internal/*, X-Internal-Token) для web-admin ---
   gateway:
     build: .

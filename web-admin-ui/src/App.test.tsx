@@ -90,7 +90,6 @@ const keys: KeysSnapshot = {
       key_hash: "hash-1",
       key_id: "default",
       name: "Default",
-      admin: true,
       rpm: null,
       tpm: null,
       models: null,
@@ -403,6 +402,10 @@ describe("App", () => {
     ).toBeInTheDocument();
     expect(await screen.findByText("Default")).toBeInTheDocument();
     expect(screen.getByLabelText("Ключ доступа")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "Admin" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Администратор")).not.toBeInTheDocument();
   });
 
   it("redirects the legacy stats route to the statistics page", async () => {

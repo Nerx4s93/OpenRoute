@@ -23,7 +23,7 @@ inference. The differences from ``NVRoute/app/main.py``:
 
 Request flow for ``ANY /v1/{rest:path}``:
 
-1. auth via ``KeyStore`` (``require_auth`` / ``require_admin``),
+1. auth via ``KeyStore`` (``require_auth``); keys are only valid for ``/v1/*``,
 2. anti-DoS body limit (``MAX_BODY_BYTES``, 413 without reading when possible),
 3. model extraction + allow-list (403), then RPM/TPM gates (429),
 4. session id resolution ONCE for the whole request: caller affinity ->
@@ -170,7 +170,7 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
                        "until keys are added via the admin UI")
     # Sticky sessions: load persisted bindings (S survives a restart; R/T are
     # in-memory and start empty). The manager is created even when disabled so
-    # /health and /admin/status keep a stable shape.
+    # /health keeps a stable shape.
     if affinitydb is None:
         affinitydb = AffinityDB(settings.postgres_dsn)
     if affinity is None:
@@ -262,18 +262,12 @@ async def rate_limit_error_handler(request: Request, exc: RateLimitError):
 async def require_auth(request: Request) -> KeyInfo:
     """Bearer key from ``KeyStore``: constant-time compare, revocation.
 
-    RPM/TPM gates are DELIBERATELY not here: the RPM limit is checked in
-    ``proxy_v1`` AFTER the model allow-list (a 403 rejection must not burn the
-    client's quota), and admin endpoints must not spend client limits at all.
+    Client keys are ordinary provider credentials: they grant access to
+    ``/v1/*`` and nothing else. RPM/TPM gates are DELIBERATELY not here: the
+    RPM limit is checked in ``proxy_v1`` AFTER the model allow-list (a 403
+    rejection must not burn the client's quota).
     """
     return keystore.authenticate(request.headers.get("authorization", ""))
-
-
-async def require_admin(key: KeyInfo = Depends(require_auth)) -> KeyInfo:
-    """/admin/* additionally requires ``admin: true`` on the key."""
-    if not key.is_admin:
-        raise AuthError(403, "Admin access required")
-    return key
 
 
 # --- passthrough helpers ---------------------------------------------------
@@ -428,8 +422,8 @@ def _raise_no_ready(exc: NoReadyProxyError) -> None:
     if kind == "excluded":
         raise HTTPException(502, "All upstream attempts failed")
     if kind == "empty" or (kind is None and exc.retry_after is None):
-        # Generic on purpose: the fetch status (URL/DSN/credentials) is only
-        # exposed to admins via /admin/status, never to clients.
+        # Generic on purpose: fetch diagnostics (URL/DSN/credentials) are only
+        # exposed through the internal API to the admin panel, never to clients.
         raise HTTPException(503, "No enabled proxies")
     if exc.retry_after is None:
         raise HTTPException(503, "No enabled proxies")
@@ -995,26 +989,6 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
         raise
 
 
-# --- routes: admin ---------------------------------------------------------
-
-
-async def admin_status(_: KeyInfo = Depends(require_admin)) -> dict:
-    """GET ``/admin/status`` — pool snapshot + affinity + keys + usage summary."""
-    st = manager.status()
-    st["affinity"] = affinity.status() if affinity is not None else {
-        "sessions_total": 0, "sessions_bound": 0, "sessions_unbound": 0,
-        "egress_groups": [],
-    }
-    st["keys"] = keystore.key_ids()
-    st["usage"] = await reqlog.summary_async()
-    return st
-
-
-async def admin_logs(limit: int = 100, _: KeyInfo = Depends(require_admin)) -> list[dict]:
-    """GET ``/admin/logs?limit=N`` — recent requests (clamped 1..500)."""
-    return await reqlog.recent_async(max(1, min(500, limit)))
-
-
 async def health() -> dict:
     """GET ``/health`` — liveness + pool/affinity counters (additive keys)."""
     st = manager.status()
@@ -1469,8 +1443,8 @@ async def internal_px6_buy(request: Request) -> dict:
 
 
 async def internal_keys_add(request: Request) -> dict:
-    """``{"key": plaintext, "key_id"?, "name"?, "admin"?, "rpm"?, "tpm"?,
-    "models"?}``. Plaintext is hashed immediately (keys.py) and never stored."""
+    """``{"key": plaintext, "key_id"?, "name"?, "rpm"?, "tpm"?, "models"?}``.
+    Plaintext is hashed immediately (keys.py) and never stored."""
     _require_internal(request)
     data = await _read_json(request)
     plaintext = str(data.get("key", "")).strip()
@@ -1491,7 +1465,6 @@ async def internal_keys_add(request: Request) -> dict:
         models = [m.strip() for m in raw_models.split(",") if m.strip()] or None
     else:
         models = None
-    is_admin = bool(data.get("admin"))
     name = str(data.get("name", "")).strip()
     key_id = str(data.get("key_id", "")).strip()
     if not key_id:
@@ -1504,10 +1477,10 @@ async def internal_keys_add(request: Request) -> dict:
     h = hash_key(plaintext)
     db = _require_keydb()
     if await asyncio.to_thread(db.add, h, key_id, name or key_id,
-                               admin=is_admin, rpm=rpm, tpm=tpm, models=models):
+                               rpm=rpm, tpm=tpm, models=models):
         keystore.upsert(h, KeyInfo(
             key_id=key_id, name=name or key_id,
-            is_admin=is_admin, rpm=rpm, tpm=tpm, models=models, enabled=True,
+            rpm=rpm, tpm=tpm, models=models, enabled=True,
         ))
         return {"ok": True, "message": f"Key {key_id} added"}
     return {"ok": False, "message": "Such a key already exists"}
@@ -1570,8 +1543,6 @@ def create_app() -> FastAPI:
         methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         summary="OpenAI-compatible passthrough (chat/completions, models, ...)",
     )
-    application.add_api_route("/admin/status", admin_status, methods=["GET"])
-    application.add_api_route("/admin/logs", admin_logs, methods=["GET"])
     application.add_api_route("/health", health, methods=["GET"])
     application.add_api_route(f"{_INTERNAL_PREFIX}/proxies-data", internal_proxies_data,
                               methods=["GET"], include_in_schema=False)

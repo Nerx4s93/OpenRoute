@@ -408,7 +408,7 @@ def test_session_sticky_keeps_same_proxy_across_turns(make_gateway):
     assert sum(e.tokens for e in state.events) == 16  # 8 real tokens twice
 
 
-def test_admin_status_exposes_host_only_affinity_groups(make_gateway):
+def test_affinity_status_exposes_host_only_groups(make_gateway):
     gw = make_gateway()
     gw.script_upstream(lambda req: sse_response())
     sid = "ses_0123456789ab" + "E" * 14
@@ -416,7 +416,7 @@ def test_admin_status_exposes_host_only_affinity_groups(make_gateway):
                        headers={**AUTH, "x-opencode-session": sid})
     assert r.status_code == 200
 
-    aff = gw.client.get("/admin/status", headers=AUTH).json()["affinity"]
+    aff = gw.affinity.status()
     assert aff["enabled"] is True
     assert aff["sessions_total"] == 1
     assert aff["sessions_bound"] == 1 and aff["sessions_unbound"] == 0
@@ -965,8 +965,8 @@ def test_no_proxies_503_message_is_generic(make_gateway):
     assert tr.requests == []
 
 
-def test_health_and_admin_status_redact_fetch_credentials(make_gateway):
-    """last_proxies_fetch (public /health + admin /admin/status) strips userinfo."""
+def test_health_redacts_fetch_credentials(make_gateway):
+    """last_proxies_fetch (public /health) strips userinfo."""
     gw = make_gateway(proxies=())
     gw.manager.last_fetch_status = (
         "error: 500 for url 'http://svc:supersecret@px6-service:8000/proxies'"
@@ -974,10 +974,6 @@ def test_health_and_admin_status_redact_fetch_credentials(make_gateway):
     h = gw.client.get("/health").json()
     assert "supersecret" not in json.dumps(h)
     assert "http://***@px6-service:8000/proxies" in h["last_proxies_fetch"]
-
-    a = gw.client.get("/admin/status", headers=AUTH).json()
-    assert "supersecret" not in json.dumps(a)
-    assert "http://***@px6-service:8000/proxies" in a["last_proxies_fetch"]
 
 
 # --- local RPM cap ---
@@ -1026,32 +1022,15 @@ def test_body_too_large_chunked_incremental_413(make_gateway):
     assert tr.requests == []
 
 
-# --- admin auth / limits ---
+# --- removed infrastructure routes ---
 
 
-def test_admin_403_for_non_admin_key(make_gateway):
-    gw = make_gateway(keys=[
-        {"key": "sk-user", "key_id": "u1", "admin": False},
-        {"key": "sk-adm", "key_id": "a1", "admin": True},
-    ])
+def test_keys_cannot_access_admin_infrastructure(make_gateway):
+    gw = make_gateway()
     gw.script_upstream(lambda req: sse_response())
-    r = gw.client.get("/admin/status", headers={"Authorization": "Bearer sk-user"})
-    assert r.status_code == 403
-    assert r.json()["error"]["message"] == "Admin access required"
-    r2 = gw.client.get("/admin/status", headers={"Authorization": "Bearer sk-adm"})
-    assert r2.status_code == 200
-    assert r2.json()["keys"] == ["a1", "u1"]
-
-
-def test_admin_calls_do_not_consume_rpm(make_gateway):
-    gw = make_gateway(keys=[{"key": "sk-r", "key_id": "r1", "admin": True, "rpm": 2}])
-    gw.script_upstream(lambda req: sse_response())
-    h = {"Authorization": "Bearer sk-r"}
-    for _ in range(5):
-        assert gw.client.get("/admin/status", headers=h).status_code == 200
-    assert gw.client.post("/v1/chat/completions", json=body(), headers=h).status_code == 200
-    assert gw.client.post("/v1/chat/completions", json=body(), headers=h).status_code == 200
-    assert gw.client.post("/v1/chat/completions", json=body(), headers=h).status_code == 429
+    for path in ("/admin/status", "/admin/logs"):
+        assert gw.direct.get(path, headers=AUTH).status_code == 404
+        assert gw.client.get(path, headers=AUTH).status_code == 404
 
 
 # --- client TPM ---
@@ -1270,14 +1249,14 @@ def test_models_endpoint_fallback_on_error(make_gateway, monkeypatch):
 def _wait_log_entry(gw, pred, timeout=5.0):
     deadline = time.time() + timeout
     while time.time() < deadline:
-        for row in gw.client.get("/admin/logs?limit=20", headers=AUTH).json():
+        for row in gw.reqlog.recent(20):
             if pred(row):
                 return row
         time.sleep(0.05)
     raise AssertionError("log entry never appeared in reqlog")
 
 
-def test_admin_logs_and_usage_persisted(make_gateway):
+def test_request_log_and_usage_persisted(make_gateway):
     gw = make_gateway()
     gw.script_upstream(lambda req: sse_response())
     r = gw.client.post("/v1/chat/completions", json=body(), headers=AUTH)
@@ -1288,7 +1267,7 @@ def test_admin_logs_and_usage_persisted(make_gateway):
     assert row["method"] == "POST" and row["model"] == FREE_MODEL
     assert row["account"] == "proxy-a.invalid:8080"  # masked proxy
     assert row["prompt_tokens"] == 6 and row["completion_tokens"] == 2
-    usage = gw.client.get("/admin/status", headers=AUTH).json()["usage"]
+    usage = gw.reqlog.summary()
     assert usage["total"]["requests"] >= 1
 
 
@@ -1714,7 +1693,7 @@ def test_internal_keys_add_set_delete_and_persist(make_gateway):
     h = {"X-Internal-Token": "test-internal-token"}
 
     r = gw.internal.post("/internal/keys/add",
-                         json={"key": "sk-new", "key_id": "n1", "admin": True, "rpm": 5},
+                         json={"key": "sk-new", "key_id": "n1", "rpm": 5},
                          headers=h)
     assert r.status_code == 200 and r.json()["ok"] is True
     # the new key works immediately
@@ -1724,7 +1703,7 @@ def test_internal_keys_add_set_delete_and_persist(make_gateway):
 
     data = gw.internal.get("/internal/keys-data", headers=h).json()
     row = next(k for k in data["keys"] if k["key_id"] == "n1")
-    assert row["admin"] is True and row["rpm"] == 5
+    assert "admin" not in row and row["rpm"] == 5
 
     r2 = gw.internal.post("/internal/keys/set",
                           json={"key_hash": row["key_hash"], "enabled": False}, headers=h)

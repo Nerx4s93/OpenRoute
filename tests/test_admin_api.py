@@ -350,7 +350,6 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
         state.keys[kh] = {
             "key_hash": kh, "key_id": key_id,
             "name": str(data.get("name", "")).strip(),
-            "admin": bool(data.get("admin")),
             "rpm": rpm, "tpm": tpm, "models": models, "enabled": True,
         }
         return {"ok": True, "message": f"Key {key_id} added"}
@@ -439,10 +438,10 @@ class Panel:
             admin_main, "gateway",
             admin_main.GatewayClient(self.settings, gateway_client),
         )
-        # seed a default admin key (like a fresh deployment)
+        # seed a default client key (like a fresh deployment)
         kh = hash_key(DEFAULT_KEY)
         self.state.keys[kh] = {
-            "key_hash": kh, "key_id": "default", "name": "", "admin": True,
+            "key_hash": kh, "key_id": "default", "name": "",
             "rpm": None, "tpm": None, "models": None, "enabled": True,
         }
         self.client = TestClient(admin_main.app)
@@ -987,13 +986,13 @@ def test_add_toggle_delete_key(panel):
         headers=auth_headers(csrf),
         json={
             "key": "sk-new-client", "rpm": 30, "tpm": 500,
-            "models": ["deepseek-v4.1-flash-free", "gpt-oss"], "admin": True,
+            "models": ["deepseek-v4.1-flash-free", "gpt-oss"],
         },
     )
     assert response.status_code == 200
     assert response.json()["message"] == "Ключ k1 добавлен"
     k1 = next(v for v in panel.state.keys.values() if v["key_id"] == "k1")
-    assert k1["admin"] is True and k1["rpm"] == 30 and k1["tpm"] == 500
+    assert "admin" not in k1 and k1["rpm"] == 30 and k1["tpm"] == 500
     assert k1["models"] == ["deepseek-v4.1-flash-free", "gpt-oss"]
 
     # duplicate plaintext rejected

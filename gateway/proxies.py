@@ -53,7 +53,7 @@ def redact_url(value: str | None, secret: str | None = None) -> str:
 
     Removes ``user:pass@`` userinfo (proxy and DSN credentials) and, when given,
     every occurrence of ``secret``. Used so ``PROXIES_URL``/``POSTGRES_DSN`` can
-    never leak through ``last_proxies_fetch`` (``/health``, ``/admin/status``)
+    never leak through ``last_proxies_fetch`` (``/health``)
     or the logs.
     """
     out = value or ""

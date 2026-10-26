@@ -101,7 +101,6 @@ export interface KeyRow {
   key_hash: string;
   key_id: string;
   name: string;
-  admin: boolean;
   rpm: number | null;
   tpm: number | null;
   models: string[] | null;
@@ -182,7 +181,6 @@ export interface KeyAddPayload {
   key: string;
   key_id?: string;
   name?: string;
-  admin?: boolean;
   rpm?: number | null;
   tpm?: number | null;
   models?: string[] | null;
