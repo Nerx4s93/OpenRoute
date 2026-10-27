@@ -9,6 +9,8 @@ export function ConfirmDialog({
   pendingLabel,
   tone = "danger",
   pending = false,
+  confirmDisabled = false,
+  className,
   onConfirm,
   onCancel,
 }: {
@@ -19,6 +21,8 @@ export function ConfirmDialog({
   pendingLabel?: string;
   tone?: "danger" | "accent";
   pending?: boolean;
+  confirmDisabled?: boolean;
+  className?: string;
   onConfirm: () => void;
   onCancel: () => void;
 }) {
@@ -47,7 +51,7 @@ export function ConfirmDialog({
   return (
     <div className="modal-backdrop" onMouseDown={() => !pending && onCancel()}>
       <div
-        className="modal"
+        className={`modal${className ? ` ${className}` : ""}`}
         role="dialog"
         aria-modal="true"
         aria-labelledby="confirm-title"
@@ -64,7 +68,7 @@ export function ConfirmDialog({
             type="button"
             className={tone}
             onClick={onConfirm}
-            disabled={pending}
+            disabled={pending || confirmDisabled}
           >
             {pending ? resolvedPendingLabel : resolvedConfirmLabel}
           </button>

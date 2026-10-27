@@ -85,6 +85,9 @@ h1 { margin: 7px 0 5px; font-size: clamp(27px, 3vw, 38px); line-height: 1.16;
 .hero-refresh > span { font-size: 15px; line-height: 1; }
 .hero-refresh:hover { background: #8de9d22c; border-color: #b6f5e3a0; transform: translateY(-1px); }
 .hero-refresh:disabled { opacity: .6; transform: none; }
+.hero-actions { position: relative; z-index: 1; flex: none; display: flex; flex-wrap: wrap; gap: 9px; }
+.hero-buy { border-color: var(--mint); background: var(--mint); color: #092322; }
+.hero-buy:hover { background: #b1f5df; border-color: #b1f5df; }
 
 /* --- period control ------------------------------------------------------ */
 .period-bar { display: flex; align-items: center; justify-content: space-between; gap: 16px;
@@ -262,6 +265,14 @@ form.add button:hover, .login-box button[type=submit]:hover {
   min-width: 0; font-size: 12px; }
 .buy-price { color: var(--mint); font-size: 15px; white-space: nowrap; }
 .buy-error { grid-column: 1 / -1; margin: 0; color: var(--red); }
+.buy-modal { width: min(620px, 100%); }
+form.buy-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.buy-form .field { grid-column: auto; }
+.buy-dialog-summary { grid-column: 1 / -1; display: grid; gap: 9px; padding: 13px 14px;
+  border: 1px solid #2c4150; border-radius: 10px; background: #0d1720; }
+.buy-dialog-balance { display: flex; flex-wrap: wrap; justify-content: space-between;
+  gap: 8px 18px; color: #7f929f; font-size: 11px; }
+.buy-dialog-balance strong { color: var(--text); font-weight: 650; }
 .confirm-summary { display: grid; gap: 9px; margin: 0 0 14px; padding: 13px 14px;
   border: 1px solid #2c4150; border-radius: 10px; background: #0d1720; }
 .confirm-summary > div { display: flex; justify-content: space-between; gap: 14px; }
@@ -390,7 +401,10 @@ form.add button:hover, .login-box button[type=submit]:hover {
   .crumb-root, .meta-label { display: none; }
   .hero { min-height: 160px; margin: 18px 0; padding: 25px 21px; }
   .hero-aside { display: none; }
+  .hero-actions { width: 100%; display: grid; grid-template-columns: 1fr; }
   .hero-refresh { width: 100%; justify-content: center; }
+  form.buy-form { grid-template-columns: 1fr; }
+  .buy-dialog-balance { flex-direction: column; }
   .period-bar { align-items: flex-start; flex-direction: column; gap: 8px; }
   .period-tabs { width: 100%; overflow-x: auto; }
   .period-tabs button { flex: 1; padding: 6px 7px; text-align: center; }

@@ -14,27 +14,33 @@ export function usePx6Account() {
   return useQuery<Px6Account, ApiError>({
     queryKey: ["px6", "account"],
     queryFn: api.px6Account,
-    staleTime: 15_000,
-    refetchInterval: 30_000,
-    refetchOnWindowFocus: true,
+    staleTime: 30_000,
+    refetchOnWindowFocus: false,
     retry: false,
   });
 }
 
-export function usePx6Countries(version: number) {
+export function usePx6Countries(version: number, enabled = false) {
   return useQuery<Px6Countries, ApiError>({
     queryKey: ["px6", "countries", version],
     queryFn: () => api.px6Countries(version),
+    enabled,
     staleTime: 60 * 60 * 1000,
+    refetchOnWindowFocus: false,
     retry: false,
   });
 }
 
-export function usePx6Price(version: number, count: number, period: number) {
+export function usePx6Price(
+  version: number,
+  count: number,
+  period: number,
+  enabled = false,
+) {
   return useQuery<Px6Price, ApiError>({
     queryKey: ["px6", "price", version, count, period],
     queryFn: () => api.px6Price(version, count, period),
-    enabled: count > 0,
+    enabled: enabled && count > 0,
     staleTime: 60_000,
     refetchOnWindowFocus: false,
     retry: false,
@@ -49,9 +55,7 @@ export function useBuyProxies() {
     mutationFn: api.buyProxies,
     onSuccess: (data) => {
       toast.push(localizeApiMessage(data.message));
-      // Use the balance returned by the purchase instead of invalidating all
-      // px6 queries: buy + refresh already spend two px6.net requests, and the
-      // upstream allows only three per second.
+      // Keep the balance card in sync without issuing another px6.net request.
       queryClient.setQueryData<Px6Account>(["px6", "account"], (current) => ({
         user_id: current?.user_id ?? "",
         balance: data.balance,

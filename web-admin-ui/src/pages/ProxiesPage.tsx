@@ -1,55 +1,18 @@
-import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { useMemo, useState } from "react";
 import type { ProxyRow } from "../api/types";
-import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyRow, ErrorBanner, LoadingRows } from "../components/Feedback";
+import { PurchaseProxyDialog } from "../components/PurchaseProxyDialog";
 import { Section } from "../components/Section";
 import { StatCard } from "../components/StatCard";
 import { StatusBadge } from "../components/StatusBadge";
 import { useRefreshProxies, useSetProxy } from "../hooks/useAdminMutations";
-import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useProxiesLive } from "../hooks/useLiveSnapshot";
 import { usePeriod } from "../hooks/usePeriod";
-import { useBuyProxies, usePx6Account, usePx6Countries, usePx6Price } from "../hooks/usePx6";
-import {
-  formatDays,
-  translate,
-  useI18n,
-  type Language,
-  type TranslationKey,
-} from "../i18n";
+import { usePx6Account } from "../hooks/usePx6";
+import { useI18n } from "../i18n";
 import { formatMoney, formatNumber } from "../lib/format";
+import { countryLabel, versionLabel } from "../lib/px6";
 import { proxyState } from "../lib/proxyState";
-
-const VERSIONS: ReadonlyArray<{ value: number; labelKey: TranslationKey }> = [
-  { value: 3, labelKey: "proxies.version3" },
-  { value: 4, labelKey: "proxies.version4" },
-  { value: 6, labelKey: "proxies.version6" },
-];
-
-const PERIODS = [3, 7, 14, 30, 60, 90] as const;
-
-function periodsForVersion(version: number): readonly number[] {
-  return version === 6 ? PERIODS : PERIODS.filter((days) => days >= 7);
-}
-
-function versionLabel(value: string | number, language: Language): string {
-  if (value === "") return "-";
-  const version = String(value);
-  const item = VERSIONS.find((entry) => String(entry.value) === version);
-  return item ? translate(language, item.labelKey) : version;
-}
-
-function countryLabel(code: string, language: Language): string {
-  if (!code) return "—";
-  try {
-    const name = new Intl.DisplayNames([language === "ru" ? "ru" : "en"], {
-      type: "region",
-    }).of(code.toUpperCase());
-    return name ? `${name} (${code.toUpperCase()})` : code.toUpperCase();
-  } catch {
-    return code.toUpperCase();
-  }
-}
 
 function proxyDate(value: string): string {
   if (!value) return "—";
@@ -61,86 +24,15 @@ export function ProxiesPage() {
   const [period] = usePeriod();
   const query = useProxiesLive(period);
   const refreshProxies = useRefreshProxies();
-
   const accountQuery = usePx6Account();
-  const buy = useBuyProxies();
-
-  const [version, setVersion] = useState(6);
-  const [country, setCountry] = useState("");
-  const [countText, setCountText] = useState("1");
-  const [buyPeriod, setBuyPeriod] = useState(30);
-  const periods = periodsForVersion(version);
-  const [confirmOpen, setConfirmOpen] = useState(false);
-
-  const countriesQuery = usePx6Countries(version);
-  const countryList = countriesQuery.data?.countries;
-
-  useEffect(() => {
-    if (!countryList?.length) return;
-    if (!countryList.includes(country)) {
-      setCountry(countryList.includes("ru") ? "ru" : countryList[0]);
-    }
-  }, [countryList, country]);
-
-  const parsedCount = Number(countText);
-  const count = Number.isFinite(parsedCount) && Number.isInteger(parsedCount)
-    ? parsedCount
-    : 0;
-  const countValid = count >= 1 && count <= 1000;
-  const debouncedCount = useDebouncedValue(countValid ? count : 0, 500);
-  const priceQuery = usePx6Price(version, debouncedCount, buyPeriod);
+  const [buyOpen, setBuyOpen] = useState(false);
 
   const account = accountQuery.data;
-  const price = priceQuery.data;
-  const priceReady = Boolean(
-    price &&
-      !priceQuery.isFetching &&
-      price.count === count &&
-      price.period === buyPeriod &&
-      price.version === version,
-  );
-  const currency = price?.currency ?? account?.currency ?? "RUB";
-  const priceText = price
-    ? formatMoney(price.price, price.currency || currency, language)
-    : "—";
-  const priceLoading = countValid && !priceReady && !priceQuery.isError;
-  const balance = account?.balance ?? price?.balance;
-  const balanceAfter =
-    price && priceReady && balance !== undefined
-      ? balance - price.price
-      : undefined;
-
   const summary = query.data?.summary;
   const rows = useMemo(() => query.data?.proxies ?? [], [query.data?.proxies]);
+  const total = summary?.proxies_total ?? rows.length;
   const enabledCount =
     summary?.proxies_enabled ?? rows.filter((row) => row.enabled).length;
-
-  const canBuy = Boolean(
-    country &&
-      countryList?.includes(country) &&
-      countValid &&
-      priceReady &&
-      !buy.isPending &&
-      !countriesQuery.isLoading &&
-      !countriesQuery.isError,
-  );
-
-  const submit = (event: FormEvent<HTMLFormElement>) => {
-    event.preventDefault();
-    if (canBuy) setConfirmOpen(true);
-  };
-
-  const confirmBuy = () => {
-    buy.mutate(
-      {
-        count,
-        period: buyPeriod,
-        country,
-        version,
-      },
-      { onSuccess: () => setConfirmOpen(false) },
-    );
-  };
 
   return (
     <>
@@ -149,17 +41,27 @@ export function ProxiesPage() {
           <div className="eyebrow">{t("proxies.eyebrow")}</div>
           <h1>{t("proxies.title")}</h1>
         </div>
-        <button
-          type="button"
-          className="hero-refresh"
-          disabled={refreshProxies.isPending}
-          title={t("proxies.refreshTitle")}
-          aria-busy={refreshProxies.isPending}
-          onClick={() => refreshProxies.mutate()}
-        >
-          <span aria-hidden="true">↻</span>
-          {refreshProxies.isPending ? t("proxies.refreshing") : t("proxies.refresh")}
-        </button>
+        <div className="hero-actions">
+          <button
+            type="button"
+            className="hero-refresh hero-buy"
+            onClick={() => setBuyOpen(true)}
+          >
+            <span aria-hidden="true">＋</span>
+            {t("proxies.buyTitle")}
+          </button>
+          <button
+            type="button"
+            className="hero-refresh"
+            disabled={refreshProxies.isPending}
+            title={t("proxies.refreshTitle")}
+            aria-busy={refreshProxies.isPending}
+            onClick={() => refreshProxies.mutate()}
+          >
+            <span aria-hidden="true">↻</span>
+            {refreshProxies.isPending ? t("proxies.refreshing") : t("proxies.refresh")}
+          </button>
+        </div>
       </div>
 
       {query.isError ? (
@@ -191,7 +93,7 @@ export function ProxiesPage() {
         />
         <StatCard
           glyph="⇄"
-          value={`${enabledCount}/${summary?.proxies_total ?? rows.length}`}
+          value={`${enabledCount}/${total}`}
           label={t("proxies.enabled")}
         />
         <StatCard
@@ -202,125 +104,12 @@ export function ProxiesPage() {
       </div>
 
       <Section
-        id="buy-title"
-        icon="＋"
-        title={t("proxies.buyTitle")}
-      >
-        <div className="form-content">
-          <form className="add buy-form" onSubmit={submit}>
-            <div className="field">
-              <label htmlFor="buy-version">{t("proxies.version")}</label>
-              <select
-                id="buy-version"
-                value={version}
-                onChange={(event) => {
-                  const nextVersion = Number(event.target.value);
-                  setVersion(nextVersion);
-                  if (!periodsForVersion(nextVersion).includes(buyPeriod)) {
-                    setBuyPeriod(7);
-                  }
-                }}
-              >
-                {VERSIONS.map((item) => (
-                  <option key={item.value} value={item.value}>
-                    {translate(language, item.labelKey)}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="field">
-              <label htmlFor="buy-country">{t("proxies.country")}</label>
-              <select
-                id="buy-country"
-                value={country}
-                disabled={countriesQuery.isLoading || !countryList?.length}
-                onChange={(event) => setCountry(event.target.value)}
-              >
-                {!countryList?.length ? (
-                  <option value="">{t("proxies.loading")}</option>
-                ) : null}
-                {(countryList ?? []).map((code) => (
-                  <option key={code} value={code}>
-                    {countryLabel(code, language)}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="field">
-              <label htmlFor="buy-count">{t("proxies.count")}</label>
-              <input
-                id="buy-count"
-                type="text"
-                inputMode="numeric"
-                autoComplete="off"
-                value={countText}
-                onChange={(event) => setCountText(event.target.value.replace(/\D/g, ""))}
-              />
-            </div>
-
-            <div className="field">
-              <label htmlFor="buy-period">{t("proxies.period")}</label>
-              <select
-                id="buy-period"
-                value={buyPeriod}
-                onChange={(event) => setBuyPeriod(Number(event.target.value))}
-              >
-                {periods.map((days) => (
-                  <option key={days} value={days}>
-                    {formatDays(days, language)}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            {countriesQuery.isError ? (
-              <p className="form-hint buy-error">
-                {t("proxies.countriesError", {
-                  message: countriesQuery.error?.message ?? "",
-                })}
-              </p>
-            ) : null}
-            {priceQuery.isError ? (
-              <p className="form-hint buy-error">
-                {t("proxies.priceError", {
-                  message: priceQuery.error?.message ?? "",
-                })}
-              </p>
-            ) : null}
-
-            <div className="form-footer">
-              <div className="buy-summary">
-                <span className="muted">
-                  {countValid
-                    ? t("proxies.summary", {
-                        count,
-                        version: versionLabel(version, language),
-                        country: countryLabel(country, language),
-                        days: formatDays(buyPeriod, language),
-                      })
-                    : t("proxies.invalidCount")}
-                </span>
-                <strong className="buy-price">
-                  {priceLoading ? t("common.calculating") : priceText}
-                </strong>
-              </div>
-              <button type="submit" disabled={!canBuy}>
-                {buy.isPending ? t("common.buying") : t("common.buy")}
-              </button>
-            </div>
-          </form>
-        </div>
-      </Section>
-
-      <Section
         id="proxies-title"
         icon="⇄"
         title={t("proxies.listTitle")}
         note={t("proxies.listNote", {
           enabled: enabledCount,
-          total: summary?.proxies_total ?? rows.length,
+          total,
         })}
       >
         <div className="table-scroll">
@@ -349,44 +138,7 @@ export function ProxiesPage() {
         </div>
       </Section>
 
-      <ConfirmDialog
-        open={confirmOpen}
-        title={t("proxies.confirmTitle")}
-        confirmLabel={t("common.buy")}
-        pendingLabel={t("common.buying")}
-        tone="accent"
-        pending={buy.isPending}
-        onCancel={() => !buy.isPending && setConfirmOpen(false)}
-        onConfirm={confirmBuy}
-      >
-        <dl className="confirm-summary">
-          <div>
-            <dt>{t("proxies.confirmProxies")}</dt>
-            <dd>
-              {count} × {versionLabel(version, language)},{" "}
-              {countryLabel(country, language)}
-            </dd>
-          </div>
-          <div>
-            <dt>{t("proxies.confirmPeriod")}</dt>
-            <dd>{formatDays(buyPeriod, language)}</dd>
-          </div>
-          <div>
-            <dt>{t("proxies.confirmPrice")}</dt>
-            <dd>
-              {priceQuery.isFetching ? t("common.calculating") : priceText}
-            </dd>
-          </div>
-          <div>
-            <dt>{t("proxies.confirmBalanceAfter")}</dt>
-            <dd>
-              {balanceAfter !== undefined
-                ? formatMoney(balanceAfter, currency, language)
-                : "—"}
-            </dd>
-          </div>
-        </dl>
-      </ConfirmDialog>
+      <PurchaseProxyDialog open={buyOpen} onClose={() => setBuyOpen(false)} />
     </>
   );
 }
