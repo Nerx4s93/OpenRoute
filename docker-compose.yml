@@ -9,8 +9,8 @@ name: openroute
 services:
   # --- edge: ЕДИНСТВЕННАЯ точка входа (API Gateway-паттерн) ---
   # Наружу (0.0.0.0:${OPENROUTE_EDGE_PORT:-53202}) торчит только nginx;
-  # gateway, web-admin и web-admin-ui прячутся в docker-сети, их порты хосту не
-  # публикуются. /internal/* наружу не маршрутизируется вообще.
+  # gateway, auth-service, web-admin и web-admin-ui прячутся в docker-сети,
+  # их порты хосту не публикуются. /internal/* наружу не маршрутизируется.
   # Хост-порт настраивается через OPENROUTE_EDGE_PORT (по умолчанию 53202;
   # NVRoute занимает 53201) — оба стека работают одновременно.
   edge:
@@ -125,8 +125,8 @@ services:
       postgres:
         condition: service_healthy
 
-  # --- Redis: хранилище сессий web-admin. Только приватная internal-сеть
-  # openroute-redis-net (с web-admin); порт наружу НЕ публикуется. AOF
+  # --- Redis: хранилище сессий auth-service. Только приватная internal-сеть
+  # openroute-redis-net (с auth-service); порт наружу НЕ публикуется. AOF
   # (everysec) + том: сессии переживают рестарт. allkeys-lru: при нехватке
   # памяти выгоняются старейшие ключи (только сессии), Redis не падает.
   redis:
@@ -155,6 +155,42 @@ services:
       start_period: 5s
     networks:
       - redis_net
+
+  # --- auth-service: приватный auth/session-сервис админки. Единственный
+  # компонент, который знает ADMIN_PASSWORD и ходит в Redis. Web-admin
+  # обращается к нему по HTTP в private-сети openroute-auth-net; edge его не
+  # маршрутизирует, хост-порт не публикуется. Вторая сеть — openroute-redis-net
+  # (только Redis), поэтому у web-admin нет сети/маршрута до Redis.
+  auth-service:
+    build: ./auth-service
+    image: openroute-auth
+    container_name: openroute-auth
+    env_file:
+      - ./auth-service/.env
+    restart: unless-stopped
+    init: true
+    mem_limit: 128m
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=3)"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - auth_net
+      - redis_net
+    depends_on:
+      redis:
+        condition: service_healthy
 
   # --- шлюз OpenRoute: data plane (/v1/*, /health, /docs)
   # + internal API (/internal/*, X-Internal-Token) для web-admin ---
@@ -207,10 +243,12 @@ services:
       storage-service:
         condition: service_healthy
 
-  # --- web-admin: control plane (JSON API /api/admin/* + сессии в Redis).
+  # --- web-admin: control plane (JSON API /api/admin/*).
   # Данными владеет шлюз; сюда ходит через его internal API с общим секретом.
-  # Сети: openroute-net (edge -> /api/admin) и openroute-redis-net (сессии).
-  # К storage-service и PostgreSQL не подключён.
+  # Аутентификация/сессии/CSRF — в auth-service. Сети: openroute-net
+  # (edge -> /api/admin, gateway -> /internal) и openroute-auth-net
+  # (web-admin -> auth-service). К Redis, storage-service и PostgreSQL не
+  # подключён.
   # Имя сервиса = DNS-имя в сети (web-admin:8000); на него ссылается
   # upstream в edge/nginx.conf — не переименовывать в одну сторону.
   web-admin:
@@ -238,11 +276,11 @@ services:
       start_period: 10s
     networks:
       - net
-      - redis_net
+      - auth_net
     depends_on:
       gateway:
         condition: service_healthy
-      redis:
+      auth-service:
         condition: service_healthy
 
   # --- web-admin-ui: React SPA (статика nginx), отдельный контейнер.
@@ -332,7 +370,14 @@ networks:
     name: openroute-storage-db-net
     internal: true
 
-  # web-admin <-> Redis. Redis доступен только web-admin, не edge/gateway.
+  # web-admin <-> auth-service. Auth-service — единственный клиент auth-контура
+  # для web-admin; edge/gateway сюда не подключены.
+  auth_net:
+    name: openroute-auth-net
+    internal: true
+
+  # auth-service <-> Redis. Redis доступен только auth-service, не web-admin,
+  # не edge и не gateway.
   redis_net:
     name: openroute-redis-net
     internal: true

@@ -1,13 +1,16 @@
-"""Admin session store: Redis (survives web-admin restarts).
+"""Admin session store: Redis (sessions survive restarts).
 
 Key ``openroute:session:<sid>`` -> JSON ``{"csrf": str, "expires": float}``.
 Redis TTL == session TTL, so expired entries evict themselves. Only the sid is
-handed to the client (HttpOnly cookie); validity comes solely from the store.
+handed to the client by web-admin (HttpOnly cookie); validity comes solely
+from this server-side store.
 
 The async interface is minimal (put/get/delete/count/aclose) so hermetic tests
 can substitute an in-memory fake. Redis unavailability -> ``SessionUnavailable``
 -> 503 in ``main.py`` (login/validation must not "fail open").
 """
+
+from __future__ import annotations
 
 import json
 
@@ -22,7 +25,7 @@ class RedisSessionStore:
     """Sessions in Redis: sid -> ``{"csrf": str, "expires": float}``.
 
     The ``expires`` field duplicates the key TTL (``ex=ttl``) as a second line
-    of defence, checked in ``main._session_from_request``.
+    of defence, checked in ``main._load_session``.
     """
 
     PREFIX = "openroute:session:"

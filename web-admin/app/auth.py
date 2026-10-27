@@ -1,26 +1,15 @@
-"""Authentication, sessions and CSRF for the OpenRoute admin API.
+"""Browser-side auth helpers for the OpenRoute admin API.
 
-The browser only receives an HttpOnly session cookie; the session itself lives
-in Redis (``sessions.RedisSessionStore``). Every mutating request must also
-carry the per-session CSRF token in the ``X-CSRF-Token`` header. There are no
-signatures or claims in the cookie — validity comes solely from the server-side
-store, so a forged cookie can never authenticate.
+The auth-service owns password verification, sessions and CSRF. This module
+only handles the HttpOnly session cookie and the real client IP forwarded by
+edge; there is no Redis client here.
 """
 
 from __future__ import annotations
 
-import hmac
-import secrets
-import time
-from typing import Any
-
-from fastapi import HTTPException, Request, Response
-
-from .config import Settings
+from fastapi import Request, Response
 
 SESSION_COOKIE = "openroute_session"
-LOGIN_FAILS_MAX = 10
-LOGIN_FAILS_WINDOW = 60.0
 
 
 def client_ip(request: Request) -> str:
@@ -43,42 +32,13 @@ def is_https(request: Request) -> bool:
     return request.url.scheme == "https"
 
 
-def check_password(password: str, settings: Settings) -> bool:
-    return hmac.compare_digest(
-        password.encode("utf-8"), settings.admin_password.encode("utf-8")
-    )
-
-
-async def new_session(settings: Settings, store: Any) -> dict:
-    """Create a server-side session and return ``{sid, csrf, expires}``."""
-    sid = secrets.token_urlsafe(32)
-    session = {
-        "csrf": secrets.token_urlsafe(24),
-        "expires": time.time() + settings.admin_session_ttl_seconds,
-    }
-    await store.put(sid, session, settings.admin_session_ttl_seconds)
-    return {"sid": sid, **session}
-
-
-async def session_from_request(request: Request, settings: Settings, store: Any) -> dict | None:
-    """Load and validate the session referenced by the cookie."""
-    sid = request.cookies.get(SESSION_COOKIE, "")
-    if not sid:
-        return None
-    session = await store.get(sid)
-    if session is None:
-        return None
-    if time.time() > float(session.get("expires", 0)):
-        await store.delete(sid)
-        return None
-    return {"sid": sid, **session}
-
-
-def set_session_cookie(resp: Response, sid: str, request: Request, settings: Settings) -> None:
+def set_session_cookie(
+    resp: Response, sid: str, max_age: int, request: Request
+) -> None:
     resp.set_cookie(
         SESSION_COOKIE,
         sid,
-        max_age=settings.admin_session_ttl_seconds,
+        max_age=max_age,
         httponly=True,
         samesite="strict",
         secure=is_https(request),
@@ -86,7 +46,7 @@ def set_session_cookie(resp: Response, sid: str, request: Request, settings: Set
     )
 
 
-def clear_session_cookie(resp: Response, request: Request, settings: Settings) -> None:
+def clear_session_cookie(resp: Response, request: Request) -> None:
     resp.delete_cookie(
         SESSION_COOKIE,
         path="/",
@@ -94,24 +54,3 @@ def clear_session_cookie(resp: Response, request: Request, settings: Settings) -
         samesite="strict",
         secure=is_https(request),
     )
-
-
-def check_csrf(request: Request, session: dict) -> None:
-    """Constant-time comparison of the per-session CSRF token."""
-    got = request.headers.get("x-csrf-token", "")
-    expected = str(session.get("csrf", ""))
-    if not expected or not hmac.compare_digest(got.encode("utf-8"), expected.encode("utf-8")):
-        raise HTTPException(403, "Неверный CSRF-токен")
-
-
-def login_retry_after(fails: list[float], now: float | None = None) -> float:
-    """Seconds until another login attempt is allowed (0 = allowed).
-
-    Mutates ``fails`` in place, dropping attempts outside the rolling window.
-    """
-    now = time.time() if now is None else now
-    cutoff = now - LOGIN_FAILS_WINDOW
-    fails[:] = [t for t in fails if t >= cutoff]
-    if len(fails) >= LOGIN_FAILS_MAX:
-        return max(0.0, LOGIN_FAILS_WINDOW - (now - fails[0]))
-    return 0.0

@@ -17,10 +17,15 @@ OpenAI-совместимый API-шлюз, который балансируе�
   HTTP без токена: сервис доступен только в приватной сети
   `openroute-storage-api-net`, а DSN gateway не получает никогда; без
   storage-service он не стартует.
+- **Аутентификация админки**: пароль, серверные сессии, CSRF и throttling
+  принадлежат приватному `auth-service`. `web-admin` не получает
+  `REDIS_URL`/`ADMIN_PASSWORD` и ходит в auth-service по HTTP в сети
+  `openroute-auth-net`; только auth-service подключён к Redis.
 - **Сети**: Compose сам создаёт `openroute-net` (edge/front), приватные
   `openroute-storage-api-net`, `openroute-storage-db-net`,
-  `openroute-redis-net` и `openroute-px6-net`; вручную `docker network create`
-  не нужен. Gateway не подключён к сетям PostgreSQL и Redis.
+  `openroute-auth-net`, `openroute-redis-net` и `openroute-px6-net`; вручную
+  `docker network create` не нужен. Gateway не подключён к сетям PostgreSQL,
+  Redis и auth-service.
 - При старте и периодически шлюз забирает **все активные прокси** из
   `px6-service` (обёртка над API [px6.net](https://px6.net)). Комментарий
   `descr` больше не фильтруется: новые прокси добавляются в пул **выключенными**,
@@ -90,7 +95,8 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
 
    Внутри OpenRoute (сегментированные сети, см. ниже):
    [gateway] ── HTTP (private net, без токена) ──► [storage-service] ── SQL ──► [PostgreSQL]
-   [web-admin] ── openroute-redis-net ──► [redis]
+   [web-admin] ── openroute-auth-net ──► [auth-service] ── openroute-redis-net ──► [redis]
+   [web-admin] ── openroute-net ──► [gateway] /internal/*
    [gateway] ── openroute-px6-net ──► [px6-service]
 ```
 
@@ -110,9 +116,10 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
                                                      (proxies + keys + session_affinity
                                                       + proxy_personas + request_log)
    [gateway] ──► opencode.ai                        (free-tier инференс через прокси)
-   [web-admin] ── openroute-redis-net ──► [Redis]   (серверные сессии админки)
    [web-admin] ── openroute-net ──► [gateway] /internal/*
                                                       (X-Internal-Token; edge /internal/* не маршрутизирует)
+   [web-admin] ── openroute-auth-net ──► [auth-service] ── openroute-redis-net ──► [Redis]
+                                                      (пароль, сессии, CSRF, throttling)
 ```
 
 - **`edge/`** — nginx: единственная точка входа, маршрутизация на сервисы;
@@ -132,9 +139,18 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
   `openroute-storage-db-net` (PostgreSQL); слушает `8000` только в первой,
   хост-порт не публикуется, edge его не маршрутизирует, публичного `/docs` нет.
 - **`web-admin/`** — backend админки (control plane): JSON API
-  `/api/admin/*`, сессии в Redis, CSRF, SSE; своими данными не владеет —
-  ходит в шлюз по internal API. Подключён к `openroute-net` (edge) и
-  `openroute-redis-net`.
+  `/api/admin/*`, HttpOnly cookie сессии и SSE; своими данными не владеет —
+  ходит в шлюз по internal API и в auth-service за проверкой пароля,
+  сессии и CSRF. Подключён к `openroute-net` (edge/gateway) и
+  `openroute-auth-net` (auth-service). Redis и `ADMIN_PASSWORD` ему не
+  передаются.
+- **`auth-service/`** — приватный FastAPI-сервис аутентификации
+  (`openroute-auth`): единственный владелец `ADMIN_PASSWORD`,
+  `ADMIN_SESSION_TTL_SECONDS` и Redis-сессий. Отдаёт `login`, `validate`,
+  `logout`, `status` и `/health`; хранит сессии в Redis под
+  `openroute:session:<sid>`. Подключён к `openroute-auth-net` (web-admin) и
+  `openroute-redis-net` (Redis); хост-порт не публикует, edge его не
+  маршрутизирует.
 - **`web-admin-ui/`** — React SPA (React + TypeScript + Vite + React Router +
   TanStack Query) в отдельном контейнере nginx. Секретов не получает; все
   данные — через `/api/admin/*`. Подключён только к `openroute-net`.
@@ -147,7 +163,8 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
   `pgdata`; подключён только к `openroute-storage-db-net`, порт наружу не
   публикуется, DSN знает только storage-service.
 - **`redis`** — Redis 7: сессии админки (том `redisdata`); подключён только к
-  `openroute-redis-net`, порт наружу не публикуется.
+  `openroute-redis-net`, где единственный клиент — auth-service. Порт наружу
+  не публикуется, web-admin и gateway сети Redis не видят.
 
 ### Docker-сети
 
@@ -159,16 +176,20 @@ Compose создаёт все сети сам; `docker network create` не ну
 | `openroute-net` | нет | edge, gateway, web-admin, web-admin-ui | ingress от edge; gateway ходит в интернет |
 | `openroute-storage-api-net` | да | gateway, storage-service | HTTP без токена (только gateway) |
 | `openroute-storage-db-net` | да | storage-service, postgres | SQL; gateway сюда не подключён |
-| `openroute-redis-net` | да | web-admin, redis | сессии админки |
+| `openroute-auth-net` | да | web-admin, auth-service | HTTP auth API; edge/gateway сюда не подключены |
+| `openroute-redis-net` | да | auth-service, redis | сессии админки; web-admin сюда не подключён |
 | `openroute-px6-net` | нет | gateway, px6-service | px6.net: нужен внешний egress |
 
-`internal: true` убирает default route у сети: storage-service, PostgreSQL и
-Redis не ходят наружу, а gateway не видит PostgreSQL и Redis. Это
-сегментация от случайного/бокового трафика между контейнерами, но не граница
-от root на хосте. `storage-service` не имеет собственной аутентификации:
-единственный клиент в его сети — gateway. Токен `X-Internal-Token` остаётся
-defense-in-depth для `/internal/*` шлюза: единственный клиент — web-admin, а
-edge этот префикс не маршрутизирует, в том числе при ошибке конфигурации.
+`internal: true` убирает default route у сети: storage-service, auth-service,
+PostgreSQL и Redis не ходят наружу, а gateway не видит PostgreSQL, Redis и
+auth-service. Это сегментация от случайного/бокового трафика между
+контейнерами, но не граница от root на хосте. `storage-service` не имеет
+собственной аутентификации: единственный клиент в его сети — gateway.
+`auth-service` тоже без отдельного токена: единственный клиент в
+`openroute-auth-net` — web-admin, а edge этот контур не маршрутизирует. Токен
+`X-Internal-Token` остаётся defense-in-depth для `/internal/*` шлюза:
+единственный клиент — web-admin, а edge этот префикс не маршрутизирует, в том
+числе при ошибке конфигурации.
 
 ### Отказ storage-service
 
@@ -187,6 +208,23 @@ edge этот префикс не маршрутизирует, в том чис
   изменении/backoff). Уже сохранённые в PostgreSQL данные не теряются и снова
   видны после восстановления.
 
+### Отказ auth-service
+
+- **Старт**: `web-admin` ждёт здоровый `auth-service` (compose
+  `condition: service_healthy`), а тот — здоровый Redis. Без auth-service
+  админка не стартует; gateway и `/v1/*` от него не зависят.
+- **После старта**: при недоступном auth-service `web-admin` не работает без
+  аутентификации: `/api/admin/session`, `/api/admin/login`, защищённые
+  `/api/admin/*` и `/health` отвечают 503, SSE-поток завершается. Пароль,
+  сессии и CSRF не кэшируются в web-admin.
+- **Redis**: auth-service отвечает 503 (`Хранилище сессий недоступно`) на
+  login/validate/logout, если не может создать, проверить или удалить сессию;
+  `/auth/status` и `/health` при выключенной админке не трогают Redis. Уже
+  сохранённые в томе `redisdata` сессии переживают рестарт auth-service.
+- **Выключенная админка**: пустой `ADMIN_PASSWORD` → auth-service отвечает
+  404 на login/validate/logout, поэтому web-admin отдаёт 404 на
+  `/api/admin/*` (включая `/api/admin/session`). `/health` остаётся
+  liveness-проверкой, `/auth/status` продолжает отвечать `enabled: false`.
 
 ---
 
@@ -219,9 +257,15 @@ OpenRoute/
 │   └── README.md             # контракты storage-service
 ├── edge/                     # nginx: nginx.conf, proxy_params_edge.conf, Dockerfile
 ├── px6-service/              # РЕАЛИЗОВАНО: px6.net → все активные прокси, баланс, покупка
-├── web-admin/                # РЕАЛИЗОВАНО: JSON API (config, sessions, auth, gateway, schemas, main)
+├── auth-service/             # РЕАЛИЗОВАНО: приватный auth/session-сервис админки
+│   ├── app/                  # FastAPI: config, sessions (Redis), schemas, main
+│   ├── Dockerfile
+│   ├── requirements.txt      # fastapi/uvicorn/pydantic-settings/redis
+│   ├── .env.example          # ADMIN_PASSWORD + TTL + REDIS_URL (реальный .env не коммитится)
+│   └── README.md             # границы безопасности, API, сессии/CSRF
+├── web-admin/                # РЕАЛИЗОВАНО: JSON API (config, auth_client, auth, gateway, schemas, main)
 ├── web-admin-ui/             # РЕАЛИЗОВАНО: React SPA (Vite, React Router, TanStack Query)
-└── tests/                    # pytest: шлюз, storage-service/storage client, прокси, ключи, лог, админка, px6, opencode
+└── tests/                    # pytest: шлюз, storage-service/storage client, прокси, ключи, лог, админка/auth, px6, opencode
 ```
 
 ---
@@ -506,9 +550,9 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 | GET | `/admin/stats`, `/admin/proxies`, `/admin/keys` | web-admin-ui | SPA-страницы «Статистика», «Прокси» и «Ключи» |
 | GET | `/admin` | web-admin-ui | SPA-редирект на `/admin/stats` с сохранением query |
 | GET | `/assets/*` | web-admin-ui | Хэшированные статические файлы SPA |
-| GET | `/api/admin/session` | web-admin | Текущая сессия + CSRF-токен (200 и без входа) |
-| POST | `/api/admin/login` | web-admin | Вход по паролю; HttpOnly cookie сессии |
-| POST | `/api/admin/logout` | web-admin | Выход (CSRF; сессия удаляется в Redis) |
+| GET | `/api/admin/session` | web-admin | Текущая сессия + CSRF-токен (200 и без входа; данные из auth-service) |
+| POST | `/api/admin/login` | web-admin | Вход по паролю (проверяет auth-service); HttpOnly cookie сессии |
+| POST | `/api/admin/logout` | web-admin | Выход (CSRF; сессия удаляется в auth-service/Redis) |
 | GET | `/api/admin/proxies?period=` | web-admin | JSON-снапшот пула: статусы, расходы, последние запросы, `totals` |
 | GET | `/api/admin/stats` (`days` / `period`) | web-admin | Токены по прокси и UTC-дням: 1..365 дней или окно `1d/3d/7d/30d/90d/all` |
 | GET | `/api/admin/keys?period=` | web-admin | JSON-снапшот ключей и статистики |
@@ -564,6 +608,32 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 personas, request-log/stats) — в `storage-service/README.md`; gateway
 обращается к ним через `gateway/storage.py`. Наружу этот API не выходит.
 
+### auth-service (приватный API)
+
+`auth-service` доступен как `openroute-auth:8000` в `openroute-auth-net`
+(internal), куда подключён лишь `web-admin`; второй интерфейс —
+`openroute-redis-net` для Redis. Хост-порта нет, edge его не маршрутизирует,
+публичного `/docs`/OpenAPI нет. Сервис — единственный владелец
+`ADMIN_PASSWORD`, `ADMIN_SESSION_TTL_SECONDS` и Redis-сессий; `web-admin` не
+получает `REDIS_URL`.
+
+| Метод | Путь | Описание |
+|-------|------|----------|
+| GET | `/health` | liveness + `enabled` + число сессий в Redis |
+| GET | `/auth/status` | `{"enabled": bool}`; не трогает Redis |
+| POST | `/auth/login` | `{password, client_ip}` → `{sid, csrf, expires_at, max_age}`; 401/429 |
+| POST | `/auth/validate` | `{sid, csrf, require_csrf}` → сессия; 401/403 |
+| POST | `/auth/logout` | `{sid, csrf}` → 204; 401/403 |
+
+Сессии лежат в Redis под `openroute:session:<sid>` как
+`{"csrf": str, "expires": float}`; формат совместим с прежними сессиями
+`web-admin`. CSRF проверяется constant-time при `require_csrf=true` и при
+logout. Login throttling — 10 неудач за 60 секунд на `client_ip`, который
+`web-admin` берёт из доверенного `X-Real-IP` edge. Пустой
+`ADMIN_PASSWORD` → 404 на login/validate/logout; недоступный Redis → 503
+(`Хранилище сессий недоступно`), без fail-open. Контракты и запуск —
+в `auth-service/README.md`.
+
 ## Клиентские ключи
 
 - Секрет генерирует gateway через `gateway/keys.py:generate_key()`:
@@ -606,6 +676,16 @@ personas, request-log/stats) — в `storage-service/README.md`; gateway
 | 503 | storage-service недоступен при мутации ключа или прокси | OpenAI-конверт (`Storage service unavailable`); состояние не меняется |
 | 504 | исчерпан бюджет ретраев `RETRY_BUDGET_SECONDS` | OpenAI-конверт |
 
+Админка (`web-admin` + auth-service) использует те же коды для своих ошибок:
+
+- `404` — `ADMIN_PASSWORD` пуст (админка выключена);
+- `401` — нет/истекла сессия или неверный пароль;
+- `403` — неверный `X-CSRF-Token`;
+- `429` — больше 10 неудачных попыток входа за минуту с одного IP
+  (`Retry-After`);
+- `503` — auth-service или его Redis недоступен; запрос не выполняется без
+  проверки сессии.
+
 ---
 
 ## Запуск для разработки
@@ -616,7 +696,8 @@ personas, request-log/stats) — в `storage-service/README.md`; gateway
 # перед первым запуском: скопируйте примеры и задайте секреты
 cp .env.example .env                                   # INTERNAL_API_TOKEN
 cp storage-service/.env.example storage-service/.env   # POSTGRES_DSN
-cp web-admin/.env.example web-admin/.env               # ADMIN_PASSWORD + тот же INTERNAL_API_TOKEN
+cp auth-service/.env.example auth-service/.env         # ADMIN_PASSWORD + REDIS_URL
+cp web-admin/.env.example web-admin/.env               # AUTH_SERVICE_URL + тот же INTERNAL_API_TOKEN
 cp px6-service/.env.example px6-service/.env           # PX6_API_KEY
 
 docker compose up --build -d                 # весь стек одной командой; сети создаёт compose
@@ -626,10 +707,10 @@ docker compose logs -f storage-service       # логи сервиса хран�
 docker compose down                          # остановка всего
 ```
 
-Все пять сетей создаются Compose автоматически; `docker network create` не
+Все шесть сетей создаются Compose автоматически; `docker network create` не
 нужен. При обновлении со старой плоской схемы `docker compose up -d --build`
-создаст недостающие private-сети и пересоздаст контейнеры; тома `pgdata` и
-`redisdata` сохраняются.
+создаст недостающие private-сети (`openroute-auth-net` в том числе) и
+пересоздаст контейнеры; тома `pgdata` и `redisdata` сохраняются.
 
 Токена для storage-service нет: gateway ходит в него по
 `STORAGE_SERVICE_URL` в приватной сети `openroute-storage-api-net`, куда
@@ -637,12 +718,20 @@ docker compose down                          # остановка всего
 `storage-service` (в compose — `postgres:5432`); gateway его не знает и
 зависит от `storage-service` (healthy), а не от `postgres`.
 
+`auth-service` не имеет отдельного токена: единственный клиент в
+`openroute-auth-net` — `web-admin`, а `edge` этот контур не маршрутизирует.
+`web-admin` знает только `AUTH_SERVICE_URL`; `ADMIN_PASSWORD`,
+`ADMIN_SESSION_TTL_SECONDS` и `REDIS_URL` получает **только** auth-service.
+Compose запускает auth-service после healthy Redis, а web-admin — после
+healthy gateway и auth-service.
+
 Наружу смотрит **только edge** на http://127.0.0.1:53202 (хост-порт задаёт
 `OPENROUTE_EDGE_PORT`): и API (`/v1`), и админка (`/`, `/login`,
 `/admin/*`, `/api/admin/*`).
-Сервисы (gateway, storage-service, web-admin, web-admin-ui, px6, postgres,
-redis) хостовых портов не публикуют; у `storage-service` нет и маршрута в
-edge. Данные — в томах `pgdata`/`redisdata` (удаляются только
+Сервисы (gateway, storage-service, auth-service, web-admin, web-admin-ui, px6,
+postgres, redis) хостовых портов не публикуют; у `storage-service` и
+`auth-service` нет и маршрута в edge. Данные — в томах `pgdata`/`redisdata`
+(удаляются только
 `docker compose down -v`). `docker compose stop` ждёт до 320 с
 (`stop_grace_period`), чтобы стримы доработали до конца; storage-service
 останавливается за 30 с.
@@ -650,11 +739,12 @@ edge. Данные — в томах `pgdata`/`redisdata` (удаляются т
 > **Сосуществование с NVRoute.** OpenRoute полностью изолирован от соседнего
 > стека NVRoute: у него собственные сегментированные docker-сети
 > (`openroute-net`, `openroute-storage-api-net`, `openroute-storage-db-net`,
-> `openroute-redis-net`, `openroute-px6-net`; не общая `service-net`),
-> уникальные имена контейнеров (`openroute-px6`,
-> `openroute-storage`, `openroute-postgres`, `openroute-redis`; остальные —
-> автоимена `openroute-gateway-*`, `openroute-web-admin-*` и
-> `openroute-web-admin-ui-*`) и собственный хост-порт edge
+> `openroute-auth-net`, `openroute-redis-net`, `openroute-px6-net`; не общая
+> `service-net`), уникальные имена контейнеров (`openroute-px6`,
+> `openroute-storage`, `openroute-auth`, `openroute-postgres`,
+> `openroute-redis`; остальные — автоимена `openroute-gateway-*`,
+> `openroute-web-admin-*` и `openroute-web-admin-ui-*`) и собственный
+> хост-порт edge
 > `OPENROUTE_EDGE_PORT` (по умолчанию 53202;
 > NVRoute занимает 53201). Оба стека поднимаются одновременно и не
 > конфликтуют.
@@ -663,42 +753,65 @@ edge. Данные — в томах `pgdata`/`redisdata` (удаляются т
 
 ```bash
 python3 -m venv .venv && source .venv/bin/activate
-pip install -r requirements.txt -r storage-service/requirements.txt
+pip install -r requirements.txt -r storage-service/requirements.txt \
+  -r auth-service/requirements.txt -r web-admin/requirements.txt
 
-# терминал 1: storage-service (нужен доступный PostgreSQL)
+# терминал 1: Redis для сессий админки (или свой локальный Redis на :6379)
+docker run --rm -p 127.0.0.1:6379:6379 redis:7-alpine
+
+# терминал 2: storage-service (нужен доступный PostgreSQL)
 cd storage-service
 cp .env.example .env          # POSTGRES_DSN
 uvicorn openroute_storage.main:app --host 127.0.0.1 --port 8010 --no-access-log
 
-# терминал 2: px6-service (из корня репозитория)
+# терминал 3: px6-service (из корня репозитория)
 cd px6-service && uvicorn app.main:app --host 127.0.0.1 --port 8001  # PX6_API_KEY=...
 
-# терминал 3: gateway (из корня репозитория)
+# терминал 4: auth-service (из корня репозитория)
+cd auth-service
+cp .env.example .env          # ADMIN_PASSWORD, ADMIN_SESSION_TTL_SECONDS
+REDIS_URL=redis://127.0.0.1:6379/0 \
+  uvicorn app.main:app --host 127.0.0.1 --port 8011 --no-access-log
+
+# терминал 5: gateway (из корня репозитория; 8003 — чтобы не конфликтовать
+# с web-admin на 8000)
 STORAGE_SERVICE_URL=http://127.0.0.1:8010 \
 PROXIES_URL=http://127.0.0.1:8001/proxies \
 PX6_SERVICE_URL=http://127.0.0.1:8001 \
-  uvicorn gateway.main:app --host 127.0.0.1 --port 8000
+  uvicorn gateway.main:app --host 127.0.0.1 --port 8003
+
+# терминал 6: web-admin (из корня репозитория)
+cd web-admin && AUTH_SERVICE_URL=http://127.0.0.1:8011 \
+  GATEWAY_INTERNAL_URL=http://127.0.0.1:8003 \
+  uvicorn app.main:app --host 127.0.0.1 --port 8000
 ```
 
 `STORAGE_SERVICE_URL` — база storage-service; локально выбран порт `8010`,
-чтобы не конфликтовать с gateway на `8000` (в контейнере сервис слушает
+чтобы не конфликтовать с gateway на `8003` (в контейнере сервис слушает
 `8000`). Токен не нужен: локально сервис слушает loopback и доступен только
 запущенным на этой же машине процессам. `POSTGRES_DSN` задаётся **только** в
 `storage-service/.env` (по умолчанию
 `postgresql://openroute:openroute@localhost:5432/openroute`); схема создаётся
 storage-service при первом подключении, а gateway без доступного
 storage-service не стартует. `PX6_SERVICE_URL` — база px6-service (без
-`/proxies`) для баланса, стран, цены и покупки. Без Docker edge нет: backend
-админки запускается отдельно (`web-admin/`), а SPA — через `npm run dev` в
-`web-admin-ui/` (Vite проксирует `/api` на `127.0.0.1:8000`).
+`/proxies`) для баланса, стран, цены и покупки. `auth-service` локально
+запускается на `8011` с `REDIS_URL=redis://127.0.0.1:6379/0`; `web-admin`
+знает только `AUTH_SERVICE_URL=http://127.0.0.1:8011` и
+`GATEWAY_INTERNAL_URL=http://127.0.0.1:8003`, а сам слушает `8000`.
+Без Docker edge нет: backend админки запускается отдельно (`web-admin/`), а
+SPA — через `npm run dev` в `web-admin-ui/` (Vite проксирует `/api` на
+`127.0.0.1:8000`).
 
 Обновление с предыдущей версии: отдельная миграция не нужна — storage-service
 идемпотентно применяет ту же схему к существующему тому `pgdata`, включая
 индекс `request_log(account, ts)`. После `docker compose up --build -d`
-Compose сам создаст private-сети и пересоздаст контейнеры; тома `pgdata` и
-`redisdata` сохраняются. Нужно лишь перенести `POSTGRES_DSN` в
-`storage-service/.env`; отдельный секрет для storage больше не нужен, его
-можно удалить из обоих `.env`.
+Compose сам создаст private-сети (`openroute-auth-net` в том числе) и
+пересоздаст контейнеры; тома `pgdata` и `redisdata` сохраняются. Нужно
+перенести `POSTGRES_DSN` в `storage-service/.env`, а `ADMIN_PASSWORD`,
+`ADMIN_SESSION_TTL_SECONDS` и `REDIS_URL` — из `web-admin/.env` в
+`auth-service/.env`; отдельный секрет для storage больше не нужен, его можно
+удалить из обоих `.env`. Формат сессий в Redis не меняется, поэтому активные
+сессии админки переживают переключение на auth-service.
 
 ---
 
@@ -708,17 +821,18 @@ Compose сам создаст private-сети и пересоздаст кон�
 |---|---|
 | `gateway/` (шлюз: `main`, `config`, `proxies`, `affinity`, `personas`, `keys`, `reqlog`, `storage`, `opencode`, `sessions`, `px6`, `curlclient`) | **реализовано**; прямые SQL-модули удалены, остался только `StorageClient` |
 | `storage-service/` (`openroute_storage`: FastAPI, `config`, `db`, `schema`, `schemas`, `services`; Dockerfile, `.env.example`, README) | **реализовано** — единственный владелец SQL/PostgreSQL |
-| `web-admin/` (JSON API: `config`, `sessions`, `auth`, `gateway`, `schemas`, `main`) | **реализовано** |
+| `auth-service/` (`app`: FastAPI, `config`, `sessions` (Redis), `schemas`, `main`; Dockerfile, `.env.example`, README) | **реализовано** — пароль, сессии, CSRF, throttling; единственный клиент Redis |
+| `web-admin/` (JSON API: `config`, `auth_client`, `auth`, `gateway`, `schemas`, `main`) | **реализовано**; Redis/пароля/сессий не содержит |
 | `web-admin-ui/` (React SPA: Vite, React Router, TanStack Query, SSE) | **реализовано** |
 | `px6-service/` | **реализовано** (все активные прокси, баланс, страны, цена, покупка) |
-| edge / compose / Dockerfile / requirements / .env.example | **готово** (сегментированные private-сети, storage-service в compose, у gateway нет DSN) |
-| `tests/` (`test_gateway`, `test_gateway_storage`, `test_storage_client`, `test_fake_storage`, `test_storage_service`, `test_storage_affinity_persona`, `test_proxies`, `test_affinity`, `test_persona`, `test_keys`, `test_reqlog`, `test_admin_api`, `test_opencode`, `test_proxy6_client`, `test_px6_service`, `test_sessions`, `test_curlclient`) | **реализовано** |
+| edge / compose / Dockerfile / requirements / .env.example | **готово** (сегментированные private-сети, storage-service и auth-service в compose, у gateway нет DSN, у web-admin нет Redis) |
+| `tests/` (`test_gateway`, `test_gateway_storage`, `test_storage_client`, `test_fake_storage`, `test_storage_service`, `test_storage_affinity_persona`, `test_proxies`, `test_affinity`, `test_persona`, `test_keys`, `test_reqlog`, `test_admin_api`, `test_auth_service`, `test_auth_client`, `test_opencode`, `test_proxy6_client`, `test_px6_service`, `test_sessions`, `test_curlclient`) | **реализовано** |
 
 ## Тесты
 
 ```bash
 pip install -r requirements-dev.txt
-pytest tests                              # 385 passed, 2 skipped
+pytest tests                              # 406 passed, 2 skipped
 pytest tests/test_storage_service.py -q   # 10 passed (нужен живой PostgreSQL)
 
 cd web-admin-ui
@@ -741,14 +855,20 @@ npm run build
 отказ старта при неудачной загрузке.
 
 Остальные наборы (`test_gateway`, `test_proxies`, `test_affinity`,
-`test_persona`, `test_keys`, `test_reqlog`, `test_sessions`, `test_curlclient`)
-герметичны: upstream, админка и storage подменяются (`tests/fake_storage.py`),
-PostgreSQL для gateway-тестов не нужен. Прежние прямые DB-наборы удалены
+`test_persona`, `test_keys`, `test_reqlog`, `test_sessions`,
+`test_admin_api`, `test_auth_service`, `test_auth_client`, `test_curlclient`)
+герметичны: upstream, админка/auth и storage подменяются
+(`tests/fake_storage.py`), PostgreSQL для gateway-тестов не нужен. Прежние прямые DB-наборы удалены
 вместе с SQL-модулями; их сценарии покрыты storage-service и `test_storage_*`.
 `tests/test_opencode.py` — чистые юнит-тесты интеграции с
 opencode.ai (без сети/БД); `tests/test_admin_api.py` — герметичные тесты JSON
-API админки (fake gateway + in-memory sessions, без Redis/PostgreSQL);
-`tests/test_px6_service.py` — герметичные тесты px6-service (fake px6.net);
-`tests/test_proxy6_client.py` — клиент px6.net, маскирование ключа в логах и
-маппинг ошибок. Фронтенд-тесты (`web-admin-ui`) — Vitest + Testing Library
-(32 теста), без сети и без backend; дополнительно проходят typecheck и build.
+API админки (fake gateway + fake auth-service, без Redis/PostgreSQL/сети);
+`tests/test_auth_service.py` — реальное приложение auth-service на
+`TestClient` с in-memory хранилищем: вход, сессии, CSRF, throttling, expiry,
+503 при недоступном Redis; `tests/test_auth_client.py` — клиент web-admin к
+auth-service на `httpx.MockTransport`: разбор сессии, маппинг 401/403/404/429
+и 503, отсутствие утечки пароля; `tests/test_px6_service.py` — герметичные
+тесты px6-service (fake px6.net); `tests/test_proxy6_client.py` — клиент
+px6.net, маскирование ключа в логах и маппинг ошибок. Фронтенд-тесты
+(`web-admin-ui`) — Vitest + Testing Library (32 теста), без сети и без
+backend; дополнительно проходят typecheck и build.

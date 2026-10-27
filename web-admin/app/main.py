@@ -1,11 +1,13 @@
 """web-admin — OpenRoute admin JSON API (control plane).
 
 The React SPA (separate ``web-admin-ui`` container) talks to this service via
-``/api/admin/*``. Session/login/CSRF handling mirrors the previous server-side
-panel, but pages are no longer rendered here: every response is JSON or SSE.
+``/api/admin/*``. Authentication, sessions, CSRF and the login throttle live
+in the private ``auth-service``; this service only handles the browser cookie
+and proxies auth decisions over HTTP. Every response is JSON or SSE.
 
-The service never touches the gateway's PostgreSQL directly; it only calls the
-gateway's internal API with ``X-Internal-Token`` (see ``gateway.py``).
+The service never touches Redis or the gateway's PostgreSQL directly; it calls
+the gateway's internal API with ``X-Internal-Token`` (see ``gateway.py``) and
+auth-service over ``openroute-auth-net`` (see ``auth_client.py``).
 """
 
 from __future__ import annotations
@@ -13,7 +15,6 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import math
 import time
 from contextlib import asynccontextmanager
 from typing import AsyncIterator
@@ -24,6 +25,15 @@ from fastapi.responses import JSONResponse, StreamingResponse
 from pydantic import BaseModel, ValidationError
 
 from . import auth
+from .auth_client import (
+    AuthClient,
+    AuthUnavailable,
+    CsrfInvalid,
+    InvalidCredentials,
+    LoginThrottled,
+    PanelDisabled,
+    SessionInvalid,
+)
 from .config import get_settings
 from .gateway import GatewayClient
 from .schemas import (
@@ -35,14 +45,13 @@ from .schemas import (
     ProxyBuyBody,
     ProxySetBody,
 )
-from .sessions import RedisSessionStore, SessionUnavailable
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger("openroute-web-admin")
 
 settings = get_settings()
 
-_sessions = RedisSessionStore(settings.redis_url)
+auth_client = AuthClient(settings)
 gateway = GatewayClient(settings)
 
 _PANEL_API = "/api/admin"
@@ -54,7 +63,7 @@ _PERIODS = {
 _SSE_TICK_SECONDS = 1.0
 _SSE_HEARTBEAT_SECONDS = 15.0
 _SSE_AUTH_CHECK_SECONDS = 30.0
-_login_fails: dict[str, list[float]] = {}
+_SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 
 
 def _normalize_period(period: str) -> str:
@@ -71,15 +80,10 @@ def _normalize_days(days: int) -> int:
     return max(1, min(365, value))
 
 
-def _ensure_enabled() -> None:
-    if not settings.admin_password:
-        raise HTTPException(404, "Админка выключена (задайте ADMIN_PASSWORD)")
-
-
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
-    await _sessions.aclose()
+    await auth_client.aclose()
     await gateway.aclose()
 
 
@@ -132,12 +136,26 @@ async def _json_body(request: Request, model: type[BaseModel]) -> BaseModel:
 
 
 async def require_panel(request: Request) -> dict:
-    """Require an enabled panel and a live server-side session."""
-    _ensure_enabled()
-    session = await auth.session_from_request(request, settings, _sessions)
-    if session is None:
-        raise HTTPException(401, "Требуется вход в панель")
-    return session
+    """Require an enabled panel and a live server-side session.
+
+    Mutating methods also require the per-session CSRF token. auth-service
+    performs both checks in one call; web-admin does not keep session state.
+    """
+    sid = request.cookies.get(_SESSION_COOKIE, "")
+    require_csrf = request.method.upper() not in _SAFE_METHODS
+    try:
+        session = await auth_client.validate(
+            sid,
+            request.headers.get("x-csrf-token", ""),
+            require_csrf=require_csrf,
+        )
+    except PanelDisabled as exc:
+        raise HTTPException(404, "Админка выключена (задайте ADMIN_PASSWORD)") from exc
+    except SessionInvalid as exc:
+        raise HTTPException(401, "Требуется вход в панель") from exc
+    except CsrfInvalid as exc:
+        raise HTTPException(403, "Неверный CSRF-токен") from exc
+    return {"sid": session.sid, "csrf": session.csrf, "expires": session.expires_at}
 
 
 # --- live updates (SSE) ----------------------------------------------------
@@ -187,11 +205,11 @@ async def _sse_events(request: Request, page: str, period: str,
         now = time.monotonic()
         if sid and now - last_auth_check >= _SSE_AUTH_CHECK_SECONDS:
             try:
-                current = await _sessions.get(sid)
+                await auth_client.validate(sid)
+            except (SessionInvalid, PanelDisabled, CsrfInvalid):
+                return
             except Exception:
                 logger.exception("SSE session check failed")
-                return
-            if current is None or time.time() > float(current.get("expires", 0)):
                 return
             last_auth_check = now
 
@@ -238,10 +256,10 @@ def _sse_response(request: Request, page: str, period: str,
 # --- exception handlers ----------------------------------------------------
 
 
-@app.exception_handler(SessionUnavailable)
-async def _storage_unavailable(request: Request, exc: SessionUnavailable) -> JSONResponse:
-    logger.error("session storage (Redis) unavailable: %s", exc)
-    return JSONResponse({"detail": "Хранилище сессий недоступно"}, status_code=503)
+@app.exception_handler(AuthUnavailable)
+async def _auth_unavailable(request: Request, exc: AuthUnavailable) -> JSONResponse:
+    logger.error("auth-service unavailable: %s", exc)
+    return JSONResponse({"detail": str(exc) or "Сервис авторизации недоступен"}, status_code=503)
 
 
 @app.exception_handler(RequestValidationError)
@@ -265,59 +283,73 @@ async def index() -> dict:
 
 @app.get("/health", include_in_schema=False)
 async def health() -> dict:
-    return {"status": "ok", "sessions": await _sessions.count()}
+    return {"status": "ok", "sessions": await auth_client.health()}
 
 
 @app.get(f"{_PANEL_API}/session")
 async def api_session(request: Request) -> dict:
     """Current browser session + CSRF token (200 even when not signed in)."""
-    _ensure_enabled()
-    session = await auth.session_from_request(request, settings, _sessions)
-    if session is None:
+    sid = request.cookies.get(_SESSION_COOKIE, "")
+    try:
+        session = await auth_client.validate(sid)
+    except PanelDisabled as exc:
+        raise HTTPException(404, "Админка выключена (задайте ADMIN_PASSWORD)") from exc
+    except SessionInvalid:
         return {"authenticated": False}
     return {
         "authenticated": True,
-        "csrf": session["csrf"],
-        "expires_at": session["expires"],
+        "csrf": session.csrf,
+        "expires_at": session.expires_at,
     }
 
 
 @app.post(f"{_PANEL_API}/login")
 async def api_login(request: Request) -> Response:
-    _ensure_enabled()
-    ip = auth.client_ip(request)
-    fails = _login_fails.setdefault(ip, [])
-    retry_after = auth.login_retry_after(fails)
-    if retry_after > 0:
-        raise HTTPException(
-            429,
-            "Слишком много неудачных попыток входа; попробуйте позже",
-            headers={"Retry-After": str(max(1, math.ceil(retry_after)))},
-        )
+    enabled = await auth_client.status()
+    if not enabled:
+        raise HTTPException(404, "Админка выключена (задайте ADMIN_PASSWORD)")
 
     body = await _json_body(request, LoginBody)
     assert isinstance(body, LoginBody)
-    if not auth.check_password(body.password, settings):
-        fails.append(time.time())
-        raise HTTPException(401, "Неверный пароль")
+    try:
+        session = await auth_client.login(body.password, auth.client_ip(request))
+    except PanelDisabled as exc:
+        raise HTTPException(404, "Админка выключена (задайте ADMIN_PASSWORD)") from exc
+    except InvalidCredentials as exc:
+        raise HTTPException(401, "Неверный пароль") from exc
+    except LoginThrottled as exc:
+        raise HTTPException(
+            429,
+            "Слишком много неудачных попыток входа; попробуйте позже",
+            headers={"Retry-After": str(exc.retry_after)},
+        ) from exc
 
-    _login_fails.pop(ip, None)
-    session = await auth.new_session(settings, _sessions)
     response = JSONResponse({
         "authenticated": True,
-        "csrf": session["csrf"],
-        "expires_at": session["expires"],
+        "csrf": session.csrf,
+        "expires_at": session.expires_at,
     })
-    auth.set_session_cookie(response, session["sid"], request, settings)
+    max_age = session.max_age
+    if max_age is None:
+        max_age = max(0, int(session.expires_at - time.time()))
+    auth.set_session_cookie(response, session.sid, max_age, request)
     return response
 
 
 @app.post(f"{_PANEL_API}/logout", status_code=204)
 async def api_logout(request: Request, session: dict = Depends(require_panel)) -> Response:
-    auth.check_csrf(request, session)
-    await _sessions.delete(session["sid"])
+    try:
+        await auth_client.logout(
+            session["sid"], request.headers.get("x-csrf-token", "")
+        )
+    except PanelDisabled as exc:
+        raise HTTPException(404, "Админка выключена (задайте ADMIN_PASSWORD)") from exc
+    except SessionInvalid as exc:
+        raise HTTPException(401, "Требуется вход в панель") from exc
+    except CsrfInvalid as exc:
+        raise HTTPException(403, "Неверный CSRF-токен") from exc
     response = Response(status_code=204)
-    auth.clear_session_cookie(response, request, settings)
+    auth.clear_session_cookie(response, request)
     return response
 
 
@@ -331,7 +363,6 @@ async def api_proxies(period: str = "all", session: dict = Depends(require_panel
 
 @app.post(f"{_PANEL_API}/proxies/set")
 async def api_proxy_set(request: Request, session: dict = Depends(require_panel)) -> dict:
-    auth.check_csrf(request, session)
     body = await _json_body(request, ProxySetBody)
     assert isinstance(body, ProxySetBody)
     return await gateway.set_proxy(body.proxy_id, body.enabled)
@@ -340,7 +371,6 @@ async def api_proxy_set(request: Request, session: dict = Depends(require_panel)
 @app.post(f"{_PANEL_API}/proxies/refresh")
 async def api_proxy_refresh(request: Request, session: dict = Depends(require_panel)) -> dict:
     """Force-fetch the proxy list, bypassing the px6-service TTL cache."""
-    auth.check_csrf(request, session)
     return await gateway.refresh_proxies()
 
 
@@ -368,7 +398,6 @@ async def api_proxy_price(
 
 @app.post(f"{_PANEL_API}/proxies/buy")
 async def api_proxy_buy(request: Request, session: dict = Depends(require_panel)) -> dict:
-    auth.check_csrf(request, session)
     body = await _json_body(request, ProxyBuyBody)
     assert isinstance(body, ProxyBuyBody)
     return await gateway.buy_proxies(body.model_dump())
@@ -405,7 +434,6 @@ async def api_keys(period: str = "all", session: dict = Depends(require_panel)) 
 
 @app.post(f"{_PANEL_API}/keys/add")
 async def api_key_add(request: Request, session: dict = Depends(require_panel)) -> dict:
-    auth.check_csrf(request, session)
     body = await _json_body(request, KeyAddBody)
     assert isinstance(body, KeyAddBody)
     return await gateway.add_key(body)
@@ -413,7 +441,6 @@ async def api_key_add(request: Request, session: dict = Depends(require_panel)) 
 
 @app.post(f"{_PANEL_API}/keys/rotate")
 async def api_key_rotate(request: Request, session: dict = Depends(require_panel)) -> dict:
-    auth.check_csrf(request, session)
     body = await _json_body(request, KeyRotateBody)
     assert isinstance(body, KeyRotateBody)
     return await gateway.rotate_key(body.key_hash)
@@ -421,7 +448,6 @@ async def api_key_rotate(request: Request, session: dict = Depends(require_panel
 
 @app.post(f"{_PANEL_API}/keys/set")
 async def api_key_set(request: Request, session: dict = Depends(require_panel)) -> dict:
-    auth.check_csrf(request, session)
     body = await _json_body(request, KeySetBody)
     assert isinstance(body, KeySetBody)
     return await gateway.set_key(body.key_hash, body.enabled)
@@ -429,7 +455,6 @@ async def api_key_set(request: Request, session: dict = Depends(require_panel)) 
 
 @app.post(f"{_PANEL_API}/keys/delete")
 async def api_key_delete(request: Request, session: dict = Depends(require_panel)) -> dict:
-    auth.check_csrf(request, session)
     body = await _json_body(request, KeyDeleteBody)
     assert isinstance(body, KeyDeleteBody)
     return await gateway.delete_key(body.key_hash)

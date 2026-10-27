@@ -1,8 +1,9 @@
 """Tests for the OpenRoute admin JSON API (``web-admin`` — ``/api/admin/*``).
 
-Hermetic by construction: the service is driven by ``TestClient`` and its
-gateway client is pointed at an in-process fake gateway (``FastAPI`` +
-``httpx.ASGITransport``), so no Redis, no PostgreSQL and no network are needed.
+Hermetic by construction: the service is driven by ``TestClient``, its gateway
+client is pointed at an in-process fake gateway (``FastAPI`` +
+``httpx.ASGITransport``) and its auth client at an in-memory fake auth-service,
+so no Redis, no PostgreSQL and no network are needed.
 
 Covered: login (password only), server sessions in an HttpOnly cookie, CSRF on
 mutations, brute-force lock-out, session expiry, logout, proxy enable/disable,
@@ -16,8 +17,10 @@ import hashlib
 import hmac
 import importlib.util
 import json
+import math
 import secrets
 import sys
+import time
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -57,6 +60,16 @@ def _load_admin_main():
 
 
 admin_main = _load_admin_main()
+
+from adminservice.auth_client import (  # noqa: E402
+    AuthSession,
+    AuthUnavailable,
+    CsrfInvalid,
+    InvalidCredentials,
+    LoginThrottled,
+    PanelDisabled,
+    SessionInvalid,
+)
 
 PW = "pw-secret"
 DEFAULT_KEY = "test-key"
@@ -400,26 +413,91 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
 # --- web-admin harness --------------------------------------------------
 
 
-class FakeSessionStore:
-    """In-memory twin of ``RedisSessionStore`` (no Redis in tests)."""
+class FakeAuthClient:
+    """In-memory twin of ``AuthClient`` (no Redis or HTTP in tests)."""
 
-    def __init__(self) -> None:
-        self.data: dict[str, dict] = {}
+    def __init__(self, password: str = PW, ttl: int = 43200) -> None:
+        self.password = password
+        self.ttl = ttl
+        self.sessions: dict[str, dict] = {}
+        self.fails: dict[str, list[float]] = {}
+        self.available = True
 
-    async def put(self, sid, session, ttl_seconds):
-        self.data[sid] = dict(session)
+    @property
+    def enabled(self) -> bool:
+        return bool(self.password)
 
-    async def get(self, sid):
-        return dict(self.data[sid]) if sid in self.data else None
-
-    async def delete(self, sid):
-        self.data.pop(sid, None)
-
-    async def count(self):
-        return len(self.data)
+    def _check_available(self) -> None:
+        if not self.available:
+            raise AuthUnavailable("Сервис авторизации недоступен")
 
     async def aclose(self):
         pass
+
+    async def status(self) -> bool:
+        self._check_available()
+        return self.enabled
+
+    async def health(self) -> int:
+        self._check_available()
+        return len(self.sessions) if self.enabled else 0
+
+    async def login(self, password: str, client_ip: str) -> AuthSession:
+        self._check_available()
+        if not self.enabled:
+            raise PanelDisabled()
+
+        now = time.time()
+        fails = self.fails.setdefault(client_ip, [])
+        fails[:] = [t for t in fails if t >= now - 60.0]
+        if len(fails) >= 10:
+            raise LoginThrottled(max(1, math.ceil(60.0 - (now - fails[0]))))
+
+        if not hmac.compare_digest(password.encode(), self.password.encode()):
+            fails.append(now)
+            raise InvalidCredentials()
+
+        self.fails.pop(client_ip, None)
+        sid = secrets.token_urlsafe(16)
+        csrf = secrets.token_urlsafe(12)
+        expires_at = now + self.ttl
+        self.sessions[sid] = {"csrf": csrf, "expires_at": expires_at}
+        return AuthSession(sid=sid, csrf=csrf, expires_at=expires_at, max_age=self.ttl)
+
+    async def validate(
+        self, sid: str, csrf: str = "", require_csrf: bool = False
+    ) -> AuthSession:
+        self._check_available()
+        if not self.enabled:
+            raise PanelDisabled()
+        session = self.sessions.get(sid)
+        if session is None:
+            raise SessionInvalid()
+        if time.time() > float(session.get("expires_at", 0)):
+            self.sessions.pop(sid, None)
+            raise SessionInvalid()
+        expected = str(session.get("csrf", ""))
+        if require_csrf and not hmac.compare_digest(
+            csrf.encode(), expected.encode()
+        ):
+            raise CsrfInvalid()
+        return AuthSession(
+            sid=sid,
+            csrf=expected,
+            expires_at=float(session["expires_at"]),
+        )
+
+    async def logout(self, sid: str, csrf: str) -> None:
+        self._check_available()
+        if not self.enabled:
+            raise PanelDisabled()
+        session = self.sessions.get(sid)
+        if session is None:
+            raise SessionInvalid()
+        expected = str(session.get("csrf", ""))
+        if not hmac.compare_digest(csrf.encode(), expected.encode()):
+            raise CsrfInvalid()
+        self.sessions.pop(sid, None)
 
 
 def build_admin_settings(**over):
@@ -428,24 +506,22 @@ def build_admin_settings(**over):
     values = dict(
         internal_api_token="test-internal-token",
         gateway_internal_url="http://gateway.internal",
-        admin_session_ttl_seconds=43200,
-        redis_url="redis://redis.test.invalid:6379/0",
+        auth_service_url="http://auth.internal",
+        auth_timeout_seconds=5.0,
     )
     values.update(over)
-    values.setdefault("admin_password", "")
     return admin_config.Settings(**values)
 
 
 class Panel:
-    """A running web-admin wired to the fake gateway, driven by TestClient."""
+    """A running web-admin wired to fake gateway/auth services."""
 
     def __init__(self, monkeypatch, password: str = PW) -> None:
-        self.sessions = FakeSessionStore()
+        self.auth = FakeAuthClient(password=password)
         self.state = FakeState()
-        self.settings = build_admin_settings(admin_password=password)
+        self.settings = build_admin_settings()
         monkeypatch.setattr(admin_main, "settings", self.settings)
-        monkeypatch.setattr(admin_main, "_sessions", self.sessions)
-        monkeypatch.setattr(admin_main, "_login_fails", {})
+        monkeypatch.setattr(admin_main, "auth_client", self.auth)
         fake_gw = build_fake_gateway(self.state, self.settings.internal_api_token)
         gateway_client = httpx.AsyncClient(
             base_url="http://gateway.internal",
@@ -543,6 +619,25 @@ def test_session_unauthenticated_is_200(panel):
     assert response.json() == {"authenticated": False}
 
 
+def test_web_admin_has_no_redis_or_password_settings(panel):
+    assert not hasattr(panel.settings, "redis_url")
+    assert not hasattr(panel.settings, "admin_password")
+    assert panel.settings.auth_service_url == "http://auth.internal"
+
+
+def test_auth_service_unavailable_returns_503(panel):
+    panel.auth.available = False
+    for method, path in (
+        ("get", "/api/admin/session"),
+        ("post", "/api/admin/login"),
+        ("get", "/api/admin/proxies"),
+        ("get", "/health"),
+    ):
+        response = getattr(panel.client, method)(path)
+        assert response.status_code == 503
+    assert response.json()["detail"] == "Сервис авторизации недоступен"
+
+
 def test_panel_disabled_without_password(make_panel):
     p = make_panel(password="")
     assert p.client.get("/api/admin/session").status_code == 404
@@ -565,7 +660,7 @@ def test_login_wrong_password(panel):
     response = panel.client.post("/api/admin/login", json={"password": "wrong"})
     assert response.status_code == 401
     assert response.json()["detail"] == "Неверный пароль"
-    assert panel.sessions.data == {}
+    assert panel.auth.sessions == {}
 
 
 def test_session_after_login(panel):
@@ -601,8 +696,8 @@ def test_protected_endpoints_require_session(panel):
 
 def test_session_expiry(panel):
     panel.login_ok()
-    for session in panel.sessions.data.values():
-        session["expires"] = 0.0
+    for session in panel.auth.sessions.values():
+        session["expires_at"] = 0.0
     assert panel.client.get("/api/admin/proxies").status_code == 401
 
 
@@ -610,11 +705,11 @@ def test_logout_requires_csrf_and_kills_session(panel):
     csrf = panel.login_ok()
     response = panel.client.post("/api/admin/logout", headers=auth_headers("forged"))
     assert response.status_code == 403
-    assert panel.sessions.data
+    assert panel.auth.sessions
 
     response = panel.client.post("/api/admin/logout", headers=auth_headers(csrf))
     assert response.status_code == 204
-    assert panel.sessions.data == {}
+    assert panel.auth.sessions == {}
     assert panel.client.get("/api/admin/proxies").status_code == 401
 
 

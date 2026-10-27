@@ -1,5 +1,6 @@
 # --- Секреты и локальное состояние (никогда не коммитить) ---
 .env
+auth-service/.env
 web-admin/.env
 px6-service/.env
 storage-service/.env

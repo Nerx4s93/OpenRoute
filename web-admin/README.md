@@ -4,20 +4,23 @@ Backend админки OpenRoute (control plane). Отдаёт **только JS
 `/api/admin/*`; React-интерфейс живёт в отдельном контейнере
 [`web-admin-ui/`](../web-admin-ui/README.md) и получает статику через `edge`.
 Своими данными сервис не владеет: прокси, ключи и статистика читаются и
-меняются через internal API шлюза (`/internal/*`, `X-Internal-Token`).
+меняются через internal API шлюза (`/internal/*`, `X-Internal-Token`), а
+аутентификация, сессии и CSRF — через приватный
+[`auth-service/`](../auth-service/README.md).
 
-> **Статус: реализовано.** Парольный вход, серверные сессии в Redis, CSRF,
-> снапшоты прокси/ключей, мутации и SSE-обновления.
+> **Статус: реализовано.** Парольный вход, серверные сессии, CSRF, снапшоты
+> прокси/ключей, мутации и SSE-обновления. Redis и `ADMIN_PASSWORD` этому
+> сервису больше не передаются: их знает только auth-service.
 
 ## Маршруты
 
 | Метод | Путь | Описание |
 |-------|------|----------|
 | GET | `/` | служебный JSON (`{"service":"openroute-web-admin"}`) |
-| GET | `/health` | liveness + число живых сессий в Redis |
+| GET | `/health` | liveness + число живых сессий из auth-service |
 | GET | `/api/admin/session` | текущая сессия + CSRF-токен (200 и без входа) |
-| POST | `/api/admin/login` | вход по `ADMIN_PASSWORD`; ставит HttpOnly cookie |
-| POST | `/api/admin/logout` | выход (CSRF; сессия удаляется на сервере) |
+| POST | `/api/admin/login` | вход по паролю (проверяет auth-service); ставит HttpOnly cookie |
+| POST | `/api/admin/logout` | выход (CSRF; сессия удаляется в auth-service/Redis) |
 | GET | `/api/admin/proxies?period=` | снапшот пула: статусы, расходы, последние запросы |
 | GET | `/api/admin/proxies/events?period=` | SSE с JSON-снапшотами прокси |
 | POST | `/api/admin/proxies/set` | включить/отключить прокси по `proxy_id` (CSRF) |
@@ -61,14 +64,20 @@ N−1 дней, начиная с 00:00. Старые `day`, `week`, `month` с�
 ### Безопасность
 
 - Cookie `openroute_session`: `HttpOnly`, `SameSite=Strict`, `Secure` при
-  HTTPS (по `X-Forwarded-Proto` от edge), `Path=/`.
-- Сессии — только в Redis; cookie не содержит подписанных claims.
-- Каждая мутация требует `X-CSRF-Token` из `/api/admin/session`.
+  HTTPS (по `X-Forwarded-Proto` от edge), `Path=/`. Cookie содержит только
+  непрозрачный `sid`, без подписанных claims.
+- Сессии и CSRF-токены живут в auth-service (Redis-хранилище), пароль — в его
+  конфигурации. `web-admin` не получает `REDIS_URL`, не импортирует
+  Redis-клиент и не хранит `ADMIN_PASSWORD`.
+- Каждая мутация требует `X-CSRF-Token` из `/api/admin/session`; проверку
+  выполняет auth-service в том же вызове, что и проверку сессии.
 - Логин ограничен 10 неудачными попытками в минуту на IP
-  (`X-Real-IP` от edge), с `Retry-After`.
+  (`X-Real-IP` от edge), с `Retry-After`; счётчик живёт в auth-service.
 - `proxy_id` — HMAC-SHA256 от полного URL с `INTERNAL_API_TOKEN`; перебор
   идентификаторов не раскрывает креды.
-- Панель выключена (404), если `ADMIN_PASSWORD` пуст.
+- Панель выключена (404), если auth-service сообщает, что `ADMIN_PASSWORD`
+  пуст. При недоступном auth-service защищённые маршруты и `/health`
+  отвечают 503, а не работают без аутентификации.
 
 ## Конфигурация
 
@@ -76,19 +85,29 @@ N−1 дней, начиная с 00:00. Старые `day`, `week`, `month` с�
 
 | Переменная | Назначение |
 |------------|------------|
-| `ADMIN_PASSWORD` | пароль входа; пусто — админка выключена |
-| `ADMIN_SESSION_TTL_SECONDS` | TTL сессии (по умолчанию 43200) |
-| `REDIS_URL` | хранилище сессий (`redis://redis:6379/0`, сеть `openroute-redis-net`) |
+| `AUTH_SERVICE_URL` | база auth-service (`http://openroute-auth:8000`, сеть `openroute-auth-net`) |
+| `AUTH_TIMEOUT_SECONDS` | таймаут запросов к auth-service (5 с) |
 | `GATEWAY_INTERNAL_URL` | `http://gateway:8000` в сети `openroute-net` |
 | `INTERNAL_API_TOKEN` | тот же секрет, что у шлюза |
 | `INTERNAL_TIMEOUT_SECONDS` | таймаут internal API (30 с) |
 
+`ADMIN_PASSWORD`, `ADMIN_SESSION_TTL_SECONDS` и `REDIS_URL` задаются только в
+`auth-service/.env`.
+
 ## Локальный запуск
 
+Сначала запустите auth-service (ему нужен Redis), затем web-admin:
+
 ```bash
-cd web-admin
+cd auth-service
 pip install -r requirements.txt
-uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
+REDIS_URL=redis://127.0.0.1:6379/0 \
+  uvicorn app.main:app --host 127.0.0.1 --port 8011
+
+cd ../web-admin
+pip install -r requirements.txt
+AUTH_SERVICE_URL=http://127.0.0.1:8011 \
+  uvicorn app.main:app --reload --host 127.0.0.1 --port 8000
 ```
 
 Для фронтенда в соседнем терминале:
@@ -103,8 +122,9 @@ npm run dev    # http://127.0.0.1:5173, /api проксируется на :8000
 
 ```bash
 pip install -r ../requirements-dev.txt
-pytest ../tests/test_admin_api.py -q
+pytest ../tests/test_admin_api.py ../tests/test_auth_client.py -q
 ```
 
-Тесты герметичны: поднимают in-process fake gateway и in-memory session store,
-не требуют Redis/PostgreSQL/сети.
+Тесты герметичны: поднимают in-process fake gateway и fake auth-service, не
+требуют Redis/PostgreSQL/сети. Сам auth-service проверяется отдельно:
+`pytest ../tests/test_auth_service.py -q`.

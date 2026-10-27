@@ -1,0 +1,13 @@
+.venv
+__pycache__
+**/__pycache__
+*.pyc
+**/*.pyc
+.env
+.env.example
+.pytest_cache
+.ruff_cache
+*.egg-info
+README.md
+Dockerfile
+.dockerignore

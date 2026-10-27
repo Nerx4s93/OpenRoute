@@ -1,8 +1,8 @@
 -r requirements.txt
 pytest==9.1.1
 pytest-asyncio==1.4.0
-# тесты импортируют web-admin, его сессии живут в redis-py (фейк-хранилище,
-# реального Redis в юнит-тестах нет)
+# тесты импортируют auth-service, его Redis-хранилище использует redis-py
+# (фейковое хранилище; реального Redis в юнит-тестах нет)
 redis>=5.0.1,<7.0
 # PSYCOPG IS TEST-ONLY: only tests/test_storage_service.py (and the pg_dsn
 # fixture) talk to PostgreSQL directly. The gateway itself has no SQL code and
