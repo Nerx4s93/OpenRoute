@@ -78,8 +78,8 @@ storage-service, auth-service, PostgreSQL и Redis не ходят наружу,
   загруженный пул продолжает работать.
 - Квота: каждый прокси-URL — отдельное ведро (`canonical_quota_key`).
   Прокси не объединяются по входному IPv4.
-- Выбор — round-robin по готовым прокси (не disabled, не в cooldown, не
-  запаркован, не на локальном RPM-капе). Каждый прокси пробуется за запрос
+- Выбор — round-robin по готовым прокси (не выключен вручную, не в cooldown,
+  не запаркован, не на локальном RPM-капе). Каждый прокси пробуется за запрос
   максимум один раз.
 - **429 `FreeUsageLimitError`**: парковка только этого прокси-URL до
   ближайшей полуночи UTC + `QUOTA_RESET_MARGIN_SECONDS` (если `Retry-After`
@@ -94,8 +94,8 @@ storage-service, auth-service, PostgreSQL и Redis не ходят наружу,
   `ACCOUNT_FAIL_THRESHOLD`, cooldown `ACCOUNT_COOLDOWN_SECONDS` с
   экспонентой ×2 до `ACCOUNT_COOLDOWN_MAX_SECONDS`; успех сбрасывает
   счётчик и cooldown, health-probe может снять cooldown досрочно.
-- Парковка и баны (`quota_until`, `banned_until`, `permanently_banned`)
-  хранятся в storage-service и переживают рестарт gateway.
+- Парковка и баны (`quota_until`, `permanently_banned`) хранятся в
+  storage-service и переживают рестарт gateway.
 
 ## Sticky-сессии (affinity)
 
@@ -225,7 +225,7 @@ auth-service `/api/admin/*` и `/health` web-admin отвечают 503; пар�
 
 - Секрет генерирует gateway: `openroute-` + 48 hex-символов. В
   storage-service хранится только SHA-256 (`key_hash`), а также `key_id`,
-  `rpm`, `tpm`, `models`, `enabled`, `added_at`; plaintext не логируется.
+  `rpm`, `tpm`, `models`, `enabled`; plaintext не логируется.
 - `add` и `rotate` возвращают секрет только в ответе на мутацию; UI
   показывает его один раз. Снапшоты и SSE plaintext не содержат, ответы идут
   с `Cache-Control: no-store`.

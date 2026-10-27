@@ -242,7 +242,6 @@ async def test_load_restores_rows_without_downgrading_generation():
     # the older row on a repeated load.
     rotated = await store.rotate("a.invalid:1")
     assert rotated.generation == 5
-    store._loaded = False
     await store.load()
     assert store.get_cached("a.invalid:1") is rotated
     assert rotated.generation == 5

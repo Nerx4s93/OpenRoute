@@ -11,7 +11,11 @@ from typing import Any
 
 
 class StorageError(Exception):
-    """An expected API error (404/409/422/503) with a safe message."""
+    """An expected domain error (404/409/503) with a safe message.
+
+    Request-body validation is FastAPI's own ``422`` response; this type is
+    only raised by the storage routes and the pool dependency.
+    """
 
     def __init__(
         self,

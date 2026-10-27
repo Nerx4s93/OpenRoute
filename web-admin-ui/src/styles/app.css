@@ -69,15 +69,12 @@ header.top nav a.active { background: #83decf16; border-color: #88e5cf30; color:
 .hero::after { content: ""; position: absolute; width: 290px; height: 290px; right: -75px;
   top: -85px; border: 1px solid #b4ffee25; border-radius: 50%; box-shadow:
   0 0 0 40px #b4ffee09, 0 0 0 85px #b4ffee07; pointer-events: none; }
-.hero-content, .hero-aside { position: relative; z-index: 1; }
+.hero-content { position: relative; z-index: 1; }
 .eyebrow { color: #a5edda; font-size: 11px; font-weight: 800; letter-spacing: .19em;
   text-transform: uppercase; }
 h1 { margin: 7px 0 5px; font-size: clamp(27px, 3vw, 38px); line-height: 1.16;
   font-weight: 750; letter-spacing: -.045em; }
 .hero p { margin: 0; max-width: 490px; color: #b7cdcf; font-size: 13px; }
-.hero-aside { display: flex; align-items: center; gap: 9px; flex: none; padding: 10px 14px;
-  background: #091b2280; border: 1px solid #aeefdc39; border-radius: 999px;
-  color: #d6f6eb; font-size: 11px; font-weight: 650; white-space: nowrap; }
 .hero-refresh { position: relative; z-index: 1; flex: none; display: inline-flex;
   align-items: center; gap: 8px; padding: 11px 16px; border: 1px solid #8de9d25c;
   border-radius: 999px; background: #8de9d218; color: #d4fbef; font-size: 12px;
@@ -273,11 +270,6 @@ form.buy-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .buy-dialog-balance { display: flex; flex-wrap: wrap; justify-content: space-between;
   gap: 8px 18px; color: #7f929f; font-size: 11px; }
 .buy-dialog-balance strong { color: var(--text); font-weight: 650; }
-.confirm-summary { display: grid; gap: 9px; margin: 0 0 14px; padding: 13px 14px;
-  border: 1px solid #2c4150; border-radius: 10px; background: #0d1720; }
-.confirm-summary > div { display: flex; justify-content: space-between; gap: 14px; }
-.confirm-summary dt { color: #7f929f; font-size: 11px; }
-.confirm-summary dd { margin: 0; text-align: right; font-size: 12px; }
 
 /* --- feedback ------------------------------------------------------------ */
 .error-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px;
@@ -400,7 +392,6 @@ form.buy-form { grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .top-meta { font-size: 10px; }
   .crumb-root, .meta-label { display: none; }
   .hero { min-height: 160px; margin: 18px 0; padding: 25px 21px; }
-  .hero-aside { display: none; }
   .hero-actions { width: 100%; display: grid; grid-template-columns: 1fr; }
   .hero-refresh { width: 100%; justify-content: center; }
   form.buy-form { grid-template-columns: 1fr; }

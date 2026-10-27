@@ -115,6 +115,11 @@ def test_health_disabled_needs_no_redis(make_service):
     assert store.counts == 0
 
 
+def test_root_is_not_served(make_service):
+    client, _ = make_service()
+    assert client.get("/").status_code == 404
+
+
 def test_health_reports_sessions(make_service):
     client, store = make_service()
     assert client.get("/health").json()["sessions"] == 0

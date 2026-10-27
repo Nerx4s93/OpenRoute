@@ -393,17 +393,15 @@ class StorageClient:
         self,
         proxies: Iterable[str],
         quota_until: float,
-        banned_until: float,
         permanently_banned: bool,
     ) -> int:
-        """Persist quota parking / timed ban / permanent abusive ban."""
+        """Persist quota parking / permanent abusive ban."""
         reply = await self._request(
             "POST",
             "/proxies/parking",
             json={
                 "proxies": list(proxies),
                 "quota_until": quota_until,
-                "banned_until": banned_until,
                 "permanently_banned": permanently_banned,
             },
         )
@@ -473,13 +471,6 @@ class StorageClient:
             "POST", "/affinity", json={"bindings": bindings}
         )
         return _object(reply)
-
-    async def clear_affinity(self, session_keys: Iterable[str]) -> int:
-        reply = await self._request(
-            "POST", "/affinity/clear",
-            json={"session_keys": list(session_keys)},
-        )
-        return _int_field(reply, "cleared")
 
     # --- personas ---------------------------------------------------------
 

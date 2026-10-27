@@ -124,9 +124,6 @@ export const api = {
   proxies: (period: Period) =>
     apiRequest<ProxiesSnapshot>(`/api/admin/proxies?period=${period}`),
 
-  stats: (days: number) =>
-    apiRequest<StatsSnapshot>(`/api/admin/stats?days=${days}`),
-
   statsPeriod: (period: Period) =>
     apiRequest<StatsSnapshot>(`/api/admin/stats?period=${period}`),
 

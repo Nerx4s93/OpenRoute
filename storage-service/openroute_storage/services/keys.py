@@ -8,7 +8,6 @@ delete ever targets a row by ``key_id``.
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
 from psycopg import errors
@@ -53,8 +52,8 @@ async def add(
 ) -> bool:
     """True = inserted, False = duplicate hash (``ON CONFLICT DO NOTHING``)."""
     cur = await conn.execute(
-        "INSERT INTO keys (key_hash, key_id, rpm, tpm, models, enabled, added_at)"
-        " VALUES (%s, %s, %s, %s, %s, TRUE, %s)"
+        "INSERT INTO keys (key_hash, key_id, rpm, tpm, models, enabled)"
+        " VALUES (%s, %s, %s, %s, %s, TRUE)"
         " ON CONFLICT (key_hash) DO NOTHING",
         (
             key_hash,
@@ -62,7 +61,6 @@ async def add(
             rpm,
             tpm,
             Jsonb(models) if models is not None else None,
-            time.time(),
         ),
     )
     return cur.rowcount > 0

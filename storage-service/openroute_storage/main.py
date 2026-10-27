@@ -29,8 +29,6 @@ from .errors import StorageError
 from .schema import ensure_schema
 from .schemas import (
     AccountUsage,
-    AffinityClearRequest,
-    AffinityClearResponse,
     AffinityListResponse,
     AffinityUpsertRequest,
     AffinityUpsertResponse,
@@ -172,13 +170,12 @@ async def set_proxy_enabled(
 async def save_proxy_parking(
     body: ProxyParkingRequest, pool: PoolDep
 ) -> dict[str, Any]:
-    """Persist quota parking / timed ban / permanent abusive ban."""
+    """Persist quota parking / permanent abusive ban."""
     async with pool.connection() as conn:
         updated = await proxies_service.save_parking(
             conn,
             body.proxies,
             body.quota_until,
-            body.banned_until,
             body.permanently_banned,
         )
     return {"updated": updated}
@@ -268,16 +265,6 @@ async def upsert_affinity(
     ]
     written, unbound = await affinity_service.upsert_with_fk_fallback(pool, rows)
     return {"written": written, "unbound": unbound}
-
-
-@router.post("/affinity/clear", response_model=AffinityClearResponse)
-async def clear_affinity(
-    body: AffinityClearRequest, pool: PoolDep
-) -> dict[str, Any]:
-    """Unbind sessions (proxy = NULL) while keeping their row/created_at."""
-    async with pool.connection() as conn:
-        cleared = await affinity_service.clear_many(conn, body.session_keys)
-    return {"cleared": cleared}
 
 
 # --- personas ---------------------------------------------------------------

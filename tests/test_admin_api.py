@@ -116,7 +116,6 @@ class FakeState:
     def __init__(self) -> None:
         self.proxies: dict[str, bool] = {}  # full URL -> enabled (manual flag)
         self.quota: dict[str, float] = {}  # full URL -> seconds left
-        self.banned: dict[str, float] = {}  # full URL -> seconds left
         self.permanent_bans: set[str] = set()  # full URL -> forever
         self.last_period = "all"  # last ?period= forwarded to the fake gateway
         self.refreshes = 0  # calls to the forced proxy refresh
@@ -181,7 +180,6 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
         rows = []
         for url, enabled in state.proxies.items():
             quota = state.quota.get(url, 0.0)
-            banned = state.banned.get(url, 0.0)
             permanent = url in state.permanent_bans
             rows.append({
                 "proxy": mask_proxy(url),
@@ -198,13 +196,11 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
                 "egress_group": mask_proxy(url),
                 "quota_seconds_left": quota,
                 "banned": permanent,
-                "banned_seconds_left": 0.0 if permanent else banned,
                 "last_error": None,
             })
         ready = sum(
             1 for p in rows
-            if p["enabled"] and not p["quota_seconds_left"]
-            and not p["banned"] and not p["banned_seconds_left"]
+            if p["enabled"] and not p["quota_seconds_left"] and not p["banned"]
         )
         return {
             "proxies_total": len(rows),
@@ -217,8 +213,6 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
             "egress_groups_ready": ready,
             "egress_groups_quota_parked": sum(
                 1 for p in rows if p["quota_seconds_left"] > 0),
-            "egress_groups_banned": sum(
-                1 for p in rows if p["banned"] or p["banned_seconds_left"] > 0),
             "last_proxies_fetch": None,
             "proxies": rows,
         }
@@ -602,10 +596,8 @@ def _series_payload(length: int, last: int = 0) -> dict:
 # --- service / login / session ---------------------------------------------
 
 
-def test_root_returns_service_json(panel):
-    response = panel.client.get("/")
-    assert response.status_code == 200
-    assert response.json()["service"] == "openroute-web-admin"
+def test_root_is_not_served(panel):
+    assert panel.client.get("/").status_code == 404
 
 
 def test_old_html_pages_are_gone(panel):
@@ -948,11 +940,11 @@ def test_proxy_state_fields(panel):
     panel.seed_proxy(quota_url)
     panel.seed_proxy(ban_url)
     panel.state.quota[quota_url] = 2 * 3600
-    panel.state.banned[ban_url] = 125
+    panel.state.permanent_bans.add(ban_url)
     body = panel.client.get("/api/admin/proxies").json()
     by_display = {p["display"]: p for p in body["proxies"]}
     assert by_display["quota:8080"]["quota_seconds_left"] == pytest.approx(7200)
-    assert by_display["banned:8080"]["banned_seconds_left"] == pytest.approx(125)
+    assert by_display["banned:8080"]["banned"] is True
     assert body["summary"]["proxies_ready"] == 0
 
 
@@ -1078,6 +1070,31 @@ def test_keys_snapshot_and_stats(panel):
     assert stats["default"]["state"] == "active"
     assert stats["default"]["tokens"] == 110
     assert stats["gone"]["state"] == "deleted"
+
+
+def test_models_normalization_is_shared(panel):
+    """The snapshot and the add payload parse models identically."""
+    panel.login_ok()
+    kh = hash_key("csv-key")
+    panel.state.keys[kh] = {
+        "key_hash": kh, "key_id": "csv",
+        "rpm": None, "tpm": None, "models": " alpha , beta ,, ", "enabled": True,
+    }
+    snapshot = panel.client.get("/api/admin/keys").json()
+    rows = {row["key_id"]: row for row in snapshot["keys"]}
+    assert rows["csv"]["models"] == ["alpha", "beta"]
+
+    for value, expected in (
+        (" alpha , beta ,, ", ["alpha", "beta"]),
+        ([" alpha ", "", "beta"], ["alpha", "beta"]),
+        ("   ", None),
+        ([], None),
+        (None, None),
+    ):
+        payload = admin_main.GatewayClient._key_payload(
+            admin_main.KeyAddBody(models=value)
+        )
+        assert payload["models"] == expected
 
 
 def test_add_key_validation(panel):

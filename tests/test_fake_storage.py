@@ -61,10 +61,14 @@ async def test_proxy_snapshot_semantics_parking_and_soft_delete():
 
     assert await fake.save_parking(
         [PROXY_A, PROXY_A, "http://missing.invalid:1"],
-        quota_until=100.0, banned_until=200.0, permanently_banned=True,
+        quota_until=100.0, permanently_banned=True,
     ) == 1
     assert fake.proxies[PROXY_A]["quota_until"] == 100.0
-    assert fake.proxies[PROXY_A]["banned_until"] == 200.0
+    assert fake.proxies[PROXY_A]["permanently_banned"] is True
+    # Retired columns are not part of the row shape any more.
+    assert set(fake.proxies[PROXY_A]) == {
+        "proxy", "enabled", "quota_until", "permanently_banned", "listed",
+    }
 
     # Parking survives a soft removal and comes back when the proxy reappears.
     await fake.sync_proxies([PROXY_B])
@@ -74,7 +78,7 @@ async def test_proxy_snapshot_semantics_parking_and_soft_delete():
     assert fake.proxies[PROXY_A]["quota_until"] == 100.0
 
     # A permanent ban can only be added, never cleared by a later mark.
-    await fake.save_parking([PROXY_A], 0.0, 0.0, False)
+    await fake.save_parking([PROXY_A], 0.0, False)
     assert fake.proxies[PROXY_A]["permanently_banned"] is True
     assert fake.proxies[PROXY_A]["quota_until"] == 0.0
 
@@ -142,7 +146,7 @@ async def test_key_hash_add_rotate_idempotency_and_conflict():
 
 
 @pytest.mark.asyncio
-async def test_affinity_moves_missing_proxy_and_clear_keep_created_at():
+async def test_affinity_moves_missing_proxy_keep_created_at():
     fake = FakeStorage(proxies=[PROXY_A, PROXY_B])
 
     assert await fake.upsert_affinity([{
@@ -174,13 +178,6 @@ async def test_affinity_moves_missing_proxy_and_clear_keep_created_at():
 
     loaded = await fake.load_affinity()
     assert [row["session_key"] for row in loaded] == ["sid:gone", "sid:one"]
-
-    # Clearing keeps the row (and its S slot) and ignores duplicates/misses.
-    assert await fake.clear_affinity(
-        ["sid:one", "sid:one", "sid:missing"]
-    ) == 1
-    assert fake.affinity["sid:one"]["proxy"] is None
-    assert fake.affinity["sid:one"]["created_at"] == 10.0
 
 
 # --- personas ---------------------------------------------------------------

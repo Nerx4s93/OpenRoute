@@ -59,7 +59,6 @@ class Settings(BaseSettings):
     connect_timeout: float = 10.0
 
     # --- pool / breaker / 429 parking ---
-    proxy_cooldown_default_seconds: float = 60.0  # when no usable Retry-After
     account_fail_threshold: int = 3
     account_fail_window_seconds: float = 60.0
     account_cooldown_seconds: float = 60.0
@@ -79,9 +78,6 @@ class Settings(BaseSettings):
     affinity_weight_requests: float = 1.0
     affinity_weight_tokens: float = 1.0
     quota_reset_margin_seconds: float = 60.0
-    # Deprecated: 403 abusive traffic is a permanent ban now. Kept so existing
-    # deployments can keep the env var (the field set is a frozen contract).
-    abusive_ban_seconds: float = 86_400.0
 
     # --- synthetic client identity per proxy quota bucket ---
     # One persona (session/project/trace) per bucket, substituted into the

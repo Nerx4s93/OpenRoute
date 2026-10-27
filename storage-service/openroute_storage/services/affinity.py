@@ -7,8 +7,8 @@ proxy therefore unbinds its sessions exactly as before.
 
 A batch upsert that references a proxy removed in a race would fail with a FK
 violation. Instead of losing the whole coalesced batch, the service retries
-row by row — the same protection ``AffinityManager._retry_fk_batch`` applied on
-the gateway side — and stores the affected binding as ``proxy = NULL``.
+row by row and stores the affected binding as ``proxy = NULL``; the healthy
+rows in the same batch are still written.
 """
 
 from __future__ import annotations
@@ -83,16 +83,4 @@ async def upsert_with_fk_fallback(
     return written, unbound
 
 
-async def clear_many(conn: Any, session_keys: list[str]) -> int:
-    """Unbind sessions (``proxy = NULL``), keeping their row and ``created_at``."""
-    keys = list(dict.fromkeys(k for k in session_keys if k))
-    if not keys:
-        return 0
-    cur = await conn.execute(
-        "UPDATE session_affinity SET proxy = NULL WHERE session_key = ANY(%s)",
-        (keys,),
-    )
-    return cur.rowcount
-
-
-__all__ = ["clear_many", "load_all", "upsert_with_fk_fallback"]
+__all__ = ["load_all", "upsert_with_fk_fallback"]

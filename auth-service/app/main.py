@@ -112,11 +112,6 @@ async def _sessions_unavailable(request: Request, exc: SessionUnavailable) -> JS
 # --- routes -----------------------------------------------------------------
 
 
-@router.get("/", include_in_schema=False)
-async def index() -> dict:
-    return {"service": "openroute-auth", "status": "ok"}
-
-
 @router.get("/health", include_in_schema=False)
 async def health(request: Request) -> dict:
     """Liveness plus Redis/session state; disabled panel needs no Redis."""

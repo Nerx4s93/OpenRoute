@@ -16,7 +16,6 @@ Backend админки OpenRoute (control plane). Отдаёт **только JS
 
 | Метод | Путь | Описание |
 |-------|------|----------|
-| GET | `/` | служебный JSON (`{"service":"openroute-web-admin"}`) |
 | GET | `/health` | liveness + число живых сессий из auth-service |
 | GET | `/api/admin/session` | текущая сессия + CSRF-токен (200 и без входа) |
 | POST | `/api/admin/login` | вход по паролю (проверяет auth-service); ставит HttpOnly cookie |
@@ -44,7 +43,7 @@ N−1 дней, начиная с 00:00. Старые `day`, `week`, `month` с�
 
 - Прокси: `{server_time, summary, totals, proxies[], recent[]}`. У каждой строки
   есть `display` (`host:port`), `usage`, состояние (`enabled`, `manual`,
-  `disabled`, `banned`, таймеры) и `id` — HMAC от полного URL. `totals` —
+  `banned`, таймеры) и `id` — HMAC от полного URL. `totals` —
   `{tokens_total}`. `summary` и `usage` строки не изменились. **Полный URL с
   логином и паролем никогда не попадает в браузер**; backend хранит его
   только в памяти процесса и резолвит `proxy_id` при мутации.

@@ -13,23 +13,17 @@ Semantics:
 
 from __future__ import annotations
 
-import time
 from typing import Any
 
-_PROXY_FIELDS = (
-    "proxy, enabled, added_at, quota_until, banned_until,"
-    " permanently_banned, listed"
-)
+_PROXY_FIELDS = "proxy, enabled, quota_until, permanently_banned, listed"
 
 
 def _row(values: tuple[Any, ...]) -> dict[str, Any]:
-    proxy, enabled, added_at, quota_until, banned_until, permanent, listed = values
+    proxy, enabled, quota_until, permanent, listed = values
     return {
         "proxy": proxy,
         "enabled": bool(enabled),
-        "added_at": float(added_at),
         "quota_until": float(quota_until or 0.0),
-        "banned_until": float(banned_until or 0.0),
         "permanently_banned": bool(permanent),
         "listed": bool(listed),
     }
@@ -62,13 +56,12 @@ async def sync(
     """
     deduped = list(dict.fromkeys(p for p in proxies if p))
     added = 0
-    now = time.time()
     for proxy in deduped:
         cur = await conn.execute(
-            "INSERT INTO proxies (proxy, enabled, added_at, listed)"
-            " VALUES (%s, %s, %s, TRUE)"
+            "INSERT INTO proxies (proxy, enabled, listed)"
+            " VALUES (%s, %s, TRUE)"
             " ON CONFLICT (proxy) DO NOTHING",
-            (proxy, bool(enable_new), now),
+            (proxy, bool(enable_new)),
         )
         added += cur.rowcount
     if deduped:
@@ -92,22 +85,21 @@ async def save_parking(
     conn: Any,
     proxies: list[str],
     quota_until: float,
-    banned_until: float,
     permanently_banned: bool,
 ) -> int:
     """Persist parking for every URL of one quota bucket; returns rows hit.
 
-    Numeric epochs are written as-is (an expired epoch is harmless and the
-    next mark overwrites it); a permanent ban can only be added, never removed.
+    The epoch is written as-is (an expired epoch is harmless and the next mark
+    overwrites it); a permanent ban can only be added, never removed.
     """
     urls = list(dict.fromkeys(p for p in proxies if p))
     if not urls:
         return 0
     cur = await conn.execute(
-        "UPDATE proxies SET quota_until = %s, banned_until = %s,"
+        "UPDATE proxies SET quota_until = %s,"
         " permanently_banned = permanently_banned OR %s"
         " WHERE proxy = ANY(%s)",
-        (float(quota_until), float(banned_until), bool(permanently_banned), urls),
+        (float(quota_until), bool(permanently_banned), urls),
     )
     return cur.rowcount
 

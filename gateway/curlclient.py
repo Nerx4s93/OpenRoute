@@ -189,7 +189,7 @@ class UpstreamClient:
             full = f"{self._base}/{url.lstrip('/')}"
         return _PreparedRequest(method, full, params, _ordered(headers), content)
 
-    async def send(self, request: _PreparedRequest, stream: bool = True) -> Response:
+    async def send(self, request: _PreparedRequest) -> Response:
         # curl_cffi always runs the request in streaming mode here; buffering
         # is done by Response.aread() consuming the body. The fingerprint is
         # applied per request: any of it drifting in a curl_cffi upgrade would
@@ -238,3 +238,17 @@ class UpstreamClient:
 
     async def __aexit__(self, *exc_info) -> None:
         await self.aclose()
+
+
+async def send_streaming(client: "UpstreamClient | httpx.AsyncClient", request):
+    """Send ``request`` and return the response before its body is read.
+
+    ``UpstreamClient.send`` always streams; a plain ``httpx.AsyncClient``
+    (the scripted transports used by tests) buffers the body in ``send()``
+    unless asked otherwise. The gateway's request path needs the response
+    headers first so a mid-stream failure surfaces as a stream error rather
+    than a failed proxy attempt.
+    """
+    if isinstance(client, UpstreamClient):
+        return await client.send(request)
+    return await client.send(request, stream=True)

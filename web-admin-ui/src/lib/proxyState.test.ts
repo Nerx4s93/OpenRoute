@@ -8,10 +8,8 @@ function row(overrides: Partial<ProxyRow> = {}): ProxyRow {
     display: "10.0.0.1:8080",
     enabled: true,
     manual: false,
-    disabled: false,
     banned: false,
     quota_seconds_left: 0,
-    banned_seconds_left: 0,
     cooldown_seconds_left: 0,
     rpm_capped: false,
     last_error: null,
@@ -26,16 +24,10 @@ describe("proxyState precedence", () => {
     expect(state).toMatchObject({ key: "ban", label: "banned", tone: "err" });
   });
 
-  it("distinguishes dead, manual and not-in-pool proxies", () => {
-    expect(proxyState(row({ disabled: true }), "en")).toMatchObject({
-      key: "dead",
-      label: "dead",
-      dead: true,
-    });
+  it("distinguishes manual and not-in-pool proxies", () => {
     expect(proxyState(row({ manual: true }), "en")).toMatchObject({
       key: "off",
       label: "disabled",
-      dead: true,
     });
     expect(proxyState(row({ enabled: false }), "en")).toMatchObject({
       key: "noproxy",
@@ -45,9 +37,6 @@ describe("proxyState precedence", () => {
   });
 
   it("reports time-based and rpm states", () => {
-    expect(proxyState(row({ banned_seconds_left: 125 }), "en").label).toBe(
-      "banned 2m",
-    );
     expect(proxyState(row({ quota_seconds_left: 7200 }), "en").label).toBe(
       "limit 2h 00m",
     );
@@ -67,8 +56,8 @@ describe("proxyState precedence", () => {
 
   it("localizes labels into Russian", () => {
     expect(proxyState(row({ banned: true }), "ru").label).toBe("бан");
-    expect(proxyState(row({ banned_seconds_left: 125 }), "ru").label).toBe(
-      "бан 2м",
+    expect(proxyState(row({ quota_seconds_left: 125 }), "ru").label).toBe(
+      "лимит 2м",
     );
   });
 });

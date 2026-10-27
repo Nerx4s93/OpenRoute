@@ -12,17 +12,14 @@ import type { KeysSnapshot, ProxiesSnapshot, StatsSnapshot } from "./api/types";
 const proxies: ProxiesSnapshot = {
   server_time: "2026-10-20T10:00:00+00:00",
   summary: { requests: 12, errors: 1, tokens: 340, proxies_ready: 1, proxies_total: 1 },
-  totals: { tokens_total: 3400 },
   proxies: [
     {
       id: "proxy-1",
       display: "203.0.113.10:8080",
       enabled: true,
       manual: false,
-      disabled: false,
       banned: false,
       quota_seconds_left: 0,
-      banned_seconds_left: 0,
       cooldown_seconds_left: 0,
       rpm_capped: false,
       last_error: null,
@@ -30,6 +27,30 @@ const proxies: ProxiesSnapshot = {
     },
   ],
   recent: [],
+};
+
+const datedProxies: ProxiesSnapshot = {
+  ...proxies,
+  proxies: [
+    {
+      ...proxies.proxies[0],
+      id: "proxy-dated",
+      display: "203.0.113.11:8080",
+      px6: {
+        id: "1",
+        version: "6",
+        country: "ru",
+        date_end: "2026-12-01 00:00:00",
+        descr: "",
+      },
+    },
+    {
+      ...proxies.proxies[0],
+      id: "proxy-undated",
+      display: "203.0.113.12:8080",
+      px6: { id: "2", version: "6", country: "ru", date_end: "", descr: "" },
+    },
+  ],
 };
 
 const stats: StatsSnapshot = {
@@ -413,6 +434,30 @@ describe("App", () => {
     expect(setCall).toBeTruthy();
     expect((setCall?.[1] as RequestInit).method).toBe("POST");
     expect(String((setCall?.[1] as RequestInit).body)).toContain('"enabled":false');
+  });
+
+  it("formats the px6 valid-until date and keeps a dash when it is empty", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/admin/session")) {
+          return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
+        }
+        if (url.includes("/api/admin/proxies/account")) {
+          return json({ user_id: "px6-user", balance: 250.5, currency: "RUB" });
+        }
+        if (url.includes("/api/admin/proxies")) return json(datedProxies);
+        return json({});
+      }),
+    );
+
+    renderApp("/admin/proxies");
+
+    const dated = await screen.findByRole("row", { name: /203\.0\.113\.11:8080/ });
+    expect(within(dated).getByText("Dec 1")).toBeInTheDocument();
+    const undated = screen.getByRole("row", { name: /203\.0\.113\.12:8080/ });
+    expect(within(undated).getByText("—")).toBeInTheDocument();
   });
 
   it("allows 3-day purchases only for IPv6", async () => {

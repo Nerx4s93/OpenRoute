@@ -7,9 +7,9 @@ affinity bindings, personas and the request log live in an in-memory
 project directory is never used for writes.
 
 Edge routing is modelled with ``_EdgeShim``: like nginx in production, it
-forwards ``/v1/*``, ``/health``, ``/docs`` to the gateway and hides
-``/internal/*`` and legacy ``/admin/*`` (404). The ``internal`` client exposes
-``/internal/*`` for tests of that surface.
+forwards ``/v1/*``, ``/openapi.json``, ``/docs`` and ``/health`` to the gateway
+and hides ``/internal/*`` and legacy ``/admin/*`` (404). The ``internal`` client
+exposes ``/internal/*`` for tests of that surface.
 """
 
 import asyncio
@@ -126,17 +126,17 @@ class _AsyncioShim:
         await asyncio.sleep(0)
 
 
-_GATEWAY_PREFIXES = ("/v1/", "/openapi.json", "/docs", "/redoc", "/health")
+_GATEWAY_PREFIXES = ("/v1/", "/openapi.json", "/docs", "/health")
 
 
 class _EdgeShim:
     """ASGI composite modelling the edge (nginx) routing.
 
-    ``/v1/*``, ``/health``, ``/docs`` go to the gateway; ``/internal/*`` and
-    the removed ``/admin/*`` surface are hidden (404) unless ``expose_internal``
-    is set (the tests' stand-in for the internal port). The lifespan scope is
-    completed locally so that the gateway lifespan is run exactly once (by the
-    dedicated lifespan client in ``Gateway``).
+    ``/v1/*``, ``/openapi.json``, ``/docs`` and ``/health`` go to the gateway;
+    ``/internal/*`` and the removed ``/admin/*`` surface are hidden (404) unless
+    ``expose_internal`` is set (the tests' stand-in for the internal port). The
+    lifespan scope is completed locally so that the gateway lifespan is run
+    exactly once (by the dedicated lifespan client in ``Gateway``).
     """
 
     def __init__(self, gw_app, *, expose_internal: bool = False):
@@ -153,7 +153,7 @@ class _EdgeShim:
                     await send({"type": "lifespan.shutdown.complete"})
                     return
         path = scope.get("path", "")
-        if path in ("/v1",) or path.startswith(_GATEWAY_PREFIXES):
+        if path.startswith(_GATEWAY_PREFIXES):
             return await self._gw(scope, receive, send)
         if self._expose_internal and path.startswith("/internal"):
             return await self._gw(scope, receive, send)

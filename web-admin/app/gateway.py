@@ -85,10 +85,6 @@ def _localize(message: str) -> str:
         "Comment must be at most 50 characters": "Комментарий не длиннее 50 символов",
         "Invalid numeric purchase parameter": "Некорректный числовой параметр покупки",
         "auto_prolong must be a boolean": "Некорректный флаг автопродления",
-        "Proxies purchased, list refreshed, new proxies enabled":
-            "Прокси куплены, список обновлён, новые прокси включены",
-        "Proxies purchased; list refresh failed":
-            "Прокси куплены, но список не обновился",
     }
     if message in exact:
         return exact[message]
@@ -186,6 +182,15 @@ def _as_float(value: object, default: float = 0.0) -> float:
         return default
 
 
+def _normalize_models(value: object) -> list[str] | None:
+    """Normalize a key's model allow-list: trim parts, drop empties, empty -> None."""
+    if isinstance(value, str):
+        return [part.strip() for part in value.split(",") if part.strip()] or None
+    if isinstance(value, list):
+        return [str(part).strip() for part in value if str(part).strip()] or None
+    return None
+
+
 def _iso_from_epoch(value: object) -> str:
     """Render a gateway epoch timestamp as an ISO-8601 UTC clock label."""
     try:
@@ -227,10 +232,8 @@ def _proxy_state_fields(row: dict) -> dict:
     return {
         "enabled": bool(row.get("enabled", True)),
         "manual": bool(row.get("manual", False)),
-        "disabled": bool(row.get("disabled", False)),
         "banned": bool(row.get("banned") or row.get("permanently_banned")),
         "quota_seconds_left": _as_float(row.get("quota_seconds_left")),
-        "banned_seconds_left": _as_float(row.get("banned_seconds_left")),
         "cooldown_seconds_left": _as_float(row.get("cooldown_seconds_left")),
         "rpm_capped": bool(row.get("rpm_capped", False)),
         "last_error": _strip_credentials(row.get("last_error")) or None,
@@ -531,15 +534,7 @@ class GatewayClient:
             if not isinstance(raw, dict):
                 continue
             key_id = str(raw.get("key_id", ""))
-            raw_models = raw.get("models")
-            if isinstance(raw_models, str):
-                models: list[str] | None = [
-                    part.strip() for part in raw_models.split(",") if part.strip()
-                ] or None
-            elif isinstance(raw_models, list):
-                models = [str(part).strip() for part in raw_models if str(part).strip()] or None
-            else:
-                models = None
+            models = _normalize_models(raw.get("models"))
             row = {
                 "key_hash": str(raw.get("key_hash", "")),
                 "key_id": key_id,
@@ -593,18 +588,11 @@ class GatewayClient:
 
     @staticmethod
     def _key_payload(body: KeyAddBody) -> dict:
-        models = body.models
-        if isinstance(models, str):
-            models = [part.strip() for part in models.split(",") if part.strip()] or None
-        elif isinstance(models, list):
-            models = [str(part).strip() for part in models if str(part).strip()] or None
-        else:
-            models = None
         return {
             "key_id": body.key_id.strip(),
             "rpm": body.rpm,
             "tpm": body.tpm,
-            "models": models,
+            "models": _normalize_models(body.models),
         }
 
     @staticmethod

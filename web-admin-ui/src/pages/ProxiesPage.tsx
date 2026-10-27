@@ -10,14 +10,9 @@ import { useProxiesLive } from "../hooks/useLiveSnapshot";
 import { usePeriod } from "../hooks/usePeriod";
 import { usePx6Account } from "../hooks/usePx6";
 import { useI18n } from "../i18n";
-import { formatMoney, formatNumber } from "../lib/format";
+import { formatMoney, formatNumber, formatShortDate } from "../lib/format";
 import { countryLabel, versionLabel } from "../lib/px6";
 import { proxyState } from "../lib/proxyState";
-
-function proxyDate(value: string): string {
-  if (!value) return "—";
-  return value;
-}
 
 export function ProxiesPage() {
   const { language, t } = useI18n();
@@ -155,7 +150,11 @@ function ProxyTableRow({ row }: { row: ProxyRow }) {
       <td className="mono">{row.display}</td>
       <td>{countryLabel(meta?.country ?? "", language)}</td>
       <td>{versionLabel(meta?.version ?? "", language)}</td>
-      <td className="mono muted">{proxyDate(meta?.date_end ?? "")}</td>
+      <td className="mono muted">
+        {meta?.date_end
+          ? formatShortDate(meta.date_end.slice(0, 10), language)
+          : "—"}
+      </td>
       <td><StatusBadge label={state.label} tone={state.tone} /></td>
       <td>{formatNumber(row.usage.tokens, language)}</td>
       <td className="actions">

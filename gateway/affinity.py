@@ -28,7 +28,7 @@ import logging
 import time
 from collections import deque
 from dataclasses import dataclass, field
-from typing import Iterable, Optional
+from typing import Optional
 
 from .config import Settings
 from .proxies import EgressGroup, NoReadyProxyError, Proxy, ProxyManager, mask_proxy
@@ -49,11 +49,6 @@ class SessionIdentity:
 
     session_id: str
     key: str | None
-    kind: str  # "sid" | "fp" | "one-shot"
-
-    @property
-    def is_one_shot(self) -> bool:
-        return self.key is None
 
 
 @dataclass
@@ -365,10 +360,6 @@ class AffinityManager:
         one_r, one_t = self._oneshot_stats(group, now)
         return s_count, reqs + one_r, toks + one_t
 
-    def group_stats(self, group: EgressGroup) -> tuple[int, int, int]:
-        """Public ``(S, R, T)`` snapshot for one egress group."""
-        return self._aggregate(group)
-
     def _scores(self, candidates: list[EgressGroup],
                 extra: Optional[SessionState] = None) -> dict[str, float]:
         """Weighted normalised score per candidate (maxima among candidates)."""
@@ -387,19 +378,6 @@ class AffinityManager:
                 + (wt * toks / tmax if tmax else 0.0)
             )
         return out
-
-    def score(self, group: EgressGroup,
-              extra: Optional[SessionState] = None,
-              candidates: Optional[Iterable[EgressGroup]] = None) -> float:
-        """Score one group; maxima are computed over ``candidates``.
-
-        With no ``candidates`` argument every egress group participates; the
-        selection path always passes its ready candidate list explicitly.
-        """
-        cands = list(candidates) if candidates is not None else self.proxies.egress_groups()
-        if group not in cands:
-            cands.append(group)
-        return self._scores(cands, extra).get(group.host, 0.0)
 
     # --- selection ---------------------------------------------------------
 
@@ -489,7 +467,7 @@ class AffinityManager:
             return
         proxy = self._find_proxy(self.proxies, state.proxy)
         group = self.proxies.group_of(state.proxy)
-        if proxy is None or not proxy.enabled or proxy.disabled or proxy.manually_disabled:
+        if proxy is None or not proxy.enabled or proxy.manually_disabled:
             target: Optional[Proxy] = None
             if group is not None:
                 try:
@@ -639,7 +617,6 @@ class AffinityManager:
 
     def _evacuate_sync(self, group: EgressGroup, *,
                        quota_until: Optional[float] = None,
-                       banned_until: Optional[float] = None,
                        permanent_ban: bool = False,
                        exclude: Optional[set[str]] = None) -> list[SessionState]:
         """Park + move sessions in-memory without a single ``await``.
@@ -653,8 +630,6 @@ class AffinityManager:
         now = self._now_wall()
         if quota_until is not None:
             self.proxies.mark_quota_exhausted(group, quota_until)
-        if banned_until is not None:
-            self.proxies.mark_banned(group, banned_until)
         if permanent_ban:
             self.proxies.mark_permanently_banned(group)
 
@@ -688,7 +663,6 @@ class AffinityManager:
 
     async def evacuate(self, group: EgressGroup, *,
                        quota_until: Optional[float] = None,
-                       banned_until: Optional[float] = None,
                        permanent_ban: bool = False,
                        exclude: Optional[set[str]] = None) -> list[SessionState]:
         """Async wrapper around :meth:`_evacuate_sync`.
@@ -698,7 +672,7 @@ class AffinityManager:
         persistence write is backgrounded.
         """
         return self._evacuate_sync(
-            group, quota_until=quota_until, banned_until=banned_until,
+            group, quota_until=quota_until,
             permanent_ban=permanent_ban, exclude=exclude,
         )
 
@@ -739,10 +713,6 @@ class AffinityManager:
                 "ready": self.proxies.group_is_ready(group, now_wall=now),
                 "quota_seconds_left": round(max(0.0, group.quota_until - now), 1),
                 "banned": group.permanently_banned,
-                "banned_seconds_left": (
-                    0.0 if group.permanently_banned
-                    else round(max(0.0, group.banned_until - now), 1)
-                ),
             })
         return {
             "enabled": bool(self._s.affinity_enabled),

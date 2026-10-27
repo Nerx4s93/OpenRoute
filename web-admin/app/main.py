@@ -71,15 +71,6 @@ def _normalize_period(period: str) -> str:
     return value if value in _PERIODS else "all"
 
 
-def _normalize_days(days: int) -> int:
-    """Clamp the statistics window to a sane range of days."""
-    try:
-        value = int(days)
-    except (TypeError, ValueError):
-        return 30
-    return max(1, min(365, value))
-
-
 @asynccontextmanager
 async def _lifespan(_: FastAPI) -> AsyncIterator[None]:
     yield
@@ -276,11 +267,6 @@ async def _validation_error(request: Request, exc: RequestValidationError) -> JS
 # --- routes: service / session --------------------------------------------
 
 
-@app.get("/", include_in_schema=False)
-async def index() -> dict:
-    return {"service": "openroute-web-admin", "status": "ok"}
-
-
 @app.get("/health", include_in_schema=False)
 async def health() -> dict:
     return {"status": "ok", "sessions": await auth_client.health()}
@@ -310,7 +296,6 @@ async def api_login(request: Request) -> Response:
         raise HTTPException(404, "Админка выключена (задайте ADMIN_PASSWORD)")
 
     body = await _json_body(request, LoginBody)
-    assert isinstance(body, LoginBody)
     try:
         session = await auth_client.login(body.password, auth.client_ip(request))
     except PanelDisabled as exc:
@@ -364,7 +349,6 @@ async def api_proxies(period: str = "all", session: dict = Depends(require_panel
 @app.post(f"{_PANEL_API}/proxies/set")
 async def api_proxy_set(request: Request, session: dict = Depends(require_panel)) -> dict:
     body = await _json_body(request, ProxySetBody)
-    assert isinstance(body, ProxySetBody)
     return await gateway.set_proxy(body.proxy_id, body.enabled)
 
 
@@ -399,7 +383,6 @@ async def api_proxy_price(
 @app.post(f"{_PANEL_API}/proxies/buy")
 async def api_proxy_buy(request: Request, session: dict = Depends(require_panel)) -> dict:
     body = await _json_body(request, ProxyBuyBody)
-    assert isinstance(body, ProxyBuyBody)
     return await gateway.buy_proxies(body.model_dump())
 
 
@@ -421,7 +404,7 @@ async def api_stats(
     """Token statistics for ``period`` or the last ``days`` days."""
     if period is not None:
         return await gateway.stats_snapshot(period=_normalize_period(period))
-    return await gateway.stats_snapshot(_normalize_days(days))
+    return await gateway.stats_snapshot(max(1, min(365, days)))
 
 
 # --- routes: keys ----------------------------------------------------------
@@ -435,28 +418,24 @@ async def api_keys(period: str = "all", session: dict = Depends(require_panel)) 
 @app.post(f"{_PANEL_API}/keys/add")
 async def api_key_add(request: Request, session: dict = Depends(require_panel)) -> dict:
     body = await _json_body(request, KeyAddBody)
-    assert isinstance(body, KeyAddBody)
     return await gateway.add_key(body)
 
 
 @app.post(f"{_PANEL_API}/keys/rotate")
 async def api_key_rotate(request: Request, session: dict = Depends(require_panel)) -> dict:
     body = await _json_body(request, KeyRotateBody)
-    assert isinstance(body, KeyRotateBody)
     return await gateway.rotate_key(body.key_hash)
 
 
 @app.post(f"{_PANEL_API}/keys/set")
 async def api_key_set(request: Request, session: dict = Depends(require_panel)) -> dict:
     body = await _json_body(request, KeySetBody)
-    assert isinstance(body, KeySetBody)
     return await gateway.set_key(body.key_hash, body.enabled)
 
 
 @app.post(f"{_PANEL_API}/keys/delete")
 async def api_key_delete(request: Request, session: dict = Depends(require_panel)) -> dict:
     body = await _json_body(request, KeyDeleteBody)
-    assert isinstance(body, KeyDeleteBody)
     return await gateway.delete_key(body.key_hash)
 
 

@@ -116,6 +116,14 @@ def test_schema_contract_covers_every_storage_table():
     assert "ON DELETE SET NULL" in ddl
     assert "permanently_banned" in ddl
     assert "listed" in ddl
+    # Retired columns/indexes are removed by forward-only DROP statements so a
+    # pre-existing database converges on the current shape.
+    assert "CREATE INDEX IF NOT EXISTS idx_session_affinity_used" not in ddl
+    assert "DROP INDEX IF EXISTS idx_session_affinity_used" in ddl
+    assert "ADD COLUMN IF NOT EXISTS banned_until" not in ddl
+    assert "ALTER TABLE proxies DROP COLUMN IF EXISTS added_at" in ddl
+    assert "ALTER TABLE proxies DROP COLUMN IF EXISTS banned_until" in ddl
+    assert "ALTER TABLE keys DROP COLUMN IF EXISTS added_at" in ddl
 
 
 def test_schema_created_and_repeat_startup_is_idempotent(pg_dsn):
@@ -148,13 +156,128 @@ def test_schema_created_and_repeat_startup_is_idempotent(pg_dsn):
         assert {
             "idx_request_log_ts", "idx_request_log_key",
             "idx_request_log_account_ts", "idx_session_affinity_proxy",
-            "idx_session_affinity_used",
         } <= indexes
+        assert "idx_session_affinity_used" not in indexes
+        columns = {
+            (table, column)
+            for table, column in conn.execute(
+                "SELECT table_name, column_name"
+                " FROM information_schema.columns"
+                " WHERE table_schema = 'public'"
+                " AND table_name IN ('proxies', 'keys')"
+            ).fetchall()
+        }
+        assert ("proxies", "added_at") not in columns
+        assert ("proxies", "banned_until") not in columns
+        assert ("keys", "added_at") not in columns
         fk = conn.execute(
             "SELECT confdeltype FROM pg_constraint"
             " WHERE conrelid = 'session_affinity'::regclass AND contype = 'f'"
         ).fetchone()
     assert fk is not None and fk[0] == "n"  # ON DELETE SET NULL
+
+
+def test_schema_drops_retired_columns_and_index_from_an_existing_db(pg_dsn):
+    """A database created by the previous DDL converges on the current shape."""
+    legacy_proxy = "http://legacy.invalid:8080"
+    legacy_hash = "e" * 64
+    with psycopg.connect(pg_dsn, autocommit=True) as conn:
+        conn.execute(
+            "CREATE TABLE proxies ("
+            " id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,"
+            " proxy TEXT NOT NULL UNIQUE,"
+            " enabled BOOLEAN NOT NULL DEFAULT TRUE,"
+            " added_at DOUBLE PRECISION NOT NULL,"
+            " quota_until DOUBLE PRECISION NOT NULL DEFAULT 0,"
+            " banned_until DOUBLE PRECISION NOT NULL DEFAULT 0,"
+            " permanently_banned BOOLEAN NOT NULL DEFAULT FALSE,"
+            " listed BOOLEAN NOT NULL DEFAULT TRUE)"
+        )
+        conn.execute(
+            "CREATE TABLE keys ("
+            " id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,"
+            " key_hash TEXT NOT NULL UNIQUE,"
+            " key_id TEXT NOT NULL,"
+            " rpm INTEGER,"
+            " tpm INTEGER,"
+            " models JSONB,"
+            " enabled BOOLEAN NOT NULL DEFAULT TRUE,"
+            " added_at DOUBLE PRECISION NOT NULL)"
+        )
+        conn.execute(
+            "CREATE TABLE session_affinity ("
+            " session_key TEXT PRIMARY KEY,"
+            " proxy TEXT REFERENCES proxies(proxy) ON DELETE SET NULL,"
+            " created_at DOUBLE PRECISION NOT NULL,"
+            " last_used_at DOUBLE PRECISION NOT NULL)"
+        )
+        conn.execute(
+            "CREATE INDEX idx_session_affinity_used"
+            " ON session_affinity (last_used_at)"
+        )
+        conn.execute(
+            "INSERT INTO proxies (proxy, added_at) VALUES (%s, 100.0)",
+            (legacy_proxy,),
+        )
+        conn.execute(
+            "INSERT INTO keys (key_hash, key_id, added_at)"
+            " VALUES (%s, 'legacy', 100.0)",
+            (legacy_hash,),
+        )
+
+    with _client(pg_dsn) as client:
+        assert client.get("/health").status_code == 200
+
+        # The pre-existing rows survive and are served by the new row schema.
+        rows = _by_proxy(client.get("/proxies").json())
+        assert set(rows) == {legacy_proxy}
+        assert rows[legacy_proxy] == {
+            "proxy": legacy_proxy,
+            "enabled": True,
+            "quota_until": 0.0,
+            "permanently_banned": False,
+            "listed": True,
+        }
+        keys = client.get("/keys").json()["keys"]
+        assert keys == [{
+            "key_hash": legacy_hash,
+            "key_id": "legacy",
+            "rpm": None,
+            "tpm": None,
+            "models": None,
+            "enabled": True,
+        }]
+
+        # Writes no longer reference the dropped columns.
+        assert client.post(
+            "/proxies/sync", json={"proxies": [legacy_proxy]}
+        ).json()["added"] == 0
+        assert client.post(
+            "/keys", json={"key_hash": "f" * 64, "key_id": "new"}
+        ).json() == {"created": True}
+
+    with psycopg.connect(pg_dsn) as conn:
+        columns = {
+            (table, column)
+            for table, column in conn.execute(
+                "SELECT table_name, column_name"
+                " FROM information_schema.columns"
+                " WHERE table_schema = 'public'"
+                " AND table_name IN ('proxies', 'keys')"
+            ).fetchall()
+        }
+        assert ("proxies", "added_at") not in columns
+        assert ("proxies", "banned_until") not in columns
+        assert ("keys", "added_at") not in columns
+        indexes = {
+            row[0]
+            for row in conn.execute(
+                "SELECT indexname FROM pg_indexes"
+                " WHERE tablename = 'session_affinity'"
+            ).fetchall()
+        }
+        assert "idx_session_affinity_used" not in indexes
+        assert "idx_session_affinity_proxy" in indexes
 
 
 def test_startup_fails_clearly_when_postgres_is_unreachable():
@@ -243,7 +366,6 @@ def test_proxy_sync_preserves_flags_and_parking_and_soft_deletes(pg_dsn):
             json={
                 "proxies": [a],
                 "quota_until": 111.0,
-                "banned_until": 222.0,
                 "permanently_banned": True,
             },
         )
@@ -261,7 +383,6 @@ def test_proxy_sync_preserves_flags_and_parking_and_soft_deletes(pg_dsn):
         assert set(rows) == {a, b, c}
         assert rows[a]["enabled"] is True
         assert rows[a]["quota_until"] == 111.0
-        assert rows[a]["banned_until"] == 222.0
         assert rows[a]["permanently_banned"] is True
         assert rows[a]["listed"] is True
         assert rows[b]["listed"] is False  # soft delete, row retained
@@ -280,13 +401,12 @@ def test_proxy_sync_preserves_flags_and_parking_and_soft_deletes(pg_dsn):
             json={
                 "proxies": [a],
                 "quota_until": 0.0,
-                "banned_until": 0.0,
                 "permanently_banned": False,
             },
         )
         assert cleared.json() == {"updated": 1}
         row = _by_proxy(client.get("/proxies").json())[a]
-        assert row["quota_until"] == 0.0 and row["banned_until"] == 0.0
+        assert row["quota_until"] == 0.0
         assert row["permanently_banned"] is True  # never cleared
 
         # An empty snapshot unlists every row but keeps the rows.
@@ -467,7 +587,7 @@ def test_keys_hash_only_crud_and_duplicate_key_id_targeting(pg_dsn):
 # --- affinity ---------------------------------------------------------------
 
 
-def test_affinity_upsert_move_clear_and_missing_proxy(pg_dsn):
+def test_affinity_upsert_move_and_missing_proxy(pg_dsn):
     p1 = "http://p1.invalid:8080"
     p2 = "http://p2.invalid:8080"
     missing = "http://missing.invalid:1"
@@ -524,20 +644,6 @@ def test_affinity_upsert_move_clear_and_missing_proxy(pg_dsn):
         }
         assert rows["sid:two"]["proxy"] == p2
         assert rows["sid:three"]["proxy"] is None
-
-        cleared = client.post(
-            "/affinity/clear",
-            json={"session_keys": ["sid:one", "sid:missing"]},
-        )
-        assert cleared.json() == {"cleared": 1}
-        rows = {
-            row["session_key"]: row
-            for row in client.get("/affinity").json()["bindings"]
-        }
-        assert rows["sid:one"] == {
-            "session_key": "sid:one", "proxy": None,
-            "created_at": 100.0, "last_used_at": 120.0,
-        }
 
         # FK ON DELETE SET NULL: an external proxy removal unbinds the session.
         assert client.post(

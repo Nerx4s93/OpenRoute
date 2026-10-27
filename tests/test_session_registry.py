@@ -1,4 +1,9 @@
-"""Unit tests for gateway.sessions — conversation-scoped upstream session ids."""
+"""Unit tests for ``gateway.sessions.SessionRegistry``.
+
+Conversation-scoped upstream session ids on the data plane. Admin login
+sessions (Redis, TTL, CSRF, logout) belong to auth-service and are not covered
+by this module.
+"""
 
 from gateway import opencode
 from gateway.sessions import SessionRegistry

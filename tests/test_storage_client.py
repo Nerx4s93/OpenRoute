@@ -30,9 +30,7 @@ SECRET_BODY = "upstream-body-DO-NOT-LEAK"
 PROXY = {
     "proxy": "http://proxy-a.invalid:8080",
     "enabled": True,
-    "added_at": 100.0,
     "quota_until": 0.0,
-    "banned_until": 0.0,
     "permanently_banned": False,
     "listed": True,
 }
@@ -155,8 +153,7 @@ async def test_proxy_methods_paths_payloads_and_return_values():
 
     assert await client.set_proxy_enabled(PROXY["proxy"], True) is True
     assert await client.save_parking(
-        [PROXY["proxy"]], quota_until=1779321600.0,
-        banned_until=0.0, permanently_banned=False,
+        [PROXY["proxy"]], quota_until=1779321600.0, permanently_banned=False,
     ) == 2
     await client.aclose()
 
@@ -180,7 +177,6 @@ async def test_proxy_methods_paths_payloads_and_return_values():
     assert _json(calls[5]) == {
         "proxies": [PROXY["proxy"]],
         "quota_until": 1779321600.0,
-        "banned_until": 0.0,
         "permanently_banned": False,
     }
 
@@ -261,8 +257,6 @@ async def test_affinity_and_persona_methods():
             return _ok(request, {"bindings": [BINDING]})
         if path == "/affinity" and request.method == "POST":
             return _ok(request, {"written": 2, "unbound": 1})
-        if path == "/affinity/clear":
-            return _ok(request, {"cleared": 1})
         if path == "/personas" and request.method == "GET":
             return _ok(request, {"personas": [PERSONA]})
         if path == "/personas" and request.method == "POST":
@@ -283,7 +277,6 @@ async def test_affinity_and_persona_methods():
         # The legacy tuple shape stays accepted by the adapter.
         ("sid:ses_def", None, 11.0, 21.0),
     ]) == {"written": 2, "unbound": 1}
-    assert await client.clear_affinity(["sid:ses_abc", "sid:ses_def"]) == 1
 
     assert await client.load_personas() == [PERSONA]
     assert await client.upsert_persona(SimpleNamespace(**PERSONA)) is True
@@ -294,7 +287,6 @@ async def test_affinity_and_persona_methods():
     assert [(request.method, request.url.path) for request in calls] == [
         ("GET", "/affinity"),
         ("POST", "/affinity"),
-        ("POST", "/affinity/clear"),
         ("GET", "/personas"),
         ("POST", "/personas"),
         ("GET", "/personas/proxy-a.invalid:8080"),
@@ -316,14 +308,11 @@ async def test_affinity_and_persona_methods():
             },
         ]
     }
-    assert _json(calls[2]) == {
-        "session_keys": ["sid:ses_abc", "sid:ses_def"]
-    }
-    assert _json(calls[4]) == PERSONA
+    assert _json(calls[3]) == PERSONA
 
     # The persona quota key is URL-encoded as one path segment.
-    assert calls[5].url.raw_path == b"/personas/proxy-a.invalid%3A8080"
-    assert calls[6].url.raw_path == b"/personas/%5B%3A%3A1%5D%3A8080"
+    assert calls[4].url.raw_path == b"/personas/proxy-a.invalid%3A8080"
+    assert calls[5].url.raw_path == b"/personas/%5B%3A%3A1%5D%3A8080"
 
 
 @pytest.mark.asyncio

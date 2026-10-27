@@ -237,7 +237,34 @@ def test_park_respects_larger_retry_after(monkeypatch):
     assert p.cooldown_until == pytest.approx(5061.0 + 7200.0)
 
 
-def test_mark_success_clears_cooldown_but_not_disabled():
+# --- breaker: 429 arriving as a transport error (CONNECT tunnel) ---
+
+
+def test_connect_429_transport_reason_triggers_cooldown_and_parking(monkeypatch):
+    """A proxy that answers ``CONNECT`` with 429 surfaces as a TransportError.
+
+    ``main`` passes ``f"{type(exc).__name__}: {exc}"`` to ``mark_failure``, so
+    the ``"429"`` substring is the only throttling signal (the proxy is alive;
+    this is not a dead-egress 5xx). Regression guard: the 429 branch must stay
+    reachable and park the proxy after the configured streak.
+    """
+    m = mgr(proxies=["http://p:1"], account_throttle_threshold=2)
+    p = m.proxies[0]
+    clock = {"now": 4000.0}
+    monkeypatch.setattr(prox.time, "monotonic", lambda: clock["now"])
+
+    reason = "TransportError: CONNECT tunnel failed, response 429"
+    m.mark_failure(p, reason)
+    assert p.cooldown_until == pytest.approx(4060.0)  # default 60 s cooldown
+    assert p._throttle_n == 1
+
+    clock["now"] += 61.0
+    m.mark_failure(p, reason)
+    assert p._throttle_n == 0  # streak reset on parking
+    assert p.cooldown_until == pytest.approx(clock["now"] + 3600.0)
+
+
+def test_mark_success_clears_cooldown():
     m = mgr()
     p = Proxy("http://p:1")
     for i in range(3):
@@ -247,11 +274,6 @@ def test_mark_success_clears_cooldown_but_not_disabled():
     m.mark_success(p)
     assert p.cooldown_until == 0.0
     assert p.consecutive_errors == 0 and len(p._fails) == 0
-
-    p.disabled = True
-    m.mark_failure(p, "e")  # while disabled: window accumulates but no cooldown
-    m.mark_success(p)
-    assert p.disabled is True  # success never resurrects a disabled member
 
 
 # --- next_proxy: uniform round-robin ---
@@ -538,7 +560,6 @@ def test_redact_url_strips_userinfo_and_secret():
 @pytest.mark.asyncio
 async def test_parking_persists_across_manager_restart():
     quota_until = time.time() + 3600
-    banned_until = time.time() + 7200
     storage = FakeStorage(proxies=["http://h1:1"])
 
     m = ProxyManager(build_settings())
@@ -546,10 +567,8 @@ async def test_parking_persists_across_manager_restart():
     m.apply_proxies(await storage.list_proxies(listed=True))
     group = m.egress_groups()[0]
     m.mark_quota_exhausted(group, quota_until)
-    m.mark_banned(group, banned_until)
     await m.aclose()  # drains the fire-and-forget parking writes
     assert storage.proxies["http://h1:1"]["quota_until"] == pytest.approx(quota_until)
-    assert storage.proxies["http://h1:1"]["banned_until"] == pytest.approx(banned_until)
 
     # A fresh manager (gateway restart) must recover the parking from storage.
     m2 = ProxyManager(build_settings())
@@ -558,10 +577,8 @@ async def test_parking_persists_across_manager_restart():
     m2.load_parking(await storage.list_proxies())
     restored = m2.egress_groups()[0]
     assert restored.quota_until == pytest.approx(quota_until)
-    assert restored.banned_until == pytest.approx(banned_until)
     status = m2.status()
     assert status["egress_groups_quota_parked"] == 1
-    assert status["egress_groups_banned"] == 1
     assert status["proxies"][0]["quota_seconds_left"] > 3500
     await m2.aclose()
 
@@ -576,12 +593,12 @@ def test_permanently_banned_bucket_is_never_selected_or_waited_for():
     with pytest.raises(NoReadyProxyError) as err:
         m.next_proxy_in_group(a)
     assert err.value.kind == "saturated" and err.value.retry_after is None
-    assert m.earliest_ready_seconds() is not None  # B is still usable
+    assert m._earliest_ready_seconds(set(), time.monotonic(), time.time()) is not None
     m.mark_permanently_banned(b)
     with pytest.raises(NoReadyProxyError) as err:
         m.next_proxy()
     assert err.value.kind == "saturated" and err.value.retry_after is None
-    assert m.earliest_ready_seconds() is None
+    assert m._earliest_ready_seconds(set(), time.monotonic(), time.time()) is None
 
 
 @pytest.mark.asyncio
@@ -604,7 +621,8 @@ async def test_permanent_ban_persists_across_manager_restart():
     assert restored.permanently_banned is True
     assert restored.is_parked(time.time())
     assert all(m2.next_proxy().url == "http://h2:2" for _ in range(3))
-    assert m2.status()["egress_groups_banned"] == 1
+    row = next(row for row in m2.status()["proxies"] if row["proxy"] == "h1:1")
+    assert row["banned"] is True
     await m2.aclose()
 
 
@@ -612,12 +630,11 @@ def test_load_parking_merges_duplicate_keys_by_max():
     m = mgr(proxies=["http://u1:p@h:1", "http://u2:p@h:1"])
     assert len(m.egress_groups()) == 1
     m.load_parking([
-        ("http://u1:p@h:1", 100.0, 0.0, False),
-        ("http://u2:p@h:1", 50.0, 200.0, True),
+        ("http://u1:p@h:1", 100.0, False),
+        ("http://u2:p@h:1", 50.0, True),
     ])
     group = m.egress_groups()[0]
     assert group.quota_until == 100.0
-    assert group.banned_until == 200.0
     assert group.permanently_banned is True
 
 
@@ -808,7 +825,6 @@ def test_status_separated_counters_and_rpm():
     m = mgr(proxies=["http://a:1", "http://b:1", "http://c:1", "http://d:1"],
             openroute_rpm_limit=2)
     a, b, c, d = m.proxies
-    b.disabled = True
     m.set_manually_disabled("http://d:1", True)
     c.cooldown_until = time.monotonic() + 10.0
     m.record_request(a)
@@ -816,8 +832,7 @@ def test_status_separated_counters_and_rpm():
 
     st = m.status()
     assert st["proxies_total"] == 4
-    assert st["proxies_enabled"] == 2       # a, c (b dead, d manual)
-    assert st["proxies_dead"] == 1
+    assert st["proxies_enabled"] == 3       # a, b, c (d manual)
     assert st["proxies_manually_disabled"] == 1
     assert st["proxies_cooling"] == 1       # c
     assert st["proxies_rpm_capped"] == 1    # a
@@ -885,7 +900,7 @@ def test_next_proxy_never_returns_parked_group_url():
     for _ in range(10):
         assert m.next_proxy().url == "http://b:1"
 
-    m.mark_banned(b, time.time() + 10)
+    m.mark_quota_exhausted(b, time.time() + 10)
     with pytest.raises(NoReadyProxyError) as ei:
         m.next_proxy()
     assert ei.value.kind == "saturated"
@@ -898,11 +913,10 @@ def test_next_proxy_never_returns_parked_group_url():
 def test_mark_success_never_clears_group_parking():
     m = mgr(proxies=["http://a:1", "http://b:1"])
     a = m.egress_groups()[0]
-    m.mark_quota_exhausted(a, time.time() + 100)
-    m.mark_banned(a, time.time() + 200)
+    m.mark_quota_exhausted(a, time.time() + 200)
     p = a.proxies[0]
     m.mark_success(p)
-    assert a.quota_until > time.time() and a.banned_until > time.time()
+    assert a.quota_until > time.time()
     assert m.next_proxy().url == "http://b:1"  # a stays parked
 
 
@@ -911,7 +925,7 @@ def test_apply_proxies_preserves_parking_per_proxy_on_refresh():
     g1, g2 = m.egress_groups()
     until = time.time() + 500
     m.mark_quota_exhausted(g1, until)
-    m.mark_banned(g2, until)
+    m.mark_quota_exhausted(g2, until)
 
     # Refresh: same rows + a new port on the same entry IP. The new port must
     # NOT inherit the parked bucket of :1 (IPv4 entry != IPv6 exit).
@@ -926,7 +940,7 @@ def test_apply_proxies_preserves_parking_per_proxy_on_refresh():
     assert [len(g.proxies) for g in groups] == [1, 1, 1]
     assert groups[0].quota_until == until
     assert groups[1].quota_until == 0.0
-    assert groups[2].banned_until == until
+    assert groups[2].quota_until == until
 
 
 def test_earliest_ready_seconds_includes_parked_group_even_if_excluded():
@@ -936,7 +950,8 @@ def test_earliest_ready_seconds_includes_parked_group_even_if_excluded():
     b.proxies[0].cooldown_until = time.monotonic() + 5
     excluded = {p.url for p in m.proxies}
     # b is excluded and therefore not a wait candidate; parked a still is.
-    assert m.earliest_ready_seconds(excluded) == pytest.approx(120.0, abs=2.0)
+    assert m._earliest_ready_seconds(excluded, time.monotonic(), time.time()) \
+        == pytest.approx(120.0, abs=2.0)
     with pytest.raises(NoReadyProxyError) as ei:
         m.next_proxy(exclude=excluded)
     assert ei.value.kind == "saturated"
@@ -970,6 +985,31 @@ def test_next_proxy_in_group_returns_its_only_proxy():
         m.next_proxy_in_group(g, exclude={"http://10.0.0.1:1"})
 
 
+def test_same_hostport_different_credentials_share_one_group_and_fail_over():
+    """Rotated proxy credentials keep the same endpoint -> one quota bucket.
+
+    The source can list two URLs with the same ``host:port`` and different
+    user/password; they must stay in one egress group and both remain
+    selectable inside it (failover capacity, not a lost URL).
+    """
+    m = mgr(proxies=["http://u1:p1@h:1", "http://u2:p2@h:1"])
+    groups = m.egress_groups()
+    assert len(groups) == 1
+    group = groups[0]
+    assert group.host == "h:1"
+    assert [p.url for p in group.proxies] == [
+        "http://u1:p1@h:1", "http://u2:p2@h:1"]
+    assert m.group_of("http://u1:p1@h:1") is group
+    assert m.group_of("http://u2:p2@h:1") is group
+
+    picks = [m.next_proxy_in_group(group).url for _ in range(4)]
+    assert picks == ["http://u1:p1@h:1", "http://u2:p2@h:1"] * 2
+
+    # A cooling URL does not sink the bucket: the peer URL stays selectable.
+    group.proxies[0].cooldown_until = time.monotonic() + 100.0
+    assert m.next_proxy_in_group(group).url == "http://u2:p2@h:1"
+
+
 @pytest.mark.asyncio
 async def test_refresh_skips_probing_parked_groups():
     m = mgr(proxies=["http://a:1", "http://b:1"])
@@ -999,7 +1039,6 @@ def test_status_adds_group_info_without_breaking_proxy_order():
     assert st["egress_groups_total"] == 3
     assert st["egress_groups_ready"] == 3
     assert st["egress_groups_quota_parked"] == 0
-    assert st["egress_groups_banned"] == 0
     assert [g["ip"] for g in st["egress_groups"]] == [
         "10.0.0.1:1", "10.0.0.1:2", "10.0.0.2:3"]
     assert all(g["proxy_count"] == 1 for g in st["egress_groups"])

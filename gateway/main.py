@@ -27,7 +27,7 @@ Request flow for ``ANY /v1/{rest:path}``:
 2. anti-DoS body limit (``MAX_BODY_BYTES``, 413 without reading when possible),
 3. model extraction + allow-list (403), then RPM/TPM gates (429),
 4. session id resolution ONCE for the whole request: caller affinity ->
-   conversation fingerprint -> one-shot (:func:`_resolve_session_id`),
+   conversation fingerprint -> one-shot,
 5. retry loop over the session lease: ``affinity.next_proxy(lease, exclude=tried)``
    when sticky sessions are enabled, else ``ProxyManager.next_proxy(exclude=tried)``:
    * build the upstream request with gate headers/body (:mod:`gateway.opencode`),
@@ -72,6 +72,7 @@ from starlette.exceptions import HTTPException as StarletteHTTPException
 from . import opencode, sessions
 from .affinity import AffinityLease, AffinityManager, SessionIdentity
 from .config import PROVIDER_NAME, get_settings
+from .curlclient import send_streaming
 from .keys import AuthError, KeyInfo, KeyStore, RateLimitError, generate_key, hash_key
 from .personas import PersonaStore
 from .px6 import Px6ServiceClient, Px6ServiceError
@@ -383,9 +384,9 @@ def _upstream_headers(request: Request, session_id: str, *,
     aggregators inject ``baggage``/``x-request-id``/custom identifiers; any of
     them lets the upstream correlate ALL gateway traffic into one identity
     (one shared quota bucket). The real client sends exactly the gate set
-    (``Authorization``/``Content-Type``/``Accept``/``User-Agent``/
-    ``x-opencode-client`` + the four session carriers [+ ``x-opencode-project``
-    with a persona]) plus trace headers — so that is all we send.
+    (``Authorization``/``Content-Type``/``User-Agent``/``x-opencode-client``
+    + the four session carriers [+ ``x-opencode-project`` with a persona])
+    plus trace headers — so that is all we send.
 
     With a persona (``trace_id`` given): project + a rebuilt
     ``traceparent``/``b3`` pair from the persona's trace, and the caller's
@@ -436,7 +437,7 @@ def _resolve_session(request: Request, key: KeyInfo, body: bytes) -> SessionIden
     for name in opencode.SESSION_HEADER_NAMES:
         value = request.headers.get(name)
         if opencode.is_session_id(value):
-            return SessionIdentity(value, f"sid:{value}", "sid")
+            return SessionIdentity(value, f"sid:{value}")
 
     fingerprint = opencode.conversation_fingerprint(
         body,
@@ -445,14 +446,9 @@ def _resolve_session(request: Request, key: KeyInfo, body: bytes) -> SessionIden
     )
     if fingerprint is not None:
         return SessionIdentity(
-            session_registry.resolve(fingerprint), f"fp:{fingerprint}", "fp")
+            session_registry.resolve(fingerprint), f"fp:{fingerprint}")
 
-    return SessionIdentity(opencode.new_session_id(), None, "one-shot")
-
-
-def _resolve_session_id(request: Request, key: KeyInfo, body: bytes) -> str:
-    """Backward-compatible wrapper returning only the upstream session id."""
-    return _resolve_session(request, key, body).session_id
+    return SessionIdentity(opencode.new_session_id(), None)
 
 
 def _resp_headers(upstream: httpx.Response) -> dict:
@@ -485,11 +481,10 @@ def _log_request(
     log.log_soon(entry)
 
 
-async def _drain(upstream: httpx.Response, stream: bool) -> None:
+async def _drain(upstream: httpx.Response) -> None:
     """Release a failed upstream response on the retry path (aread + aclose)."""
     try:
-        if stream:
-            await upstream.aread()
+        await upstream.aread()
         await upstream.aclose()
     except httpx.HTTPError:
         pass
@@ -644,7 +639,6 @@ def _stream_gen(
         usage_total: int | None = None
         usage_prompt: int | None = None
         usage_completion: int | None = None
-        completed = False
         pending = bytearray()  # an unfinished SSE line (chunk boundary mid-event)
 
         def real_usage_total() -> int | None:
@@ -687,7 +681,6 @@ def _stream_gen(
                 if stream_usage:
                     scan_sse_usage(chunk)
                 yield chunk
-            completed = True
             manager.mark_success(proxy)  # full stream only — a disconnect is not success
         except httpx.HTTPError as exc:
             error = f"stream error: {type(exc).__name__}: {exc}"
@@ -849,7 +842,7 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                         affinity.note_started(lease, proxy, request_wall)
                     except Exception:
                         logger.exception("Affinity note_started failed; request continues")
-                upstream = await client.send(upstream_req, stream=True)
+                upstream = await send_streaming(client, upstream_req)
             except httpx.HTTPError as exc:  # network/proxy — transient
                 reason = f"{type(exc).__name__}: {exc}"
                 manager.mark_failure(proxy, reason)
@@ -959,7 +952,7 @@ async def proxy_v1(rest: str, request: Request, key: KeyInfo = Depends(require_a
                                mask_proxy(proxy.url), status)
                 continue
             if status >= 500:
-                await _drain(upstream, True)
+                await _drain(upstream)
                 manager.mark_failure(proxy, f"upstream HTTP {status}")
                 logger.warning("Proxy %s got HTTP %d, retrying next proxy",
                                mask_proxy(proxy.url), status)
@@ -1090,7 +1083,6 @@ async def health() -> dict:
         "egress_groups_total": st["egress_groups_total"],
         "egress_groups_ready": st["egress_groups_ready"],
         "egress_groups_quota_parked": st["egress_groups_quota_parked"],
-        "egress_groups_banned": st["egress_groups_banned"],
         "sessions_bound": aff.get("sessions_bound", 0),
         "sessions_unbound": aff.get("sessions_unbound", 0),
     }

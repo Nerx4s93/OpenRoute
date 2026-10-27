@@ -11,7 +11,7 @@ that a test can assert real behaviour:
   idempotent (retrying the old/new pair reports ``already_rotated``), and a
   hash collision is a conflict;
 - affinity: moving a session preserves ``created_at``; a binding to a vanished
-  proxy is stored as ``proxy = None`` (old FK fallback); clearing keeps the row;
+  proxy is stored as ``proxy = None`` (old FK fallback);
 - personas: the ``generation <=`` guard rejects stale writes;
 - request log/stats: UTC-day buckets and the same aggregates as the SQL.
 
@@ -25,7 +25,6 @@ method fail deterministically.
 
 from __future__ import annotations
 
-import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import asdict, is_dataclass
 from datetime import datetime, timezone
@@ -168,7 +167,6 @@ class FakeStorage:
         self._guard()
         deduped = list(dict.fromkeys(url for url in urls if url))
         known = set(deduped)
-        now = time.time()
         added = 0
         for url in deduped:
             if url in self.proxies:
@@ -176,9 +174,7 @@ class FakeStorage:
             self.proxies[url] = {
                 "proxy": url,
                 "enabled": bool(enable_new),
-                "added_at": now,
                 "quota_until": 0.0,
-                "banned_until": 0.0,
                 "permanently_banned": False,
                 "listed": True,
             }
@@ -211,7 +207,6 @@ class FakeStorage:
         self,
         proxies: Iterable[str],
         quota_until: float,
-        banned_until: float,
         permanently_banned: bool,
     ) -> int:
         self._guard()
@@ -222,7 +217,6 @@ class FakeStorage:
             if row is None:
                 continue
             row["quota_until"] = float(quota_until)
-            row["banned_until"] = float(banned_until)
             row["permanently_banned"] = bool(
                 row["permanently_banned"] or permanently_banned
             )
@@ -343,17 +337,6 @@ class FakeStorage:
                 existing["last_used_at"] = binding["last_used_at"]
             written += 1
         return {"written": written, "unbound": unbound}
-
-    async def clear_affinity(self, session_keys: Iterable[str]) -> int:
-        self._guard()
-        cleared = 0
-        for key in dict.fromkeys(key for key in session_keys if key):
-            row = self.affinity.get(key)
-            if row is None:
-                continue
-            row["proxy"] = None
-            cleared += 1
-        return cleared
 
     # --- persona domain ---------------------------------------------------
 
@@ -476,17 +459,13 @@ class FakeStorage:
         row = {
             "proxy": url,
             "enabled": True,
-            "added_at": time.time(),
             "quota_until": 0.0,
-            "banned_until": 0.0,
             "permanently_banned": False,
             "listed": True,
         }
         row.update(overrides)
         row["enabled"] = bool(row["enabled"])
-        row["added_at"] = float(row["added_at"])
         row["quota_until"] = float(row["quota_until"])
-        row["banned_until"] = float(row["banned_until"])
         row["permanently_banned"] = bool(row["permanently_banned"])
         row["listed"] = bool(row["listed"])
         self.proxies[url] = row

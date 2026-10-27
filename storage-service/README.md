@@ -4,8 +4,12 @@ Private persistence microservice for OpenRoute. It is the **only** component
 that talks to PostgreSQL: the gateway and every other service use this domain
 HTTP API. The database schema is a frozen, idempotent DDL historically derived
 from the gateway's former in-process SQL layer; storage-service is now the sole
-SQL owner. There are no migrations, no new tables and no new columns, so an
-existing `pgdata` volume keeps working unchanged.
+SQL owner. The tuple is applied on every start: `CREATE ... IF NOT EXISTS`
+builds missing objects, `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` upgrades
+older tables and forward-only `DROP COLUMN/INDEX IF EXISTS` statements retire
+columns that are no longer part of the contract. There is no separate migration
+step, so an existing `pgdata` volume keeps working and converges on the current
+shape.
 
 The service is not published by the edge, has no host port and exposes no
 public docs/OpenAPI route. It listens on `8000` in `openroute-storage-api-net`
@@ -88,7 +92,7 @@ seconds unless stated otherwise.
 | GET | `/proxies?listed=` | All proxy rows in insertion order |
 | POST | `/proxies/sync` | Apply one px6 catalogue snapshot |
 | POST | `/proxies/set-enabled` | Manual on/off of one proxy |
-| POST | `/proxies/parking` | Persist quota parking / bans |
+| POST | `/proxies/parking` | Persist quota parking / permanent ban |
 | GET | `/keys` | All client keys (hashes only) |
 | POST | `/keys` | Insert a key by hash |
 | POST | `/keys/rotate` | Replace a key hash in place |
@@ -96,7 +100,6 @@ seconds unless stated otherwise.
 | DELETE | `/keys/{key_hash}` | Delete by hash |
 | GET | `/affinity` | All sticky bindings |
 | POST | `/affinity` | Upsert bindings |
-| POST | `/affinity/clear` | Unbind one or more sessions |
 | GET | `/personas` | All personas |
 | GET | `/personas/{quota_key}` | One persona (`quota_key` URL-encoded) |
 | POST | `/personas` | Upsert with generation guard |
@@ -140,9 +143,7 @@ URLs; this service is private and the gateway is their only consumer.
     {
       "proxy": "http://u:p@proxy-a.invalid:8080",
       "enabled": true,
-      "added_at": 1779235200.0,
       "quota_until": 0.0,
-      "banned_until": 0.0,
       "permanently_banned": false,
       "listed": true
     }
@@ -178,8 +179,8 @@ Response:
 {
   "added": 2,
   "proxies": [
-    {"proxy": "http://proxy-a.invalid:8080", "enabled": false, "added_at": 1779235200.1, "quota_until": 0.0, "banned_until": 0.0, "permanently_banned": false, "listed": true},
-    {"proxy": "http://proxy-b.invalid:8080", "enabled": false, "added_at": 1779235200.1, "quota_until": 0.0, "banned_until": 0.0, "permanently_banned": false, "listed": true}
+    {"proxy": "http://proxy-a.invalid:8080", "enabled": false, "quota_until": 0.0, "permanently_banned": false, "listed": true},
+    {"proxy": "http://proxy-b.invalid:8080", "enabled": false, "quota_until": 0.0, "permanently_banned": false, "listed": true}
   ]
 }
 ```
@@ -203,15 +204,14 @@ Unknown proxy → `404`.
 
 ### `POST /proxies/parking`
 
-Writes both epoch values as-is for every URL of one quota bucket and ORs
-`permanently_banned` (a permanent ban is never removed). Expired epochs are
-harmless and are overwritten by the next mark.
+Writes `quota_until` as-is for every URL of one quota bucket and ORs
+`permanently_banned` (a permanent ban is never removed). An expired epoch is
+harmless and is overwritten by the next mark.
 
 ```json
 {
   "proxies": ["http://proxy-a.invalid:8080"],
   "quota_until": 1779321600.0,
-  "banned_until": 0.0,
   "permanently_banned": false
 }
 ```
@@ -307,8 +307,7 @@ Response: `{"key_hash": "<hash>", "deleted": true}`; unknown hash → `404`.
 
 `schema.session_affinity` keeps `proxy REFERENCES proxies(proxy) ON DELETE SET
 NULL`. A move updates only `proxy` and `last_used_at`; `created_at` is never
-changed. Rows are never deleted on a move; `clear` stores `proxy = NULL` while
-keeping `created_at` and the session's S slot.
+changed, and rows are never deleted on a move.
 
 ### `GET /affinity`
 
@@ -355,14 +354,6 @@ the same row-by-row FK fallback the gateway used before the split.
 
 `GET /affinity` after a proxy row is physically deleted shows
 `"proxy": null` for its sessions (FK `ON DELETE SET NULL`).
-
-### `POST /affinity/clear`
-
-```json
-{"session_keys": ["sid:ses_abc", "fp:deadbeef"]}
-```
-
-Response: `{"cleared": 2}` — number of rows updated (missing keys are ignored).
 
 ## Personas
 

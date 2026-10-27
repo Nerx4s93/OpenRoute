@@ -53,6 +53,3 @@ class SessionRegistry:
         while len(self._items) > self._max:
             self._items.popitem(last=False)
         return session_id
-
-    def clear(self) -> None:
-        self._items.clear()

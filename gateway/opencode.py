@@ -59,18 +59,6 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Iterable, Mapping
 
-# --- upstream endpoints (verbatim) -----------------------------------------
-
-#: OpenAI-compatible chat completions endpoint (the "openai" mirror path).
-OPENCODE_CHAT_URL = "https://opencode.ai/inference/openai/v1/chat/completions"
-#: Model catalogue endpoint.
-OPENCODE_MODELS_URL = "https://opencode.ai/inference/v1/models"
-#: Base URL the gateway forwards ``/v1/<rest>`` onto (chat lives under it).
-OPENCODE_BASE_URL = "https://opencode.ai/inference/openai/v1"
-
-#: Default free model id.
-DEFAULT_MODEL = "deepseek-v4.1-flash-free"
-
 #: Free model ids observed on the endpoint (informational / allow-list seed).
 FREE_MODELS: tuple[str, ...] = (
     "beam-free",
@@ -106,9 +94,6 @@ DEFAULT_SYSTEM = "You are a helpful assistant. Answer the user's questions in th
 #: real client (2026-10-24) is 2.1.3; keep this in sync with the OpenCode
 #: release used for reference captures.
 OPENCODE_UA = "opencode/latest/2.1.3/cli"
-
-#: ``Accept`` sent by the real OpenCode client for inference requests.
-OPENCODE_ACCEPT = "*/*"
 
 #: ``max_completion_tokens`` used by the real OpenCode agent request. Titles
 #: keep the provider default, but the gateway cannot distinguish a title call
@@ -314,7 +299,7 @@ def _message_text(content: Any) -> str | None:
 # --- headers ---------------------------------------------------------------
 
 
-def build_gate_headers(session_id: str, *, user_agent: str = OPENCODE_UA,
+def build_gate_headers(session_id: str, *,
                        project_id: str | None = None) -> dict[str, str]:
     """Return the full verified client-header set the free-tier gate demands.
 
@@ -325,8 +310,7 @@ def build_gate_headers(session_id: str, *, user_agent: str = OPENCODE_UA,
     headers = {
         "Authorization": OPENCODE_AUTHORIZATION,
         "Content-Type": "application/json",
-        "Accept": OPENCODE_ACCEPT,
-        "User-Agent": user_agent,
+        "User-Agent": OPENCODE_UA,
         "x-opencode-client": "cli",
     }
     for name in SESSION_HEADER_NAMES:
@@ -656,8 +640,3 @@ def usage_from_payload(payload: str | None) -> dict[str, int] | None:
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
             out[key] = value
     return out or None
-
-
-def extract_usage_from_line(line: bytes | str) -> dict[str, int] | None:
-    """Convenience: :func:`parse_sse_line` + :func:`usage_from_payload`."""
-    return usage_from_payload(parse_sse_line(line))

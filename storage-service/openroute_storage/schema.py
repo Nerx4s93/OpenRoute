@@ -1,7 +1,16 @@
 """Frozen PostgreSQL schema owned by storage-service.
 
-The DDL is a contract: an existing ``pgdata`` volume must keep working
-unchanged, so the statements are idempotent and no migration is required.
+The DDL is a contract: an existing ``pgdata`` volume must keep working, so
+every statement is idempotent and the tuple is applied on each startup instead
+of a separate migration step:
+
+- ``CREATE TABLE IF NOT EXISTS`` / ``CREATE INDEX IF NOT EXISTS`` create what
+  is missing;
+- ``ALTER TABLE ... ADD COLUMN IF NOT EXISTS`` upgrades older tables in place;
+- forward-only cleanup statements (``DROP COLUMN/INDEX IF EXISTS``) retire
+  columns and indexes that are no longer part of the contract, so a clean
+  database and a pre-existing one converge on the same shape.
+
 It was historically derived from the gateway's former ``pg.py``; that module
 is removed and this service is now the sole SQL owner. Do not change these
 statements without treating it as a schema migration.
@@ -36,7 +45,7 @@ SCHEMA: tuple[str, ...] = (
     "CREATE INDEX IF NOT EXISTS idx_request_log_account_ts"
     " ON request_log (account, ts)",
     # Proxy pool — replaces NVRoute's ``accounts`` table.
-    # quota_until/banned_until persist timed parking; permanently_banned is the
+    # quota_until persists timed parking; permanently_banned is the
     # non-expiring abusive-traffic verdict, so a gateway restart never forgets
     # that a proxy must not be used again.
     """
@@ -44,9 +53,7 @@ SCHEMA: tuple[str, ...] = (
         id BIGINT GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
         proxy TEXT NOT NULL UNIQUE,
         enabled BOOLEAN NOT NULL DEFAULT TRUE,
-        added_at DOUBLE PRECISION NOT NULL,
         quota_until DOUBLE PRECISION NOT NULL DEFAULT 0,
-        banned_until DOUBLE PRECISION NOT NULL DEFAULT 0,
         permanently_banned BOOLEAN NOT NULL DEFAULT FALSE,
         listed BOOLEAN NOT NULL DEFAULT TRUE
     )
@@ -55,8 +62,6 @@ SCHEMA: tuple[str, ...] = (
     # place. IF NOT EXISTS makes the migration idempotent.
     "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS quota_until"
     " DOUBLE PRECISION NOT NULL DEFAULT 0",
-    "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS banned_until"
-    " DOUBLE PRECISION NOT NULL DEFAULT 0",
     "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS permanently_banned"
     " BOOLEAN NOT NULL DEFAULT FALSE",
     # ``listed`` = present in the latest successful PROXIES_URL fetch. Rows
@@ -64,6 +69,11 @@ SCHEMA: tuple[str, ...] = (
     # deleted, so parking and foreign keys survive and a proxy can come back.
     "ALTER TABLE proxies ADD COLUMN IF NOT EXISTS listed"
     " BOOLEAN NOT NULL DEFAULT TRUE",
+    # Retired columns: ``added_at`` had no reader and ``banned_until`` was a
+    # second, never-used parking clock. DROP ... IF EXISTS is a no-op on a
+    # fresh database and converges an existing one.
+    "ALTER TABLE proxies DROP COLUMN IF EXISTS added_at",
+    "ALTER TABLE proxies DROP COLUMN IF EXISTS banned_until",
     # Sticky session -> exit proxy binding. ``ON DELETE SET NULL`` unbinds a
     # session when its proxy is removed; ``created_at`` is never changed by a
     # move (only ``proxy``/``last_used_at`` are updated).
@@ -79,10 +89,10 @@ SCHEMA: tuple[str, ...] = (
     CREATE INDEX IF NOT EXISTS idx_session_affinity_proxy
         ON session_affinity (proxy)
     """,
-    """
-    CREATE INDEX IF NOT EXISTS idx_session_affinity_used
-        ON session_affinity (last_used_at)
-    """,
+    # ``last_used_at`` is only read/written as a value, never filtered or
+    # sorted on, so the index only added write amplification. Drop it from
+    # databases created before it was retired.
+    "DROP INDEX IF EXISTS idx_session_affinity_used",
     # Client keys; models is a JSONB array of model names.
     """
     CREATE TABLE IF NOT EXISTS keys (
@@ -92,8 +102,7 @@ SCHEMA: tuple[str, ...] = (
         rpm INTEGER,
         tpm INTEGER,
         models JSONB,
-        enabled BOOLEAN NOT NULL DEFAULT TRUE,
-        added_at DOUBLE PRECISION NOT NULL
+        enabled BOOLEAN NOT NULL DEFAULT TRUE
     )
     """,
     # Client keys are ordinary API credentials with no roles. Drop the legacy
@@ -101,6 +110,8 @@ SCHEMA: tuple[str, ...] = (
     "ALTER TABLE keys DROP COLUMN IF EXISTS admin",
     # key_id is the only key identifier; the separate display name was removed.
     "ALTER TABLE keys DROP COLUMN IF EXISTS name",
+    # ``added_at`` was written but never selected or exposed.
+    "ALTER TABLE keys DROP COLUMN IF EXISTS added_at",
     # One synthetic "persona" (session/project/trace ids) per proxy quota
     # bucket. It survives a restart; ``generation`` orders rotations so a
     # stale fire-and-forget write can never overwrite a newer persona.
@@ -118,7 +129,7 @@ SCHEMA: tuple[str, ...] = (
 
 
 async def ensure_schema(conn: Any) -> None:
-    """Idempotently create all tables/indexes on ``conn``.
+    """Idempotently apply the full DDL (creates, adds and drops) on ``conn``.
 
     ``pg_advisory_xact_lock`` serialises concurrent initialisation (e.g. two
     storage-service replicas starting together). The lock is held until COMMIT,

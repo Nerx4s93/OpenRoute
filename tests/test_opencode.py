@@ -109,7 +109,6 @@ def test_gate_headers_complete():
     h = opencode.build_gate_headers(sid)
     assert h["Authorization"] == "Bearer public"
     assert h["Content-Type"] == "application/json"
-    assert h["Accept"] == "*/*"
     assert h["User-Agent"] == "opencode/latest/2.1.3/cli"
     assert h["x-opencode-client"] == "cli"
     for name in opencode.SESSION_HEADER_NAMES:
@@ -450,8 +449,3 @@ def test_usage_from_payload():
     # non-int fields are dropped; remaining ints kept
     assert opencode.usage_from_payload(json.dumps(
         {"usage": {"prompt_tokens": "x", "total_tokens": 5}})) == {"total_tokens": 5}
-
-
-def test_extract_usage_from_line():
-    line = 'data: {"usage": {"total_tokens": 3}}'
-    assert opencode.extract_usage_from_line(line) == {"total_tokens": 3}

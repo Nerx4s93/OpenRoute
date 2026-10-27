@@ -8,7 +8,6 @@ export interface ProxyState {
   key: string;
   label: string;
   tone: Tone;
-  dead: boolean;
 }
 
 export const TONE_CLASS: Record<Tone, string> = {
@@ -26,15 +25,6 @@ export function proxyState(proxy: ProxyRow, language: Language = "en"): ProxySta
       key: "ban",
       label: translate(language, "proxyState.banned"),
       tone: "err",
-      dead: false,
-    };
-  }
-  if (proxy.disabled) {
-    return {
-      key: "dead",
-      label: translate(language, "proxyState.dead"),
-      tone: "err",
-      dead: true,
     };
   }
   if (proxy.manual) {
@@ -42,7 +32,6 @@ export function proxyState(proxy: ProxyRow, language: Language = "en"): ProxySta
       key: "off",
       label: translate(language, "proxyState.disabled"),
       tone: "off",
-      dead: true,
     };
   }
   if (!proxy.enabled) {
@@ -50,17 +39,6 @@ export function proxyState(proxy: ProxyRow, language: Language = "en"): ProxySta
       key: "noproxy",
       label: translate(language, "proxyState.notInPool"),
       tone: "warn",
-      dead: false,
-    };
-  }
-  if (proxy.banned_seconds_left > 0) {
-    return {
-      key: "ban",
-      label: translate(language, "proxyState.bannedFor", {
-        duration: formatDuration(proxy.banned_seconds_left, language),
-      }),
-      tone: "err",
-      dead: false,
     };
   }
   if (proxy.quota_seconds_left > 0) {
@@ -70,7 +48,6 @@ export function proxyState(proxy: ProxyRow, language: Language = "en"): ProxySta
         duration: formatDuration(proxy.quota_seconds_left, language),
       }),
       tone: "warn",
-      dead: false,
     };
   }
   if (proxy.cooldown_seconds_left > 0) {
@@ -80,7 +57,6 @@ export function proxyState(proxy: ProxyRow, language: Language = "en"): ProxySta
         seconds: Math.round(proxy.cooldown_seconds_left),
       }),
       tone: "warn",
-      dead: false,
     };
   }
   if (proxy.rpm_capped) {
@@ -88,14 +64,12 @@ export function proxyState(proxy: ProxyRow, language: Language = "en"): ProxySta
       key: "rpm",
       label: translate(language, "proxyState.rpmCapped"),
       tone: "warn",
-      dead: false,
     };
   }
   return {
     key: "ok",
     label: translate(language, "proxyState.ok"),
     tone: "ok",
-    dead: false,
   };
 }
 

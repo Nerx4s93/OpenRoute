@@ -13,10 +13,6 @@ export interface Usage {
   tokens: number;
 }
 
-export interface ProxiesTotals {
-  tokens_total: number;
-}
-
 export interface Px6ProxyMeta {
   id: string;
   version: string;
@@ -30,10 +26,8 @@ export interface ProxyRow {
   display: string;
   enabled: boolean;
   manual: boolean;
-  disabled: boolean;
   banned: boolean;
   quota_seconds_left: number;
-  banned_seconds_left: number;
   cooldown_seconds_left: number;
   rpm_capped: boolean;
   last_error: string | null;
@@ -66,8 +60,6 @@ export interface ProxiesSnapshot {
     proxies_enabled?: number;
     proxies_total: number;
   };
-  // Optional for old SSE frames and cached snapshots.
-  totals?: ProxiesTotals;
   proxies: ProxyRow[];
   recent: RecentRequest[];
 }

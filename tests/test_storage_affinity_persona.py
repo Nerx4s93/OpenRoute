@@ -67,7 +67,7 @@ async def test_affinity_loads_from_storage_and_coalesces_writes():
 
     # A new session is bound and persisted through the coalescing writer.
     lease = affinity.begin_request(
-        SessionIdentity("ses_new", "sid:ses_new", "sid"))
+        SessionIdentity("ses_new", "sid:ses_new"))
     assert lease.state is not None and lease.state.proxy is not None
     await affinity.flush()
     stored = storage.affinity["sid:ses_new"]

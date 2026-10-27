@@ -34,12 +34,6 @@ class Px6ServiceClient:
     async def aclose(self) -> None:
         await self._client.aclose()
 
-    async def __aenter__(self) -> "Px6ServiceClient":
-        return self
-
-    async def __aexit__(self, exc_type, exc, tb) -> None:
-        await self.aclose()
-
     async def _request(
         self,
         method: str,

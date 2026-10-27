@@ -52,7 +52,7 @@ def make_affinity(proxies=("http://a.invalid:1", "http://b.invalid:1", "http://c
 
 
 def identity(sid: str) -> SessionIdentity:
-    return SessionIdentity(sid, f"sid:{sid}", "sid")
+    return SessionIdentity(sid, f"sid:{sid}")
 
 
 def seed_session(aff, key, proxy, events=(), created=None, last=None):
@@ -92,8 +92,9 @@ def test_score_matches_plan_example():
     aff._oneshot[a.host] = deque_events([(now, 0)] * 3000)
     aff._oneshot[b.host] = deque_events([(now, 0)] * 1000)
 
-    assert aff.score(a) == pytest.approx(2 / 3 + 1.0)
-    assert aff.score(b) == pytest.approx(1.0 + 1 / 3)
+    scores = aff._scores([a, b])
+    assert scores[a.host] == pytest.approx(2 / 3 + 1.0)
+    assert scores[b.host] == pytest.approx(1.0 + 1 / 3)
     assert aff._pick_group(set()) is b
 
 
@@ -213,7 +214,7 @@ def test_failed_request_counts_r_but_zero_tokens():
 
 def test_note_tokens_without_event_does_nothing():
     aff, manager, _ = make_affinity(proxies=("http://a.invalid:1",))
-    lease = aff.begin_request(SessionIdentity("ses_x", None, "one-shot"))
+    lease = aff.begin_request(SessionIdentity("ses_x", None))
     aff.note_tokens(lease, 99)  # no upstream send happened
     assert lease.event is None and aff._oneshot == {}
 
@@ -296,13 +297,13 @@ def test_temporary_fallback_can_use_another_url_without_rebinding():
 
 def test_one_shot_has_no_state_but_fills_group_buffer():
     aff, manager, clock = make_affinity(proxies=("http://a.invalid:1",))
-    lease = aff.begin_request(SessionIdentity("ses_x", None, "one-shot"))
+    lease = aff.begin_request(SessionIdentity("ses_x", None))
     assert lease.state is None and aff._sessions == {}
     proxy = aff.next_proxy(lease, exclude=set())
     group = manager.group_of(proxy)
     aff.note_started(lease, proxy, clock.wall)
     aff.note_tokens(lease, 7)
-    assert aff.group_stats(group)[1:] == (1, 7)
+    assert aff._aggregate(group)[1:] == (1, 7)
     assert aff._sessions == {}
 
 
@@ -312,7 +313,7 @@ def test_one_shot_is_score_aware():
     a = manager.group_of(lease.state.proxy)
     # One-shot should avoid A when B has S=0.
     for i in range(5):
-        shot = aff.begin_request(SessionIdentity(f"ses_x{i}", None, "one-shot"))
+        shot = aff.begin_request(SessionIdentity(f"ses_x{i}", None))
         assert manager.group_of(aff.next_proxy(shot, set())) is not a
 
 
@@ -344,9 +345,9 @@ async def test_evacuation_without_candidates_unbinds():
     aff, manager, clock = make_affinity(proxies=("http://a.invalid:1",))
     a = manager.egress_groups()[0]
     seed_session(aff, "s1", a.proxies[0].url, events=[(clock.wall, 5)])
-    moved = await aff.evacuate(a, banned_until=clock.wall + 100)
+    moved = await aff.evacuate(a, quota_until=clock.wall + 100)
     assert moved[0].proxy is None
-    assert a.banned_until == pytest.approx(clock.wall + 100)
+    assert a.quota_until == pytest.approx(clock.wall + 100)
 
 
 @pytest.mark.asyncio

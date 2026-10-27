@@ -32,9 +32,7 @@ class HealthResponse(BaseModel):
 class ProxyRow(BaseModel):
     proxy: str
     enabled: bool
-    added_at: float
     quota_until: float
-    banned_until: float
     permanently_banned: bool
     listed: bool
 
@@ -75,7 +73,6 @@ class ProxyParkingRequest(BaseModel):
 
     proxies: list[str]
     quota_until: float = 0.0
-    banned_until: float = 0.0
     permanently_banned: bool = False
 
 
@@ -161,14 +158,6 @@ class AffinityUpsertResponse(BaseModel):
     written: int
     #: Rows whose proxy no longer exists and were stored unbound.
     unbound: int
-
-
-class AffinityClearRequest(BaseModel):
-    session_keys: list[str]
-
-
-class AffinityClearResponse(BaseModel):
-    cleared: int
 
 
 # --- personas ---------------------------------------------------------------
@@ -267,8 +256,6 @@ class DailyUsage(BaseModel):
 __all__ = [
     "AccountUsage",
     "AffinityBinding",
-    "AffinityClearRequest",
-    "AffinityClearResponse",
     "AffinityListResponse",
     "AffinityUpsertRequest",
     "AffinityUpsertResponse",
