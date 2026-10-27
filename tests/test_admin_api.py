@@ -533,7 +533,7 @@ def test_root_returns_service_json(panel):
 
 
 def test_old_html_pages_are_gone(panel):
-    for path in ("/admin/ui", "/admin/ui/keys", "/login"):
+    for path in ("/admin", "/admin/keys", "/login"):
         assert panel.client.get(path).status_code == 404
 
 

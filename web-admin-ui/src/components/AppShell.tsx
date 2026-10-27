@@ -24,9 +24,9 @@ function ShellLayout({ children }: { children: ReactNode }) {
   const { serverTime, connected } = useLiveStatus();
   const toast = useToast();
   const location = useLocation();
-  const pageTitle = location.pathname.startsWith("/admin/ui/keys")
+  const pageTitle = location.pathname.startsWith("/admin/keys")
     ? "Ключи"
-    : location.pathname.startsWith("/admin/ui/proxies")
+    : location.pathname.startsWith("/admin/proxies")
       ? "Прокси"
       : "Статистика";
   const search = period === "all" ? "" : `?period=${period}`;
@@ -50,20 +50,20 @@ function ShellLayout({ children }: { children: ReactNode }) {
         <div className="nav-label">Управление</div>
         <nav>
           <NavLink
-            to={`/admin/ui/proxies${search}`}
+            to={`/admin/proxies${search}`}
             className={(state) => `nav-proxies ${navClass(state)}`}
           >
             Прокси
           </NavLink>
           <NavLink
-            to={`/admin/ui${search}`}
+            to={`/admin/stats${search}`}
             end
             className={(state) => `nav-stats ${navClass(state)}`}
           >
             Статистика
           </NavLink>
           <NavLink
-            to={`/admin/ui/keys${search}`}
+            to={`/admin/keys${search}`}
             className={(state) => `nav-keys ${navClass(state)}`}
           >
             Ключи

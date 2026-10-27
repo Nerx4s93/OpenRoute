@@ -14,7 +14,7 @@ export function LoginPage() {
   if (error) return <FullPageError message={error.message} onRetry={retrySession} />;
   if (session?.authenticated) {
     const state = location.state as { from?: string } | null;
-    return <Navigate to={state?.from ?? "/admin/ui"} replace />;
+    return <Navigate to={state?.from ?? "/admin/stats"} replace />;
   }
 
   const submit = (event: FormEvent<HTMLFormElement>) => {
@@ -23,7 +23,7 @@ export function LoginPage() {
     login.mutate(password, {
       onSuccess: () => {
         const state = location.state as { from?: string } | null;
-        navigate(state?.from ?? "/admin/ui", { replace: true });
+        navigate(state?.from ?? "/admin/stats", { replace: true });
       },
     });
   };

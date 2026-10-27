@@ -33,7 +33,21 @@ function RootRedirect() {
   if (loading) return <FullPageLoader />;
   if (disabled) return <DisabledPage message={disabled} />;
   if (error) return <FullPageError message={error.message} onRetry={retrySession} />;
-  return <Navigate to={session?.authenticated ? "/admin/ui" : "/login"} replace />;
+  return <Navigate to={session?.authenticated ? "/admin/stats" : "/login"} replace />;
+}
+
+function AdminRedirect() {
+  const location = useLocation();
+  return (
+    <Navigate
+      to={{
+        pathname: "/admin/stats",
+        search: location.search,
+        hash: location.hash,
+      }}
+      replace
+    />
+  );
 }
 
 export default function App() {
@@ -41,8 +55,9 @@ export default function App() {
     <Routes>
       <Route path="/" element={<RootRedirect />} />
       <Route path="/login" element={<LoginPage />} />
+      <Route path="/admin" element={<AdminRedirect />} />
       <Route
-        path="/admin/ui"
+        path="/admin/stats"
         element={
           <ProtectedRoute>
             <AppShell>
@@ -52,7 +67,7 @@ export default function App() {
         }
       />
       <Route
-        path="/admin/ui/keys"
+        path="/admin/keys"
         element={
           <ProtectedRoute>
             <AppShell>
@@ -62,7 +77,7 @@ export default function App() {
         }
       />
       <Route
-        path="/admin/ui/proxies"
+        path="/admin/proxies"
         element={
           <ProtectedRoute>
             <AppShell>
@@ -71,7 +86,7 @@ export default function App() {
           </ProtectedRoute>
         }
       />
-      <Route path="*" element={<Navigate to="/admin/ui" replace />} />
+      <Route path="*" element={<Navigate to="/admin/stats" replace />} />
     </Routes>
   );
 }

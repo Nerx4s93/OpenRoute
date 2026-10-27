@@ -1,7 +1,7 @@
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { render, screen, waitFor, within } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { MemoryRouter } from "react-router-dom";
+import { MemoryRouter, useLocation } from "react-router-dom";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { AuthProvider } from "./auth/AuthProvider";
@@ -105,6 +105,16 @@ function json(body: unknown): Response {
   });
 }
 
+function LocationProbe() {
+  const location = useLocation();
+  return (
+    <span data-testid="location">
+      {location.pathname}
+      {location.search}
+    </span>
+  );
+}
+
 function renderApp(path: string) {
   const queryClient = new QueryClient({
     defaultOptions: { queries: { retry: false } },
@@ -115,6 +125,7 @@ function renderApp(path: string) {
         <AuthProvider>
           <ToastProvider>
             <App />
+            <LocationProbe />
           </ToastProvider>
         </AuthProvider>
       </MemoryRouter>
@@ -146,7 +157,7 @@ describe("App", () => {
     expect(screen.getByLabelText("Пароль")).toBeInTheDocument();
   });
 
-  it("renders the statistics page for an authenticated session", async () => {
+  it("renders the statistics page at its dedicated route", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -160,7 +171,7 @@ describe("App", () => {
       }),
     );
 
-    renderApp("/admin/ui");
+    renderApp("/admin/stats");
 
     expect(
       await screen.findByRole("heading", { name: "Статистика", level: 1 }),
@@ -170,6 +181,10 @@ describe("App", () => {
     ).not.toBeInTheDocument();
     expect(screen.getByRole("link", { name: "Прокси" })).toHaveClass("nav-proxies");
     expect(screen.getByRole("link", { name: "Статистика" })).toHaveClass("nav-stats");
+    expect(screen.getByRole("link", { name: "Статистика" })).toHaveAttribute(
+      "href",
+      "/admin/stats",
+    );
     expect(
       within(screen.getByRole("banner"))
         .getAllByRole("link")
@@ -213,7 +228,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
 
-    renderApp("/admin/ui");
+    renderApp("/admin/stats");
 
     await screen.findByRole("heading", { name: "Токены по дням" });
     await waitFor(() => {
@@ -249,7 +264,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
 
-    const first = renderApp("/admin/ui");
+    const first = renderApp("/admin/stats");
     await screen.findByRole("heading", { name: "Токены по дням" });
     await user.click(screen.getByRole("button", { name: "7д" }));
     expect(screen.getByRole("button", { name: "7д" })).toHaveAttribute(
@@ -259,7 +274,7 @@ describe("App", () => {
 
     first.unmount();
     fetchMock.mockClear();
-    renderApp("/admin/ui");
+    renderApp("/admin/stats");
 
     await screen.findByRole("heading", { name: "Токены по дням" });
     expect(screen.getByRole("button", { name: "7д" })).toHaveAttribute(
@@ -302,7 +317,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
 
-    renderApp("/admin/ui/proxies");
+    renderApp("/admin/proxies");
 
     const button = await screen.findByRole("button", { name: /Обновить список/ });
     await user.click(button);
@@ -343,7 +358,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
 
-    renderApp("/admin/ui/proxies");
+    renderApp("/admin/proxies");
 
     expect(
       await screen.findByRole("heading", { name: "Прокси", level: 1 }),
@@ -397,7 +412,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
 
-    renderApp("/admin/ui/proxies");
+    renderApp("/admin/proxies");
 
     await screen.findByText(/250,50/);
     await waitFor(() => {
@@ -437,7 +452,7 @@ describe("App", () => {
       }),
     );
 
-    renderApp("/admin/ui/keys");
+    renderApp("/admin/keys");
 
     expect(
       await screen.findByRole("heading", { name: "Клиентские ключи", level: 1 }),
@@ -476,7 +491,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
 
-    renderApp("/admin/ui/keys");
+    renderApp("/admin/keys");
     await screen.findByRole("heading", { name: "Клиентские ключи", level: 1 });
     await user.click(screen.getByRole("button", { name: /Создать ключ/ }));
 
@@ -519,7 +534,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
 
-    renderApp("/admin/ui/keys");
+    renderApp("/admin/keys");
     await screen.findByRole("heading", { name: "Клиентские ключи", level: 1 });
     await user.click(
       await screen.findByRole("button", { name: "Перевыпустить" }),
@@ -553,7 +568,7 @@ describe("App", () => {
     expect(screen.queryByLabelText("Ключ доступа")).not.toBeInTheDocument();
   });
 
-  it("redirects the legacy stats route to the statistics page", async () => {
+  it("redirects the admin root to the statistics endpoint", async () => {
     vi.stubGlobal(
       "fetch",
       vi.fn(async (input: RequestInfo | URL) => {
@@ -567,15 +582,14 @@ describe("App", () => {
       }),
     );
 
-    renderApp("/admin/ui/stats");
+    renderApp("/admin?period=7d");
 
     expect(
       await screen.findByRole("heading", { name: "Статистика", level: 1 }),
     ).toBeInTheDocument();
-    expect(
-      await screen.findByRole("heading", { name: "Токены по дням" }),
-    ).toBeInTheDocument();
-    expect(screen.queryByText("Токенов за всё время")).not.toBeInTheDocument();
+    expect(screen.getByTestId("location")).toHaveTextContent(
+      "/admin/stats?period=7d",
+    );
   });
 
   it("navigates to statistics from the sidebar", async () => {
@@ -592,7 +606,7 @@ describe("App", () => {
     vi.stubGlobal("fetch", fetchMock);
     const user = userEvent.setup();
 
-    renderApp("/admin/ui/keys");
+    renderApp("/admin/keys");
 
     await screen.findByRole("heading", { name: "Клиентские ключи", level: 1 });
     await user.click(screen.getByRole("link", { name: "Статистика" }));
@@ -600,6 +614,7 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { name: "Статистика", level: 1 }),
     ).toBeInTheDocument();
+    expect(screen.getByTestId("location")).toHaveTextContent("/admin/stats");
     await waitFor(() => {
       expect(
         fetchMock.mock.calls.some(([url]) =>
