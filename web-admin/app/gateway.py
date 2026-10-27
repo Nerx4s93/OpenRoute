@@ -85,7 +85,8 @@ def _localize(message: str) -> str:
         "Comment must be at most 50 characters": "Комментарий не длиннее 50 символов",
         "Invalid numeric purchase parameter": "Некорректный числовой параметр покупки",
         "auto_prolong must be a boolean": "Некорректный флаг автопродления",
-        "Proxies purchased and list refreshed": "Прокси куплены, список обновлён",
+        "Proxies purchased, list refreshed, new proxies enabled":
+            "Прокси куплены, список обновлён, новые прокси включены",
         "Proxies purchased; list refresh failed":
             "Прокси куплены, но список не обновился",
     }
@@ -341,7 +342,9 @@ class GatewayClient:
         count = _as_int(data.get("count"), _as_int(payload.get("count"), 0))
         refresh_ok = bool(data.get("refresh_ok", True))
         if refresh_ok:
-            message = f"Куплено {count} прокси. Включите их в списке."
+            message = (
+                f"Куплено {count} прокси. Новые прокси включены в ротацию."
+            )
         else:
             message = (
                 f"Куплено {count} прокси, но список не обновился. "

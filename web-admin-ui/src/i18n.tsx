@@ -604,14 +604,12 @@ const API_MESSAGE_RULES: Array<{
   { pattern: /^Не удалось добавить ключ$/, replace: () => "Could not add key" },
   { pattern: /^Не удалось перевыпустить ключ$/, replace: () => "Could not reissue key" },
   { pattern: /^Шлюз не вернул ключ доступа$/, replace: () => "Gateway did not return an access key" },
-  { pattern: /^Прокси куплены, список обновлён$/, replace: () => "Proxies purchased and list refreshed" },
+  { pattern: /^Прокси куплены, список обновлён, новые прокси включены$/, replace: () => "Proxies purchased, list refreshed, new proxies enabled" },
   { pattern: /^Прокси куплены, но список не обновился$/, replace: () => "Proxies purchased; list refresh failed" },
   {
-    pattern: /^Куплено (\d+) прокси\. Включите их в списке\.$/,
+    pattern: /^Куплено (\d+) прокси\. Новые прокси включены в ротацию\.$/,
     replace: (count) =>
-      `${proxyWord(Number(count))} purchased. Enable ${
-        Number(count) === 1 ? "it" : "them"
-      } in the list.`,
+      `${proxyWord(Number(count))} purchased and added to rotation.`,
   },
   {
     pattern: /^Куплено (\d+) прокси, но список не обновился\. Нажмите «Обновить список»\.$/,

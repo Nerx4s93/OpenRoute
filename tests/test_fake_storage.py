@@ -82,6 +82,21 @@ async def test_proxy_snapshot_semantics_parking_and_soft_delete():
         await fake.set_proxy_enabled("http://missing.invalid:1", True)
 
 
+@pytest.mark.asyncio
+async def test_proxy_snapshot_enable_new_only_affects_inserted_rows():
+    fake = FakeStorage()
+
+    first = await fake.sync_proxies([PROXY_A], enable_new=True)
+    assert first["added"] == 1
+    assert fake.proxies[PROXY_A]["enabled"] is True
+
+    await fake.set_proxy_enabled(PROXY_A, False)
+    second = await fake.sync_proxies([PROXY_A, PROXY_B], enable_new=True)
+    assert second["added"] == 1
+    assert fake.proxies[PROXY_A]["enabled"] is False  # existing flag survives
+    assert fake.proxies[PROXY_B]["enabled"] is True
+
+
 # --- keys -------------------------------------------------------------------
 
 

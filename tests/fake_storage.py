@@ -4,8 +4,9 @@ Gateway tests must not need PostgreSQL (or the storage-service HTTP process).
 ``FakeStorage`` mirrors the storage API's observable semantics closely enough
 that a test can assert real behaviour:
 
-- proxy snapshots: new rows start disabled, existing ``enabled``/parking state
-  survives, absent rows are soft-removed (``listed = False``), never deleted;
+- proxy snapshots: new rows use the caller's ``enable_new`` initial flag
+  (default disabled), existing ``enabled``/parking state survives, absent rows
+  are soft-removed (``listed = False``), never deleted;
 - keys: only hashes are stored, duplicate inserts are no-ops, rotation is
   idempotent (retrying the old/new pair reports ``already_rotated``), and a
   hash collision is a conflict;
@@ -161,7 +162,9 @@ class FakeStorage:
 
     # --- proxy domain -----------------------------------------------------
 
-    async def sync_proxies(self, urls: Iterable[str]) -> dict[str, Any]:
+    async def sync_proxies(
+        self, urls: Iterable[str], enable_new: bool = False
+    ) -> dict[str, Any]:
         self._guard()
         deduped = list(dict.fromkeys(url for url in urls if url))
         known = set(deduped)
@@ -172,7 +175,7 @@ class FakeStorage:
                 continue
             self.proxies[url] = {
                 "proxy": url,
-                "enabled": False,  # new proxies always start disabled
+                "enabled": bool(enable_new),
                 "added_at": now,
                 "quota_until": 0.0,
                 "banned_until": 0.0,

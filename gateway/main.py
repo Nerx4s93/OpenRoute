@@ -1470,12 +1470,14 @@ async def internal_proxies_refresh(request: Request) -> dict:
     """POST ``/internal/proxies/refresh`` - force a cache-busting refresh.
 
     The admin panel uses this when an operator asks for the current px6.net
-    list; ``?refresh=true`` tells px6-service to ignore its TTL cache. The
-    regular background loop keeps using the cached endpoint.
+    list; ``?refresh=true`` tells px6-service to ignore its TTL cache. Newly
+    discovered rows are enabled because this is an explicit operator action.
+    The regular background loop keeps using the cached endpoint and leaves new
+    rows disabled.
     """
     _require_internal(request)
     try:
-        ok = await manager.refresh_proxies(bust_cache=True)
+        ok = await manager.refresh_proxies(bust_cache=True, enable_new=True)
     except Exception as exc:
         logger.exception("Manual proxy refresh crashed")
         raise HTTPException(502, "Proxy refresh failed") from exc
@@ -1558,10 +1560,11 @@ async def internal_px6_price(
 async def internal_px6_buy(request: Request) -> dict:
     """POST ``/internal/px6/buy`` — buy proxies and refresh the pool.
 
-    A successful purchase is never reported as an error just because the
-    follow-up refresh failed: the operator must know that money was spent.
-    The response carries ``refresh_ok`` so the UI can ask them to press
-    «Обновить список» manually.
+    Newly purchased proxies are enabled by the follow-up refresh so they join
+    the rotation immediately. A successful purchase is never reported as an
+    error just because the follow-up refresh failed: the operator must know
+    that money was spent. The response carries ``refresh_ok`` so the UI can
+    ask them to press «Обновить список» manually.
     """
     _require_internal(request)
     data = await _read_json(request)
@@ -1598,7 +1601,9 @@ async def internal_px6_buy(request: Request) -> dict:
 
     refresh_ok = True
     try:
-        refresh_ok = await manager.refresh_proxies(bust_cache=True)
+        refresh_ok = await manager.refresh_proxies(
+            bust_cache=True, enable_new=True
+        )
     except Exception:
         logger.exception("Proxy refresh after purchase crashed")
         refresh_ok = False
@@ -1609,7 +1614,7 @@ async def internal_px6_buy(request: Request) -> dict:
     result["ok"] = True
     result["refresh_ok"] = refresh_ok
     result["message"] = (
-        "Proxies purchased and list refreshed"
+        "Proxies purchased, list refreshed, new proxies enabled"
         if refresh_ok
         else "Proxies purchased; list refresh failed"
     )

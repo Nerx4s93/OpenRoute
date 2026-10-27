@@ -309,7 +309,7 @@ def build_fake_gateway(state: FakeState, token: str) -> FastAPI:
         return {
             "ok": True,
             "refresh_ok": True,
-            "message": "Proxies purchased and list refreshed",
+            "message": "Proxies purchased, list refreshed, new proxies enabled",
             "order_id": "order-1",
             "count": count,
             "price": round(12.5 * count * (period / 30), 2),
@@ -897,7 +897,9 @@ def test_px6_buy_requires_csrf_and_forwards_payload(panel):
     assert body["count"] == 2
     assert body["refresh_ok"] is True
     assert body["balance"] == 200.0
-    assert body["message"] == "Куплено 2 прокси. Включите их в списке."
+    assert body["message"] == (
+        "Куплено 2 прокси. Новые прокси включены в ротацию."
+    )
     assert panel.state.px6_buy_calls == [{
         "count": 2, "period": 7, "country": "ru", "version": 6, "descr": "test",
     }]

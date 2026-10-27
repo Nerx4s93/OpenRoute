@@ -155,7 +155,8 @@ URLs; this service is private and the gateway is their only consumer.
 One successful `PROXIES_URL` snapshot. Duplicate and empty strings are ignored.
 The whole operation runs in one transaction:
 
-- new URLs are inserted with `enabled = false`;
+- new URLs are inserted with `enabled = enable_new` (optional request field,
+  default `false`);
 - known rows keep `enabled`, parking and ban state;
 - every fetched URL becomes `listed = true`, every other row
   `listed = false` (soft delete, never a physical delete);
@@ -166,6 +167,10 @@ Request:
 ```json
 {"proxies": ["http://proxy-a.invalid:8080", "http://proxy-b.invalid:8080"]}
 ```
+
+`enable_new: true` inserts newly discovered URLs enabled; existing rows keep
+their current flag. The gateway uses it for purchases and explicit admin
+refreshes, while the background loop leaves new rows disabled.
 
 Response:
 

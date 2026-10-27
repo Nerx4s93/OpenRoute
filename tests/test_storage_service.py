@@ -302,6 +302,31 @@ def test_proxy_sync_preserves_flags_and_parking_and_soft_deletes(pg_dsn):
         assert missing.json()["error"]["type"] == "not_found_error"
 
 
+def test_proxy_sync_enable_new_only_affects_inserted_rows(pg_dsn):
+    a = "http://enable-new-a.invalid:8080"
+    b = "http://enable-new-b.invalid:8080"
+
+    with _client(pg_dsn) as client:
+        first = client.post(
+            "/proxies/sync", json={"proxies": [a], "enable_new": True}
+        )
+        assert first.status_code == 200
+        assert _by_proxy(first.json())[a]["enabled"] is True
+
+        client.post(
+            "/proxies/set-enabled",
+            json={"proxy": a, "enabled": False},
+        )
+        second = client.post(
+            "/proxies/sync",
+            json={"proxies": [a, b], "enable_new": True},
+        )
+        assert second.status_code == 200
+        rows = _by_proxy(second.json())
+        assert rows[a]["enabled"] is False  # existing flag survives
+        assert rows[b]["enabled"] is True
+
+
 # --- keys -------------------------------------------------------------------
 
 

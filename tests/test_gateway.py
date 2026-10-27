@@ -1383,10 +1383,12 @@ def test_edge_hides_internal(make_gateway):
 
 def test_internal_proxies_refresh_forces_cache_bust(make_gateway, monkeypatch):
     gw = make_gateway()
-    calls: list[bool] = []
+    calls: list[tuple[bool, bool]] = []
 
-    async def fake_refresh(bust_cache: bool = False) -> bool:
-        calls.append(bust_cache)
+    async def fake_refresh(
+        bust_cache: bool = False, enable_new: bool = False
+    ) -> bool:
+        calls.append((bust_cache, enable_new))
         return True
 
     monkeypatch.setattr(gw.manager, "refresh_proxies", fake_refresh)
@@ -1397,13 +1399,15 @@ def test_internal_proxies_refresh_forces_cache_bust(make_gateway, monkeypatch):
     response = gw.internal.post("/internal/proxies/refresh", headers=h)
     assert response.status_code == 200
     assert response.json() == {"ok": True, "message": "Proxies refreshed"}
-    assert calls == [True]
+    assert calls == [(True, True)]
 
 
 def test_internal_proxies_refresh_failure_is_openai_error(make_gateway, monkeypatch):
     gw = make_gateway()
 
-    async def failing_refresh(bust_cache: bool = False) -> bool:
+    async def failing_refresh(
+        bust_cache: bool = False, enable_new: bool = False
+    ) -> bool:
         return False
 
     monkeypatch.setattr(gw.manager, "refresh_proxies", failing_refresh)
@@ -1461,7 +1465,7 @@ def test_internal_px6_buy_refreshes_and_keeps_success_on_refresh_failure(
     gw = make_gateway()
     h = {"X-Internal-Token": "test-internal-token"}
     calls: list[tuple] = []
-    refresh_calls: list[bool] = []
+    refresh_calls: list[tuple[bool, bool]] = []
 
     async def fake_call(action: str, *args, **kwargs):
         calls.append((action, args, kwargs))
@@ -1471,9 +1475,11 @@ def test_internal_px6_buy_refreshes_and_keeps_success_on_refresh_failure(
             "version": 6, "currency": "RUB", "balance": 75.0,
         }
 
-    async def fake_refresh(bust_cache: bool = False) -> bool:
-        refresh_calls.append(bust_cache)
-        return refresh_calls[-1] is True
+    async def fake_refresh(
+        bust_cache: bool = False, enable_new: bool = False
+    ) -> bool:
+        refresh_calls.append((bust_cache, enable_new))
+        return True
 
     monkeypatch.setattr(main, "_px6_call", fake_call)
     monkeypatch.setattr(gw.manager, "refresh_proxies", fake_refresh)
@@ -1488,7 +1494,7 @@ def test_internal_px6_buy_refreshes_and_keeps_success_on_refresh_failure(
     body = response.json()
     assert body["ok"] is True and body["refresh_ok"] is True
     assert body["order_id"] == "o1" and body["balance"] == 75.0
-    assert refresh_calls == [True]
+    assert refresh_calls == [(True, True)]
     assert calls == [("buy", (), {"payload": {
         "count": 2, "period": 30, "country": "ru", "version": 6,
         "descr": "prod", "auto_prolong": False,
@@ -1497,8 +1503,10 @@ def test_internal_px6_buy_refreshes_and_keeps_success_on_refresh_failure(
     # A failed follow-up refresh must not hide a completed purchase.
     refresh_calls.clear()
 
-    async def failing_refresh(bust_cache: bool = False) -> bool:
-        refresh_calls.append(bust_cache)
+    async def failing_refresh(
+        bust_cache: bool = False, enable_new: bool = False
+    ) -> bool:
+        refresh_calls.append((bust_cache, enable_new))
         return False
 
     monkeypatch.setattr(gw.manager, "refresh_proxies", failing_refresh)
@@ -1511,7 +1519,7 @@ def test_internal_px6_buy_refreshes_and_keeps_success_on_refresh_failure(
     assert second.json()["ok"] is True
     assert second.json()["refresh_ok"] is False
     assert "purchased" in second.json()["message"].lower()
-    assert refresh_calls == [True]
+    assert refresh_calls == [(True, True)]
 
 
 def test_internal_px6_error_is_passed_through(make_gateway, monkeypatch):

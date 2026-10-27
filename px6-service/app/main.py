@@ -1,9 +1,8 @@
 """px6-service — microservice exposing the px6.net proxy account and catalog.
 
 The service is the only component that knows the px6.net API key. It returns
-**all active proxies** (no comment/tag filter): the OpenRoute gateway stores
-them disabled by default and an operator explicitly enables the ones that may
-carry traffic.
+**all active proxies** (no comment/tag filter); the OpenRoute gateway owns the
+enabled/disabled state of its pool.
 
 Responses for ``/proxies`` are TTL-cached (``CACHE_HOURS``); ``?refresh=true``
 bypasses the cache. Purchases invalidate that cache immediately.

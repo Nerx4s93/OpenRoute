@@ -44,9 +44,14 @@ class ProxyListResponse(BaseModel):
 
 
 class ProxySyncRequest(BaseModel):
-    """One successful px6 catalogue snapshot (deduped server-side)."""
+    """One successful px6 catalogue snapshot (deduped server-side).
+
+    ``enable_new`` is the initial enabled flag for rows inserted by this
+    snapshot; existing rows keep their current flag.
+    """
 
     proxies: list[str]
+    enable_new: bool = False
 
 
 class ProxySyncResponse(BaseModel):

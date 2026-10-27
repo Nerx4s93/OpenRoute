@@ -359,10 +359,18 @@ class StorageClient:
 
     # --- proxies ----------------------------------------------------------
 
-    async def sync_proxies(self, urls: Iterable[str]) -> dict[str, Any]:
-        """Apply one px6 catalogue snapshot; returns ``{added, proxies}``."""
+    async def sync_proxies(
+        self, urls: Iterable[str], enable_new: bool = False
+    ) -> dict[str, Any]:
+        """Apply one px6 catalogue snapshot; returns ``{added, proxies}``.
+
+        ``enable_new`` is the initial enabled flag for newly inserted rows;
+        existing rows keep their current flag.
+        """
         reply = await self._request(
-            "POST", "/proxies/sync", json={"proxies": list(urls)}
+            "POST",
+            "/proxies/sync",
+            json={"proxies": list(urls), "enable_new": enable_new},
         )
         return _object(reply)
 

@@ -3,7 +3,8 @@
 Semantics:
 
 - membership is seeded exclusively by :func:`sync` (one successful px6
-  catalogue snapshot); new rows are inserted ``enabled = FALSE``;
+  catalogue snapshot); new rows use the caller's ``enable_new`` initial flag
+  (default ``FALSE``);
 - an existing row keeps its manual ``enabled`` flag and its parking/ban state;
 - rows absent from the snapshot are soft-removed with ``listed = FALSE`` —
   never deleted — so parking and affinity survive and a proxy can reappear;
@@ -50,11 +51,14 @@ async def load_all(conn: Any, listed: bool | None = None) -> list[dict[str, Any]
     return [_row(tuple(r)) for r in await cur.fetchall()]
 
 
-async def sync(conn: Any, proxies: list[str]) -> tuple[int, list[dict[str, Any]]]:
+async def sync(
+    conn: Any, proxies: list[str], enable_new: bool = False
+) -> tuple[int, list[dict[str, Any]]]:
     """Apply one catalogue snapshot inside the caller's transaction.
 
     Returns ``(new_row_count, all_rows)``. Duplicate/empty URL strings are
-    ignored, matching the former gateway sync semantics.
+    ignored, matching the former gateway sync semantics. ``enable_new`` only
+    affects rows inserted by this call; existing flags are never changed.
     """
     deduped = list(dict.fromkeys(p for p in proxies if p))
     added = 0
@@ -62,9 +66,9 @@ async def sync(conn: Any, proxies: list[str]) -> tuple[int, list[dict[str, Any]]
     for proxy in deduped:
         cur = await conn.execute(
             "INSERT INTO proxies (proxy, enabled, added_at, listed)"
-            " VALUES (%s, FALSE, %s, TRUE)"
+            " VALUES (%s, %s, %s, TRUE)"
             " ON CONFLICT (proxy) DO NOTHING",
-            (proxy, now),
+            (proxy, bool(enable_new), now),
         )
         added += cur.rowcount
     if deduped:

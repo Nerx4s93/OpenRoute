@@ -154,8 +154,9 @@ gateway availability at `http://localhost:53202/health`.
    - **IPv6** — 3, 7, 14, 30, 60, or 90 days; the 3-day option is available
      only for IPv6.
    - **IPv4** and **Shared IPv4** — 7, 14, 30, 60, or 90 days.
-4. Newly purchased proxies are added **disabled**. Enable the ones you need
-   using the toggle in the table: only enabled proxies are used by the gateway.
+4. Newly purchased proxies are added **enabled** and immediately join the
+   rotation. You can disable any of them with the toggle in the table; the
+   flags of existing proxies are preserved.
 5. Open the **Keys** section and create a client key. The secret is shown only
    once; save it. If needed, set RPM/TPM (requests per minute and tokens per
    minute limits) and the allowed models list.

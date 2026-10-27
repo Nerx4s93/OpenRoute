@@ -149,7 +149,9 @@ async def sync_proxies(
 ) -> dict[str, Any]:
     """Apply one successful px6 snapshot; returns new-row count + all rows."""
     async with pool.connection() as conn:
-        added, rows = await proxies_service.sync(conn, body.proxies)
+        added, rows = await proxies_service.sync(
+            conn, body.proxies, enable_new=body.enable_new
+        )
     return {"added": added, "proxies": rows}
 
 

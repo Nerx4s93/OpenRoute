@@ -144,7 +144,8 @@ async def test_proxy_methods_paths_payloads_and_return_values():
 
     client, calls = _client(handler)
     synced = await client.sync_proxies(
-        ["http://proxy-a.invalid:8080", "http://proxy-b.invalid:8080"]
+        ["http://proxy-a.invalid:8080", "http://proxy-b.invalid:8080"],
+        enable_new=True,
     )
     assert synced == {"added": 1, "proxies": [PROXY]}
 
@@ -169,7 +170,8 @@ async def test_proxy_methods_paths_payloads_and_return_values():
     ]
     assert _json(calls[0]) == {
         "proxies": ["http://proxy-a.invalid:8080",
-                    "http://proxy-b.invalid:8080"]
+                    "http://proxy-b.invalid:8080"],
+        "enable_new": True,
     }
     assert "listed" not in calls[1].url.params
     assert calls[2].url.params["listed"] == "true"

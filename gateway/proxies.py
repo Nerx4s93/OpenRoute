@@ -17,10 +17,12 @@ CONTRACT (stable signatures used by ``main.py``):
   call right before sending upstream. Does NOT touch ``proxy.requests``.
 - ``mark_success(proxy)`` / ``mark_failure(proxy, reason, retry_after=None)``
   / ``status() -> dict``.
-- ``refresh_proxies()`` — fetch from ``PROXIES_URL``, sync membership into
-  storage-service (when bound; missing rows are soft-removed), health-probe,
-  rebuild the runtime pool. Returns ``True`` on a successful fetch, ``False``
-  on fetch error (caller retries sooner).
+- ``refresh_proxies(bust_cache=False, enable_new=False)`` — fetch from
+  ``PROXIES_URL``, sync membership into storage-service (when bound; missing
+  rows are soft-removed), health-probe, rebuild the runtime pool.
+  ``enable_new`` is the initial enabled flag for newly inserted rows. Returns
+  ``True`` on a successful fetch (and, when ``enable_new`` is requested, a
+  successful storage sync), ``False`` otherwise (caller retries sooner).
 
 Upstream probe target: ``GET {opencode_models_url}`` (the public catalogue,
 which does not count against the chat quota).
@@ -523,23 +525,33 @@ class ProxyManager:
             p.px6_date_end = meta.get("date_end", "")
             p.px6_descr = meta.get("descr", "")
 
-    async def refresh_proxies(self, bust_cache: bool = False) -> bool:
+    async def refresh_proxies(
+        self, bust_cache: bool = False, enable_new: bool = False
+    ) -> bool:
         """Refresh the pool, optionally forcing the source to bypass its cache.
 
         ``bust_cache=True`` adds ``?refresh=true`` to ``PROXIES_URL`` (the
         px6-service contract) so a manual admin refresh sees the current
         px6.net list instead of the service's TTL-cached copy. The periodic
         loop keeps using the cached path.
+
+        ``enable_new=True`` inserts proxies discovered by this refresh with
+        ``enabled = TRUE`` in storage-service. Existing rows keep their flag.
+        The purchase and explicit admin-refresh paths use it; the background
+        loop leaves new rows disabled until an operator enables them.
         """
         async with self._refresh_lock:
-            return await self._refresh_proxies_locked(bust_cache)
+            return await self._refresh_proxies_locked(bust_cache, enable_new)
 
-    async def _refresh_proxies_locked(self, bust_cache: bool) -> bool:
+    async def _refresh_proxies_locked(
+        self, bust_cache: bool, enable_new: bool = False
+    ) -> bool:
         """Fetch the proxy list, upsert/probe, rebuild the pool.
 
         Malformed individual items are skipped with a warning; duplicates are
         collapsed. A malformed top-level payload is a fetch error (``False`` ->
-        caller retries soon). ``True`` = fetch succeeded.
+        caller retries soon). ``True`` = fetch succeeded and, when
+        ``enable_new`` was requested, storage sync also succeeded.
         """
         try:
             url = self._s.proxies_url
@@ -582,9 +594,12 @@ class ProxyManager:
         # the pool. Proxies missing from the source are soft-removed in the
         # store (listed = FALSE), never deleted.
         parking = None
+        sync_ok = self.storage is not None
         if self.storage is not None:
             try:
-                synced = await self.storage.sync_proxies(urls)
+                synced = await self.storage.sync_proxies(
+                    urls, enable_new=enable_new
+                )
                 all_rows = synced.get("proxies") if isinstance(synced, dict) else None
                 if not isinstance(all_rows, list):
                     raise RuntimeError("storage sync returned no rows")
@@ -592,6 +607,7 @@ class ProxyManager:
                         if not isinstance(row, dict) or row.get("listed", True)]
                 parking = all_rows
             except Exception as exc:
+                sync_ok = False
                 logger.error(
                     "storage-service proxy sync failed (%s); keeping current "
                     "enable flags, new proxies stay disabled",
@@ -662,6 +678,13 @@ class ProxyManager:
                 f"{PROVIDER_NAME}: 0 ready proxies after refresh_proxies "
                 f"({enabled}/{len(self.proxies)} enabled, {len(alive)} alive)"
             )
+        if enable_new and not sync_ok:
+            # The fetch succeeded, but auto-enablement was not persisted.
+            # Report failure so the purchase/admin path can ask for a retry.
+            logger.warning(
+                "Proxy refresh could not enable new proxies: storage sync failed"
+            )
+            return False
         return True
 
     async def _probe_proxy(self, proxy_url: str) -> bool:

@@ -457,7 +457,7 @@ async def test_refresh_storage_failure_keeps_known_flags_and_disables_new():
             super().__init__()
             self.calls: list[str] = []
 
-        async def sync_proxies(self, urls):
+        async def sync_proxies(self, urls, enable_new: bool = False):
             self.calls.append("sync_proxies")
             raise StorageUnavailable("storage down")
 

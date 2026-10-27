@@ -475,7 +475,7 @@ describe("App", () => {
       if (url.includes("/api/admin/proxies/buy")) {
         return json({
           ok: true,
-          message: "Куплено 1 прокси. Включите их в списке.",
+          message: "Куплено 1 прокси. Новые прокси включены в ротацию.",
           order_id: "order-1", count: 1, price: 12.5, price_single: 12.5,
           period: 30, country: "ru", version: 6, currency: "RUB",
           balance: 238.0, refresh_ok: true,
@@ -506,7 +506,7 @@ describe("App", () => {
     await user.click(within(dialog).getByRole("button", { name: "Buy" }));
 
     expect(
-      await screen.findByText("1 proxy purchased. Enable it in the list."),
+      await screen.findByText("1 proxy purchased and added to rotation."),
     ).toBeInTheDocument();
     const buyCall = fetchMock.mock.calls.find(([url]) =>
       String(url).includes("/api/admin/proxies/buy"),

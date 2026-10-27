@@ -27,7 +27,7 @@ class ProxySetBody(BaseModel):
 
 
 class ProxyBuyBody(BaseModel):
-    """Purchase request (proxies are bought disabled; enable manually)."""
+    """Purchase request (a successful refresh enables the new proxies)."""
 
     model_config = ConfigDict(extra="ignore")
 

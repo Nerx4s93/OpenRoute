@@ -341,6 +341,61 @@ def test_refresh_proxies_syncs_storage_and_preserves_enabled():
     asyncio.run(run())
 
 
+def test_refresh_proxies_enable_new_enables_only_new_rows():
+    import asyncio
+
+    async def run():
+        storage = FakeStorage(proxies=[
+            {"proxy": "http://h1:1", "enabled": True},
+            {"proxy": "http://h2:2", "enabled": False},
+        ])
+        m = ProxyManager(build_settings())
+        m.bind_storage(storage)
+        m.apply_proxies(await storage.list_proxies(listed=True))
+        m._probe_proxy = types.MethodType(_alive_probe, m)
+        await _fake_fetch(m, {"proxies": [
+            {"host": "h1", "port": 1},
+            {"host": "h2", "port": 2},
+            {"host": "h3", "port": 3},
+        ]})
+        assert await m.refresh_proxies(enable_new=True) is True
+        by_url = {p.url: p for p in m.proxies}
+        assert by_url["http://h1:1"].manually_disabled is False
+        assert by_url["http://h2:2"].manually_disabled is True
+        assert by_url["http://h3:3"].manually_disabled is False
+        assert storage.proxies["http://h1:1"]["enabled"] is True
+        assert storage.proxies["http://h2:2"]["enabled"] is False
+        assert storage.proxies["http://h3:3"]["enabled"] is True
+        await m.aclose()
+
+    asyncio.run(run())
+
+
+def test_refresh_proxies_enable_new_fails_when_storage_sync_fails():
+    import asyncio
+
+    async def run():
+        storage = FakeStorage(proxies=[
+            {"proxy": "http://old-on:1", "enabled": True},
+        ])
+        m = ProxyManager(build_settings())
+        m.bind_storage(storage)
+        m.apply_proxies(await storage.list_proxies(listed=True))
+        storage.raise_unavailable()
+        m._probe_proxy = types.MethodType(_alive_probe, m)
+        await _fake_fetch(m, {"proxies": [
+            {"host": "old-on", "port": 1},
+            {"host": "new", "port": 3},
+        ]})
+        assert await m.refresh_proxies(enable_new=True) is False
+        by_url = {p.url: p for p in m.proxies}
+        assert by_url["http://old-on:1"].manually_disabled is False
+        assert by_url["http://new:3"].manually_disabled is True
+        await m.aclose()
+
+    asyncio.run(run())
+
+
 def test_refresh_proxies_fails_closed_when_storage_is_unavailable():
     import asyncio
 
