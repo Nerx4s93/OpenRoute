@@ -42,6 +42,7 @@ header.top nav a.nav-proxies::before { border-radius: 50%; width: 15px; height: 
 header.top nav a:hover { background: #1a2934; color: var(--text); transform: translateX(2px); }
 header.top nav a.active { background: #83decf16; border-color: #88e5cf30; color: var(--mint); }
 .sidebar-bottom { margin-top: auto; padding: 10px 10px 0; border-top: 1px solid var(--line-soft); }
+.sidebar-bottom nav { margin-bottom: 2px; }
 .sidebar-bottom button { width: 100%; margin-top: 14px; text-align: left; padding: 9px 11px;
   display: flex; align-items: center; gap: 6px; }
 .live-dot { width: 7px; height: 7px; flex: none; border-radius: 50%;
@@ -165,6 +166,12 @@ header.top nav a.nav-stats::before { width: 15px; height: 15px; border: 0; borde
     linear-gradient(currentColor, currentColor) center bottom / 3px 100% no-repeat,
     linear-gradient(currentColor, currentColor) right bottom / 3px 35% no-repeat;
   opacity: .8; }
+header.top nav a.nav-settings::before { width: 16px; height: 16px; border: 0; border-radius: 0;
+  background:
+    linear-gradient(currentColor, currentColor) 0 3px / 16px 1.5px no-repeat,
+    linear-gradient(currentColor, currentColor) 0 8px / 16px 1.5px no-repeat,
+    linear-gradient(currentColor, currentColor) 0 13px / 16px 1.5px no-repeat;
+  opacity: .8; }
 
 /* --- sections / tables --------------------------------------------------- */
 .section { margin: 0 0 22px; overflow: hidden; background: var(--surface);
@@ -247,6 +254,19 @@ form.add button, .login-box button[type=submit] { padding: 10px 18px;
 form.add button:hover, .login-box button[type=submit]:hover {
   background: #b1f5df; border-color: #b1f5df; }
 .form-hint { color: #6e818e; font-size: 11px; }
+.settings-content { padding: 22px; display: grid; gap: 18px; }
+.settings-copy h3 { margin: 0 0 6px; font-size: 14px; font-weight: 700; }
+.language-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.language-option { display: grid; gap: 8px; padding: 16px 17px; text-align: left;
+  border: 1px solid #344756; border-radius: 12px; background: #0d1720; color: var(--text); }
+.language-option:hover { background: #12212c; border-color: #4f6d76; transform: translateY(-1px); }
+.language-option.active { border-color: #88e5cf70; background: #83decf16;
+  box-shadow: inset 0 0 0 1px #88e5cf30; }
+.language-option-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+.language-option-head strong { font-size: 14px; font-weight: 750; }
+.language-option-hint { color: #8294a0; font-size: 11px; }
+.language-check { color: var(--mint); font-size: 10px; font-weight: 750;
+  letter-spacing: .08em; text-transform: uppercase; }
 .buy-summary { display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 12px;
   min-width: 0; font-size: 12px; }
 .buy-price { color: var(--mint); font-size: 15px; white-space: nowrap; }
@@ -355,7 +375,8 @@ form.add button:hover, .login-box button[type=submit]:hover {
   .brand-sub, .nav-label { display: none; }
   header.top nav { display: flex; margin-left: auto; }
   header.top nav a { min-height: 38px; }
-  .sidebar-bottom { display: block; margin-top: 0; padding: 0; border-top: 0; }
+  .sidebar-bottom { display: flex; align-items: center; gap: 6px; margin-top: 0; padding: 0; border-top: 0; }
+  header.top .sidebar-bottom nav { margin-left: 0; margin-bottom: 0; }
   .sidebar-bottom button { width: auto; margin-top: 0; padding: 7px 10px; white-space: nowrap; }
   .main { padding: 0 22px 50px; }
   .login-page { grid-template-columns: 1fr; }
@@ -387,11 +408,13 @@ form.add button:hover, .login-box button[type=submit]:hover {
   .card { min-height: 120px; padding: 15px; }
   .section-head { padding: 14px 16px; }
   .section-note { display: none; }
-  .table-scroll::before { content: "Прокрутите таблицу →"; display: block; position: sticky;
+  .table-scroll::before { content: "Scroll table →"; display: block; position: sticky;
     left: 0; width: max-content; padding: 10px 16px; color: #7895a3; font-size: 10px; }
+  html[lang="ru"] .table-scroll::before { content: "Прокрутите таблицу →"; }
   .table-scroll table { min-width: 760px; }
   .field, .field.wide, .field.full, .field.buy-comment { grid-column: span 6; }
-  .form-content { padding: 16px; }
+  .form-content, .settings-content { padding: 16px; }
+  .language-grid { grid-template-columns: 1fr; }
   .form-footer { align-items: stretch; flex-direction: column; }
   form.add button { width: 100%; }
   .login-visual { min-height: 195px; }

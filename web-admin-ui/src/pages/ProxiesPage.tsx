@@ -10,27 +10,37 @@ import { useDebouncedValue } from "../hooks/useDebouncedValue";
 import { useProxiesLive } from "../hooks/useLiveSnapshot";
 import { usePeriod } from "../hooks/usePeriod";
 import { useBuyProxies, usePx6Account, usePx6Countries, usePx6Price } from "../hooks/usePx6";
+import {
+  formatDays,
+  translate,
+  useI18n,
+  type Language,
+  type TranslationKey,
+} from "../i18n";
 import { formatMoney, formatNumber } from "../lib/format";
 import { proxyState } from "../lib/proxyState";
 
-const VERSIONS = [
-  { value: 3, label: "3 — IPv4 Shared" },
-  { value: 4, label: "4 — IPv4" },
-  { value: 6, label: "6 — IPv6" },
-] as const;
+const VERSIONS: ReadonlyArray<{ value: number; labelKey: TranslationKey }> = [
+  { value: 3, labelKey: "proxies.version3" },
+  { value: 4, labelKey: "proxies.version4" },
+  { value: 6, labelKey: "proxies.version6" },
+];
 
 const PERIODS = [3, 7, 14, 30, 60, 90] as const;
 
-function versionLabel(value: string | number): string {
+function versionLabel(value: string | number, language: Language): string {
   if (value === "") return "-";
   const version = String(value);
-  return VERSIONS.find((item) => String(item.value) === version)?.label ?? version;
+  const item = VERSIONS.find((entry) => String(entry.value) === version);
+  return item ? translate(language, item.labelKey) : version;
 }
 
-function countryLabel(code: string): string {
+function countryLabel(code: string, language: Language): string {
   if (!code) return "—";
   try {
-    const name = new Intl.DisplayNames(["ru"], { type: "region" }).of(code.toUpperCase());
+    const name = new Intl.DisplayNames([language === "ru" ? "ru" : "en"], {
+      type: "region",
+    }).of(code.toUpperCase());
     return name ? `${name} (${code.toUpperCase()})` : code.toUpperCase();
   } catch {
     return code.toUpperCase();
@@ -43,6 +53,7 @@ function proxyDate(value: string): string {
 }
 
 export function ProxiesPage() {
+  const { language, t } = useI18n();
   const [period] = usePeriod();
   const query = useProxiesLive(period);
   const refreshProxies = useRefreshProxies();
@@ -85,7 +96,9 @@ export function ProxiesPage() {
       price.version === version,
   );
   const currency = price?.currency ?? account?.currency ?? "RUB";
-  const priceText = price ? formatMoney(price.price, price.currency || currency) : "—";
+  const priceText = price
+    ? formatMoney(price.price, price.currency || currency, language)
+    : "—";
   const priceLoading = countValid && !priceReady && !priceQuery.isError;
   const balance = account?.balance ?? price?.balance;
   const balanceAfter =
@@ -130,31 +143,33 @@ export function ProxiesPage() {
     <>
       <div className="hero page-enter">
         <div className="hero-content">
-          <div className="eyebrow">px6.net / управление</div>
-          <h1>Прокси</h1>
+          <div className="eyebrow">{t("proxies.eyebrow")}</div>
+          <h1>{t("proxies.title")}</h1>
         </div>
         <button
           type="button"
           className="hero-refresh"
           disabled={refreshProxies.isPending}
-          title="Запросить свежий список из px6.net и сбросить кэш"
+          title={t("proxies.refreshTitle")}
           aria-busy={refreshProxies.isPending}
           onClick={() => refreshProxies.mutate()}
         >
           <span aria-hidden="true">↻</span>
-          {refreshProxies.isPending ? "Обновляю…" : "Обновить список"}
+          {refreshProxies.isPending ? t("proxies.refreshing") : t("proxies.refresh")}
         </button>
       </div>
 
       {query.isError ? (
         <ErrorBanner
-          message={query.error?.message ?? "Не удалось загрузить прокси"}
+          message={query.error?.message ?? t("proxies.loadFailed")}
           onRetry={() => void query.refetch()}
         />
       ) : null}
       {accountQuery.isError ? (
         <ErrorBanner
-          message={`Баланс px6.net: ${accountQuery.error?.message ?? "не удалось загрузить"}`}
+          message={t("proxies.accountError", {
+            message: accountQuery.error?.message ?? t("proxies.accountLoadFailed"),
+          })}
           onRetry={() => void accountQuery.refetch()}
         />
       ) : null}
@@ -162,61 +177,73 @@ export function ProxiesPage() {
       <div className="cards page-enter" id="cards">
         <StatCard
           glyph="₽"
-          value={account ? formatMoney(account.balance, account.currency) : accountQuery.isLoading ? "…" : "—"}
-          label="Баланс px6.net"
+          value={
+            account
+              ? formatMoney(account.balance, account.currency, language)
+              : accountQuery.isLoading
+                ? "…"
+                : "—"
+          }
+          label={t("proxies.balance")}
           hint={account?.user_id ? `ID ${account.user_id}` : undefined}
         />
         <StatCard
           glyph="⇄"
           value={`${enabledCount}/${summary?.proxies_total ?? rows.length}`}
-          label="Прокси включено"
-          hint="Только включённые попадают в пул шлюза"
+          label={t("proxies.enabled")}
+          hint={t("proxies.enabledHint")}
         />
         <StatCard
           glyph="◎"
-          value={formatNumber(summary?.proxies_ready ?? 0)}
-          label="Готовы к ротации"
+          value={formatNumber(summary?.proxies_ready ?? 0, language)}
+          label={t("proxies.ready")}
         />
       </div>
 
       <Section
         id="buy-title"
         icon="＋"
-        title="Купить прокси"
-        note="Оплата с баланса px6.net"
+        title={t("proxies.buyTitle")}
+        note={t("proxies.buyNote")}
       >
         <div className="form-content">
           <form className="add buy-form" onSubmit={submit}>
             <div className="field">
-              <label htmlFor="buy-version">Версия</label>
+              <label htmlFor="buy-version">{t("proxies.version")}</label>
               <select
                 id="buy-version"
                 value={version}
                 onChange={(event) => setVersion(Number(event.target.value))}
               >
                 {VERSIONS.map((item) => (
-                  <option key={item.value} value={item.value}>{item.label}</option>
+                  <option key={item.value} value={item.value}>
+                    {translate(language, item.labelKey)}
+                  </option>
                 ))}
               </select>
             </div>
 
             <div className="field">
-              <label htmlFor="buy-country">Страна</label>
+              <label htmlFor="buy-country">{t("proxies.country")}</label>
               <select
                 id="buy-country"
                 value={country}
                 disabled={countriesQuery.isLoading || !countryList?.length}
                 onChange={(event) => setCountry(event.target.value)}
               >
-                {!countryList?.length ? <option value="">Загрузка…</option> : null}
+                {!countryList?.length ? (
+                  <option value="">{t("proxies.loading")}</option>
+                ) : null}
                 {(countryList ?? []).map((code) => (
-                  <option key={code} value={code}>{countryLabel(code)}</option>
+                  <option key={code} value={code}>
+                    {countryLabel(code, language)}
+                  </option>
                 ))}
               </select>
             </div>
 
             <div className="field">
-              <label htmlFor="buy-count">Количество</label>
+              <label htmlFor="buy-count">{t("proxies.count")}</label>
               <input
                 id="buy-count"
                 type="text"
@@ -228,25 +255,27 @@ export function ProxiesPage() {
             </div>
 
             <div className="field">
-              <label htmlFor="buy-period">Период</label>
+              <label htmlFor="buy-period">{t("proxies.period")}</label>
               <select
                 id="buy-period"
                 value={buyPeriod}
                 onChange={(event) => setBuyPeriod(Number(event.target.value))}
               >
                 {PERIODS.map((days) => (
-                  <option key={days} value={days}>{days} дней</option>
+                  <option key={days} value={days}>
+                    {formatDays(days, language)}
+                  </option>
                 ))}
               </select>
             </div>
 
             <div className="field buy-comment">
-              <label htmlFor="buy-descr">Комментарий (необязательно)</label>
+              <label htmlFor="buy-descr">{t("proxies.comment")}</label>
               <input
                 id="buy-descr"
                 type="text"
                 maxLength={50}
-                placeholder="Например, для проекта X"
+                placeholder={t("proxies.commentPlaceholder")}
                 value={descr}
                 onChange={(event) => setDescr(event.target.value)}
               />
@@ -254,12 +283,16 @@ export function ProxiesPage() {
 
             {countriesQuery.isError ? (
               <p className="form-hint buy-error">
-                Не удалось получить список стран: {countriesQuery.error?.message}
+                {t("proxies.countriesError", {
+                  message: countriesQuery.error?.message ?? "",
+                })}
               </p>
             ) : null}
             {priceQuery.isError ? (
               <p className="form-hint buy-error">
-                Не удалось рассчитать стоимость: {priceQuery.error?.message}
+                {t("proxies.priceError", {
+                  message: priceQuery.error?.message ?? "",
+                })}
               </p>
             ) : null}
 
@@ -267,15 +300,20 @@ export function ProxiesPage() {
               <div className="buy-summary">
                 <span className="muted">
                   {countValid
-                    ? `${count} × ${versionLabel(version)}, ${countryLabel(country)}, ${buyPeriod} дн.`
-                    : "Укажите количество от 1 до 1000"}
+                    ? t("proxies.summary", {
+                        count,
+                        version: versionLabel(version, language),
+                        country: countryLabel(country, language),
+                        days: formatDays(buyPeriod, language),
+                      })
+                    : t("proxies.invalidCount")}
                 </span>
                 <strong className="buy-price">
-                  {priceLoading ? "Считаю…" : priceText}
+                  {priceLoading ? t("common.calculating") : priceText}
                 </strong>
               </div>
               <button type="submit" disabled={!canBuy}>
-                {buy.isPending ? "Покупаю…" : "Купить"}
+                {buy.isPending ? t("common.buying") : t("common.buy")}
               </button>
             </div>
           </form>
@@ -285,21 +323,24 @@ export function ProxiesPage() {
       <Section
         id="proxies-title"
         icon="⇄"
-        title="Прокси px6.net"
-        note={`${enabledCount} из ${summary?.proxies_total ?? rows.length} включено`}
+        title={t("proxies.listTitle")}
+        note={t("proxies.listNote", {
+          enabled: enabledCount,
+          total: summary?.proxies_total ?? rows.length,
+        })}
       >
         <div className="table-scroll">
           <table>
             <thead>
               <tr>
-                <th>Прокси</th>
-                <th>Страна</th>
-                <th>Версия</th>
-                <th>Действует до</th>
-                <th>Комментарий</th>
-                <th>Статус</th>
-                <th>Токены</th>
-                <th>Действия</th>
+                <th>{t("proxies.proxy")}</th>
+                <th>{t("proxies.countryColumn")}</th>
+                <th>{t("proxies.versionColumn")}</th>
+                <th>{t("proxies.validUntil")}</th>
+                <th>{t("proxies.commentColumn")}</th>
+                <th>{t("proxies.status")}</th>
+                <th>{t("proxies.tokens")}</th>
+                <th>{t("proxies.actions")}</th>
               </tr>
             </thead>
             <tbody>
@@ -308,9 +349,7 @@ export function ProxiesPage() {
               ) : rows.length ? (
                 rows.map((row) => <ProxyTableRow key={row.id ?? row.display} row={row} />)
               ) : (
-                <EmptyRow colSpan={8}>
-                  Прокси не найдены. Нажмите «Обновить список» или купите прокси.
-                </EmptyRow>
+                <EmptyRow colSpan={8}>{t("proxies.empty")}</EmptyRow>
               )}
             </tbody>
           </table>
@@ -319,9 +358,9 @@ export function ProxiesPage() {
 
       <ConfirmDialog
         open={confirmOpen}
-        title="Купить прокси?"
-        confirmLabel="Купить"
-        pendingLabel="Покупаю…"
+        title={t("proxies.confirmTitle")}
+        confirmLabel={t("common.buy")}
+        pendingLabel={t("common.buying")}
         tone="accent"
         pending={buy.isPending}
         onCancel={() => !buy.isPending && setConfirmOpen(false)}
@@ -329,53 +368,59 @@ export function ProxiesPage() {
       >
         <dl className="confirm-summary">
           <div>
-            <dt>Прокси</dt>
-            <dd>{count} × {versionLabel(version)}, {countryLabel(country)}</dd>
+            <dt>{t("proxies.confirmProxies")}</dt>
+            <dd>
+              {count} × {versionLabel(version, language)},{" "}
+              {countryLabel(country, language)}
+            </dd>
           </div>
           <div>
-            <dt>Период</dt>
-            <dd>{buyPeriod} дней</dd>
+            <dt>{t("proxies.confirmPeriod")}</dt>
+            <dd>{formatDays(buyPeriod, language)}</dd>
           </div>
           <div>
-            <dt>Стоимость</dt>
-            <dd>{priceQuery.isFetching ? "Считаю…" : priceText}</dd>
+            <dt>{t("proxies.confirmPrice")}</dt>
+            <dd>
+              {priceQuery.isFetching ? t("common.calculating") : priceText}
+            </dd>
           </div>
           <div>
-            <dt>Баланс после</dt>
-            <dd>{balanceAfter !== undefined ? formatMoney(balanceAfter, currency) : "—"}</dd>
+            <dt>{t("proxies.confirmBalanceAfter")}</dt>
+            <dd>
+              {balanceAfter !== undefined
+                ? formatMoney(balanceAfter, currency, language)
+                : "—"}
+            </dd>
           </div>
           {descr.trim() ? (
             <div>
-              <dt>Комментарий</dt>
+              <dt>{t("proxies.confirmComment")}</dt>
               <dd>{descr.trim()}</dd>
             </div>
           ) : null}
         </dl>
-        <p className="muted confirm-note">
-          Прокси будут добавлены выключенными. Включите нужные в таблице ниже — только
-          они начнут использоваться шлюзом. Стоимость ориентировочная и фиксируется px6.net
-          при покупке.
-        </p>
+        <p className="muted confirm-note">{t("proxies.confirmNote")}</p>
       </ConfirmDialog>
     </>
   );
 }
 
 function ProxyTableRow({ row }: { row: ProxyRow }) {
+  const { language, t } = useI18n();
   const setProxy = useSetProxy();
   const pending = setProxy.isPending && setProxy.variables?.proxyId === row.id;
-  const state = proxyState(row);
+  const state = proxyState(row, language);
   const meta = row.px6;
 
   return (
     <tr className={row.enabled ? undefined : "dead"}>
       <td className="mono">{row.display}</td>
-      <td>{countryLabel(meta?.country ?? "")}</td>
-      <td>{versionLabel(meta?.version ?? "")}</td>
+      <td>{countryLabel(meta?.country ?? "", language)}</td>
+      <td>{versionLabel(meta?.version ?? "", language)}</td>
       <td className="mono muted">{proxyDate(meta?.date_end ?? "")}</td>
       <td className="muted">{meta?.descr || "—"}</td>
       <td><StatusBadge label={state.label} tone={state.tone} /></td>
-      <td>{formatNumber(row.usage.tokens)}</td>
+      <td>{formatNumber(row.usage.tokens, language)}</td>
       <td className="actions">
         <button
           type="button"
@@ -383,14 +428,14 @@ function ProxyTableRow({ row }: { row: ProxyRow }) {
           disabled={!row.id || pending}
           title={
             row.enabled
-              ? "Исключить прокси из пула шлюза"
-              : "Разрешить использование этого прокси шлюзом"
+              ? t("proxies.toggleOffTitle")
+              : t("proxies.toggleOnTitle")
           }
           onClick={() => {
             if (row.id) setProxy.mutate({ proxyId: row.id, enabled: !row.enabled });
           }}
         >
-          {pending ? "…" : row.enabled ? "Выключить" : "Включить"}
+          {pending ? "…" : row.enabled ? t("proxies.disable") : t("proxies.enable")}
         </button>
       </td>
     </tr>

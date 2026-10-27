@@ -1,11 +1,12 @@
 import { useEffect, useRef, type ReactNode } from "react";
+import { useI18n } from "../i18n";
 
 export function ConfirmDialog({
   open,
   title,
   children,
-  confirmLabel = "Удалить",
-  pendingLabel = "Удаление…",
+  confirmLabel,
+  pendingLabel,
   tone = "danger",
   pending = false,
   onConfirm,
@@ -21,9 +22,12 @@ export function ConfirmDialog({
   onConfirm: () => void;
   onCancel: () => void;
 }) {
+  const { t } = useI18n();
   const confirmRef = useRef<HTMLButtonElement>(null);
   const cancelRef = useRef(onCancel);
   cancelRef.current = onCancel;
+  const resolvedConfirmLabel = confirmLabel ?? t("common.delete");
+  const resolvedPendingLabel = pendingLabel ?? t("common.deleting");
 
   useEffect(() => {
     if (open) confirmRef.current?.focus();
@@ -53,7 +57,7 @@ export function ConfirmDialog({
         <div className="modal-body">{children}</div>
         <div className="modal-actions">
           <button type="button" onClick={onCancel} disabled={pending}>
-            Отмена
+            {t("common.cancel")}
           </button>
           <button
             ref={confirmRef}
@@ -62,7 +66,7 @@ export function ConfirmDialog({
             onClick={onConfirm}
             disabled={pending}
           >
-            {pending ? pendingLabel : confirmLabel}
+            {pending ? resolvedPendingLabel : resolvedConfirmLabel}
           </button>
         </div>
       </div>

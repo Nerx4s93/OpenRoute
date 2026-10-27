@@ -7,6 +7,7 @@ import {
   useState,
   type ReactNode,
 } from "react";
+import { useI18n } from "../i18n";
 
 export type ToastTone = "success" | "error";
 
@@ -23,6 +24,7 @@ interface ToastContextValue {
 const ToastContext = createContext<ToastContextValue | null>(null);
 
 export function ToastProvider({ children }: { children: ReactNode }) {
+  const { t } = useI18n();
   const [items, setItems] = useState<ToastItem[]>([]);
   const nextId = useRef(1);
 
@@ -52,7 +54,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
             <button
               type="button"
               className="toast-close"
-              aria-label="Закрыть"
+              aria-label={t("common.close")}
               onClick={() => remove(item.id)}
             >
               ×

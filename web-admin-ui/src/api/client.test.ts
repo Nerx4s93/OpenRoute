@@ -76,7 +76,7 @@ describe("api client", () => {
 
     await expect(api.setProxy("nope", true)).rejects.toMatchObject({
       status: 404,
-      message: "Прокси не найден",
+      message: "Proxy not found",
     } satisfies Partial<ApiError>);
   });
 
@@ -84,7 +84,7 @@ describe("api client", () => {
     vi.stubGlobal("fetch", vi.fn().mockRejectedValue(new TypeError("failed")));
     await expect(api.session()).rejects.toMatchObject({
       status: 0,
-      message: expect.stringContaining("Сервер недоступен"),
+      message: expect.stringContaining("Server is unavailable"),
     });
   });
 

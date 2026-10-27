@@ -9,29 +9,44 @@ import {
 } from "./format";
 
 describe("formatDuration", () => {
-  it("rounds sub-minute values and formats minutes/hours", () => {
-    expect(formatDuration(0)).toBe("<1м");
-    expect(formatDuration(59)).toBe("<1м");
-    expect(formatDuration(60)).toBe("1м");
-    expect(formatDuration(125)).toBe("2м");
-    expect(formatDuration(3600)).toBe("1ч 00м");
-    expect(formatDuration(7320)).toBe("2ч 02м");
+  it("rounds sub-minute values and formats minutes/hours in English", () => {
+    expect(formatDuration(0, "en")).toBe("<1m");
+    expect(formatDuration(59, "en")).toBe("<1m");
+    expect(formatDuration(60, "en")).toBe("1m");
+    expect(formatDuration(125, "en")).toBe("2m");
+    expect(formatDuration(3600, "en")).toBe("1h 00m");
+    expect(formatDuration(7320, "en")).toBe("2h 02m");
+  });
+
+  it("uses Russian unit suffixes", () => {
+    expect(formatDuration(60, "ru")).toBe("1м");
+    expect(formatDuration(3600, "ru")).toBe("1ч 00м");
   });
 });
 
 describe("formatNumber", () => {
+  it("uses English thousands separators", () => {
+    expect(formatNumber(12345, "en")).toBe("12,345");
+    expect(formatLimit(null, "en")).toBe("—");
+    expect(formatLimit(0, "en")).toBe("0");
+  });
+
   it("uses Russian thousands separators", () => {
-    expect(formatNumber(12345)).toMatch(/12\s345/);
-    expect(formatLimit(null)).toBe("—");
-    expect(formatLimit(0)).toBe("0");
+    expect(formatNumber(12345, "ru")).toMatch(/12\s345/);
   });
 });
 
 describe("formatCompact", () => {
+  it("uses short English notation", () => {
+    expect(formatCompact(0, "en")).toBe("0");
+    expect(formatCompact(1500, "en")).toMatch(/1\.5K|K/);
+    expect(formatCompact(2_500_000, "en").length).toBeLessThan(
+      formatNumber(2_500_000, "en").length,
+    );
+  });
+
   it("uses short Russian notation", () => {
-    expect(formatCompact(0)).toBe("0");
-    expect(formatCompact(1500)).toMatch(/1,5|тыс/);
-    expect(formatCompact(2_500_000).length).toBeLessThan(formatNumber(2_500_000).length);
+    expect(formatCompact(1500, "ru")).toMatch(/1,5|тыс/);
   });
 });
 

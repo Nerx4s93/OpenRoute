@@ -1,4 +1,5 @@
 import { PERIODS, type Period } from "../api/types";
+import { periodLabel, periodTitle, useI18n } from "../i18n";
 
 export function PeriodTabs({
   active,
@@ -7,23 +8,24 @@ export function PeriodTabs({
   active: Period;
   onChange: (period: Period) => void;
 }) {
+  const { language, t } = useI18n();
   const tabs = PERIODS.map((period) => (
     <button
-      key={period.value}
+      key={period}
       type="button"
-      className={period.value === active ? "active" : undefined}
-      aria-pressed={period.value === active}
-      title={period.title}
-      onClick={() => onChange(period.value)}
+      className={period === active ? "active" : undefined}
+      aria-pressed={period === active}
+      title={periodTitle(period, language)}
+      onClick={() => onChange(period)}
     >
-      {period.label}
+      {periodLabel(period, language)}
     </button>
   ));
 
   return (
     <div className="period-bar page-enter">
-      <div className="period-title">Период расходов</div>
-      <nav className="period-tabs" aria-label="Период расходов">
+      <div className="period-title">{t("period.title")}</div>
+      <nav className="period-tabs" aria-label={t("period.aria")}>
         {tabs}
       </nav>
     </div>

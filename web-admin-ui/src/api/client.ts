@@ -1,3 +1,4 @@
+import { getLanguage, localizeApiMessage, translate } from "../i18n";
 import type {
   ApiMessage,
   KeyAddPayload,
@@ -25,7 +26,7 @@ export class ApiError extends Error {
   readonly retryAfter?: number;
 
   constructor(status: number, message: string, retryAfter?: number) {
-    super(message);
+    super(localizeApiMessage(message, getLanguage()));
     this.name = "ApiError";
     this.status = status;
     this.retryAfter = retryAfter;
@@ -64,7 +65,7 @@ async function responseError(response: Response): Promise<string> {
     }
     if (!/<html[\s>]/i.test(text)) return text.slice(0, 300);
   }
-  return `Ошибка запроса (${response.status})`;
+  return translate(getLanguage(), "api.requestError", { status: response.status });
 }
 
 export async function apiRequest<T>(path: string, options: RequestInit = {}): Promise<T> {
@@ -86,7 +87,7 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
       headers,
     });
   } catch {
-    throw new ApiError(0, "Сервер недоступен. Проверьте соединение и повторите попытку.");
+    throw new ApiError(0, translate(getLanguage(), "api.networkError"));
   }
 
   if (!response.ok) {
@@ -101,7 +102,7 @@ export async function apiRequest<T>(path: string, options: RequestInit = {}): Pr
   try {
     return (await response.json()) as T;
   } catch {
-    throw new ApiError(response.status, "Сервер вернул некорректный ответ");
+    throw new ApiError(response.status, translate(getLanguage(), "api.invalidResponse"));
   }
 }
 

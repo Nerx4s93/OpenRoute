@@ -1,5 +1,4 @@
 import { useState, type FormEvent } from "react";
-import { PERIOD_SECTIONS } from "../api/types";
 import { ConfirmDialog } from "../components/ConfirmDialog";
 import { EmptyRow, ErrorBanner, LoadingRows } from "../components/Feedback";
 import { KeySecretDialog } from "../components/KeySecretDialog";
@@ -9,6 +8,7 @@ import { StatusBadge } from "../components/StatusBadge";
 import { useAddKey, useDeleteKey, useRotateKey, useSetKey } from "../hooks/useAdminMutations";
 import { useKeysLive } from "../hooks/useLiveSnapshot";
 import { usePeriod } from "../hooks/usePeriod";
+import { periodSection, useI18n } from "../i18n";
 import { formatLimit, formatModels, formatNumber } from "../lib/format";
 import { keyStateLabel } from "../lib/proxyState";
 
@@ -32,16 +32,20 @@ const EMPTY_FORM: KeyForm = {
   models: "",
 };
 
-function parseLimit(value: string, field: "RPM" | "TPM"): { value: number | null; error?: string } {
+function parseLimit(
+  value: string,
+  field: "RPM" | "TPM",
+): { value: number | null; invalid?: { field: "RPM" | "TPM"; value: string } } {
   const trimmed = value.trim();
   if (!trimmed) return { value: null };
   if (!/^\d+$/.test(trimmed)) {
-    return { value: null, error: `Некорректный ${field}: ${trimmed}` };
+    return { value: null, invalid: { field, value: trimmed } };
   }
   return { value: Number(trimmed) };
 }
 
 export function KeysPage() {
+  const { language, t } = useI18n();
   const [period, setPeriod] = usePeriod();
   const query = useKeysLive(period);
   const addKey = useAddKey();
@@ -65,13 +69,13 @@ export function KeysPage() {
     if (addKey.isPending) return;
 
     const rpm = parseLimit(form.rpm, "RPM");
-    if (rpm.error) {
-      setFormError(rpm.error);
+    if (rpm.invalid) {
+      setFormError(t("keys.invalidLimit", rpm.invalid));
       return;
     }
     const tpm = parseLimit(form.tpm, "TPM");
-    if (tpm.error) {
-      setFormError(tpm.error);
+    if (tpm.invalid) {
+      setFormError(t("keys.invalidLimit", tpm.invalid));
       return;
     }
 
@@ -90,7 +94,7 @@ export function KeysPage() {
         onSuccess: (data) => {
           setForm(EMPTY_FORM);
           setIssuedKey({
-            title: "Ключ создан",
+            title: t("keys.createdTitle"),
             keyId: data.key_id,
             secret: data.key,
           });
@@ -104,59 +108,64 @@ export function KeysPage() {
     <>
       <div className="hero page-enter">
         <div className="hero-content">
-          <div className="eyebrow">Доступ / управление</div>
-          <h1>Клиентские ключи</h1>
+          <div className="eyebrow">{t("keys.eyebrow")}</div>
+          <h1>{t("keys.title")}</h1>
         </div>
       </div>
 
-      <Section id="add-title" icon="＋" title="Добавить клиентский ключ" note="Новый доступ">
+      <Section
+        id="add-title"
+        icon="＋"
+        title={t("keys.addTitle")}
+        note={t("keys.addNote")}
+      >
         <div className="form-content">
           <form className="add" onSubmit={submit}>
             <div className="field">
-              <label htmlFor="key_id">Key ID</label>
+              <label htmlFor="key_id">{t("keys.keyId")}</label>
               <input
                 id="key_id"
                 name="key_id"
                 type="text"
-                placeholder="Генерируется автоматически"
+                placeholder={t("keys.keyIdPlaceholder")}
                 autoComplete="off"
                 value={form.key_id}
                 onChange={(event) => update("key_id", event.target.value)}
               />
             </div>
             <div className="field">
-              <label htmlFor="rpm">RPM</label>
+              <label htmlFor="rpm">{t("keys.rpm")}</label>
               <input
                 id="rpm"
                 name="rpm"
                 type="text"
                 inputMode="numeric"
-                placeholder="Без лимита"
+                placeholder={t("keys.noLimit")}
                 autoComplete="off"
                 value={form.rpm}
                 onChange={(event) => update("rpm", event.target.value)}
               />
             </div>
             <div className="field">
-              <label htmlFor="tpm">TPM</label>
+              <label htmlFor="tpm">{t("keys.tpm")}</label>
               <input
                 id="tpm"
                 name="tpm"
                 type="text"
                 inputMode="numeric"
-                placeholder="Без лимита"
+                placeholder={t("keys.noLimit")}
                 autoComplete="off"
                 value={form.tpm}
                 onChange={(event) => update("tpm", event.target.value)}
               />
             </div>
             <div className="field wide full">
-              <label htmlFor="models">Доступные модели</label>
+              <label htmlFor="models">{t("keys.modelsLabel")}</label>
               <input
                 id="models"
                 name="models"
                 type="text"
-                placeholder="Через запятую; пусто — все модели"
+                placeholder={t("keys.modelsPlaceholder")}
                 autoComplete="off"
                 value={form.models}
                 onChange={(event) => update("models", event.target.value)}
@@ -164,7 +173,7 @@ export function KeysPage() {
             </div>
             <div className="form-footer key-form-footer">
               <button type="submit" disabled={addKey.isPending}>
-                {addKey.isPending ? "Создание…" : "＋   Создать ключ"}
+                {addKey.isPending ? t("keys.creating") : t("keys.create")}
               </button>
             </div>
           </form>
@@ -174,22 +183,27 @@ export function KeysPage() {
 
       {query.isError ? (
         <ErrorBanner
-          message={query.error?.message ?? "Не удалось загрузить данные"}
+          message={query.error?.message ?? t("keys.loadFailed")}
           onRetry={() => void query.refetch()}
         />
       ) : null}
 
-      <Section id="keys-title" icon="◇" title="Клиентские ключи" note="Управление доступом">
+      <Section
+        id="keys-title"
+        icon="◇"
+        title={t("keys.listTitle")}
+        note={t("keys.listNote")}
+      >
         <div className="table-scroll">
           <table>
             <thead>
               <tr>
-                <th>Key ID</th>
-                <th>RPM</th>
-                <th>TPM</th>
-                <th>Модели</th>
-                <th>Статус</th>
-                <th>Действия</th>
+                <th>{t("keys.keyId")}</th>
+                <th>{t("keys.rpm")}</th>
+                <th>{t("keys.tpm")}</th>
+                <th>{t("keys.modelsColumn")}</th>
+                <th>{t("keys.status")}</th>
+                <th>{t("keys.actions")}</th>
               </tr>
             </thead>
             <tbody>
@@ -197,7 +211,7 @@ export function KeysPage() {
                 <LoadingRows colSpan={6} />
               ) : snapshot && snapshot.keys.length ? (
                 snapshot.keys.map((key) => {
-                  const state = keyStateLabel(key.enabled ? "active" : "revoked");
+                  const state = keyStateLabel(key.enabled ? "active" : "revoked", language);
                   const pending =
                     setKey.isPending && setKey.variables?.keyHash === key.key_hash;
                   const rotating =
@@ -205,8 +219,8 @@ export function KeysPage() {
                   return (
                     <tr key={key.key_hash} className={key.enabled ? undefined : "dead"}>
                       <td className="mono">{key.key_id}</td>
-                      <td>{formatLimit(key.rpm)}</td>
-                      <td>{formatLimit(key.tpm)}</td>
+                      <td>{formatLimit(key.rpm, language)}</td>
+                      <td>{formatLimit(key.tpm, language)}</td>
                       <td className="mono">{formatModels(key.models)}</td>
                       <td><StatusBadge label={state.label} tone={state.tone} /></td>
                       <td className="actions">
@@ -216,7 +230,7 @@ export function KeysPage() {
                           disabled={rotating}
                           onClick={() => setPendingRotate({ hash: key.key_hash, keyId: key.key_id })}
                         >
-                          {rotating ? "…" : "Перевыпустить"}
+                          {rotating ? "…" : t("keys.reissue")}
                         </button>
                         <button
                           type="button"
@@ -224,7 +238,7 @@ export function KeysPage() {
                           disabled={pending}
                           onClick={() => setKey.mutate({ keyHash: key.key_hash, enabled: !key.enabled })}
                         >
-                          {pending ? "…" : key.enabled ? "Отозвать" : "Включить"}
+                          {pending ? "…" : key.enabled ? t("keys.revoke") : t("common.enable")}
                         </button>
                         <button
                           type="button"
@@ -232,14 +246,14 @@ export function KeysPage() {
                           disabled={deleteKey.isPending}
                           onClick={() => setPendingDelete({ hash: key.key_hash, keyId: key.key_id })}
                         >
-                          Удалить
+                          {t("common.delete")}
                         </button>
                       </td>
                     </tr>
                   );
                 })
               ) : (
-                <EmptyRow colSpan={6}>Ключей нет — добавьте выше</EmptyRow>
+                <EmptyRow colSpan={6}>{t("keys.empty")}</EmptyRow>
               )}
             </tbody>
           </table>
@@ -251,18 +265,18 @@ export function KeysPage() {
       <Section
         id="stats-title"
         icon="↗"
-        title="Статистика по ключам"
-        note={PERIOD_SECTIONS[period]}
+        title={t("keys.statsTitle")}
+        note={periodSection(period, language)}
       >
         <div className="table-scroll">
           <table>
             <thead>
               <tr>
-                <th>Key ID</th>
-                <th>Статус</th>
-                <th>Запросы</th>
-                <th>Ошибки</th>
-                <th>Токены</th>
+                <th>{t("keys.keyId")}</th>
+                <th>{t("keys.status")}</th>
+                <th>{t("keys.requests")}</th>
+                <th>{t("keys.errors")}</th>
+                <th>{t("keys.tokens")}</th>
               </tr>
             </thead>
             <tbody>
@@ -270,19 +284,19 @@ export function KeysPage() {
                 <LoadingRows colSpan={5} />
               ) : snapshot && snapshot.stats.length ? (
                 snapshot.stats.map((stat) => {
-                  const state = keyStateLabel(stat.state);
+                  const state = keyStateLabel(stat.state, language);
                   return (
                     <tr key={stat.key_id}>
                       <td className="mono">{stat.key_id}</td>
                       <td><StatusBadge label={state.label} tone={state.tone} /></td>
-                      <td>{formatNumber(stat.requests)}</td>
-                      <td>{formatNumber(stat.errors)}</td>
-                      <td>{formatNumber(stat.tokens)}</td>
+                      <td>{formatNumber(stat.requests, language)}</td>
+                      <td>{formatNumber(stat.errors, language)}</td>
+                      <td>{formatNumber(stat.tokens, language)}</td>
                     </tr>
                   );
                 })
               ) : (
-                <EmptyRow colSpan={5}>Запросов ещё не было</EmptyRow>
+                <EmptyRow colSpan={5}>{t("keys.noRequests")}</EmptyRow>
               )}
             </tbody>
           </table>
@@ -291,9 +305,9 @@ export function KeysPage() {
 
       <ConfirmDialog
         open={Boolean(pendingRotate)}
-        title={`Перевыпустить ключ ${pendingRotate?.keyId ?? ""}?`}
-        confirmLabel="Перевыпустить"
-        pendingLabel="Перевыпуск…"
+        title={t("keys.reissueTitle", { keyId: pendingRotate?.keyId ?? "" })}
+        confirmLabel={t("keys.reissue")}
+        pendingLabel={t("keys.reissuing")}
         tone="accent"
         pending={rotateKey.isPending}
         onCancel={() => setPendingRotate(null)}
@@ -303,7 +317,7 @@ export function KeysPage() {
             onSuccess: (data) => {
               setPendingRotate(null);
               setIssuedKey({
-                title: "Ключ перевыпущен",
+                title: t("keys.reissuedTitle"),
                 keyId: data.key_id,
                 secret: data.key,
               });
@@ -312,12 +326,12 @@ export function KeysPage() {
           });
         }}
       >
-        <p>Старый ключ сразу перестанет работать.</p>
+        <p>{t("keys.reissueWarning")}</p>
       </ConfirmDialog>
 
       <ConfirmDialog
         open={Boolean(pendingDelete)}
-        title={`Удалить ключ ${pendingDelete?.keyId ?? ""}?`}
+        title={t("keys.deleteTitle", { keyId: pendingDelete?.keyId ?? "" })}
         pending={deleteKey.isPending}
         onCancel={() => setPendingDelete(null)}
         onConfirm={() => {
@@ -327,7 +341,7 @@ export function KeysPage() {
           });
         }}
       >
-        <p>Ключ будет удалён без возможности восстановления. Статистика по нему останется в журнале.</p>
+        <p>{t("keys.deleteWarning")}</p>
       </ConfirmDialog>
 
       <KeySecretDialog

@@ -1,31 +1,6 @@
 export type Period = "1d" | "3d" | "7d" | "30d" | "90d" | "all";
 
-export const PERIODS: ReadonlyArray<{ value: Period; label: string; title: string }> = [
-  { value: "1d", label: "1д", title: "С начала текущего дня (00:00 UTC)" },
-  { value: "3d", label: "3д", title: "За 3 дня, включая сегодня (00:00 UTC)" },
-  { value: "7d", label: "7д", title: "За 7 дней, включая сегодня (00:00 UTC)" },
-  { value: "30d", label: "30д", title: "За 30 дней, включая сегодня (00:00 UTC)" },
-  { value: "90d", label: "90д", title: "За 90 дней, включая сегодня (00:00 UTC)" },
-  { value: "all", label: "Всё время", title: "За всё время" },
-];
-
-export const PERIOD_CAPTIONS: Record<Period, string | null> = {
-  "1d": "за 1 день",
-  "3d": "за 3 дня",
-  "7d": "за 7 дней",
-  "30d": "за 30 дней",
-  "90d": "за 90 дней",
-  all: null,
-};
-
-export const PERIOD_SECTIONS: Record<Period, string> = {
-  "1d": "За 1 день",
-  "3d": "За 3 дня",
-  "7d": "За 7 дней",
-  "30d": "За 30 дней",
-  "90d": "За 90 дней",
-  all: "За всё время",
-};
+export const PERIODS: readonly Period[] = ["1d", "3d", "7d", "30d", "90d", "all"];
 
 export function isPeriod(value: string | null): value is Period {
   return value === "1d" || value === "3d" || value === "7d"

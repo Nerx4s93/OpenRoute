@@ -2,9 +2,11 @@ import { useState, type FormEvent } from "react";
 import { Navigate, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../auth/AuthProvider";
 import { DisabledPage, FullPageError, FullPageLoader } from "../components/FullPage";
+import { useI18n } from "../i18n";
 
 export function LoginPage() {
   const { session, loading, error, disabled, login, retrySession } = useAuth();
+  const { t } = useI18n();
   const navigate = useNavigate();
   const location = useLocation();
   const [password, setPassword] = useState("");
@@ -30,7 +32,9 @@ export function LoginPage() {
 
   const errorText = login.error
     ? login.error.status === 429 && login.error.retryAfter
-      ? `${login.error.message}. Повторите через ${login.error.retryAfter} с.`
+      ? `${login.error.message}. ${t("login.retryAfter", {
+          seconds: login.error.retryAfter,
+        })}`
       : login.error.message
     : "";
 
@@ -41,25 +45,29 @@ export function LoginPage() {
           <span className="brand-mark" aria-hidden="true">OR</span> OpenRoute
         </div>
         <div className="login-statement">
-          <div className="eyebrow">Административная панель</div>
-          <h2>Каждый маршрут<br />под контролем.</h2>
-          <p>Единое пространство для управления прокси, ключами и активностью сервиса.</p>
+          <div className="eyebrow">{t("login.eyebrow")}</div>
+          <h2>
+            {t("login.headlineLine1")}
+            <br />
+            {t("login.headlineLine2")}
+          </h2>
+          <p>{t("login.lead")}</p>
         </div>
         <div className="login-foot">OPENROUTE &nbsp; / &nbsp; CONTROL PLANE</div>
       </aside>
       <main className="login-main">
         <div className="login-wrap">
           <div className="login-box">
-            <div className="login-kicker">Защищённый доступ</div>
+            <div className="login-kicker">{t("login.kicker")}</div>
             <h1>OpenRoute Admin</h1>
-            <p className="sub">Введите пароль администратора, чтобы продолжить.</p>
+            <p className="sub">{t("login.subtitle")}</p>
             <form onSubmit={submit}>
-              <label htmlFor="password">Пароль</label>
+              <label htmlFor="password">{t("login.password")}</label>
               <input
                 id="password"
                 type="password"
                 name="password"
-                placeholder="Введите пароль"
+                placeholder={t("login.passwordPlaceholder")}
                 autoComplete="current-password"
                 autoFocus
                 required
@@ -71,11 +79,11 @@ export function LoginPage() {
                 aria-invalid={Boolean(errorText)}
               />
               <button type="submit" disabled={login.isPending || !password}>
-                {login.isPending ? "Вход…" : "Войти в панель   ↗"}
+                {login.isPending ? t("login.submitPending") : t("login.submit")}
               </button>
             </form>
             {errorText ? <div className="err" role="alert">{errorText}</div> : null}
-            <div className="login-help">Доступ к панели защищён серверной сессией</div>
+            <div className="login-help">{t("login.help")}</div>
           </div>
         </div>
       </main>

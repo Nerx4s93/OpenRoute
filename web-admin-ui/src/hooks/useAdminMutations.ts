@@ -2,6 +2,7 @@ import { useMutation, useQueryClient } from "@tanstack/react-query";
 import { api, type ApiError } from "../api/client";
 import type { ApiMessage, KeyAddPayload, KeyIssued } from "../api/types";
 import { useToast } from "../components/Toast";
+import { localizeApiMessage } from "../i18n";
 
 function useMutationToast<TVariables, TData>(
   mutationFn: (variables: TVariables) => Promise<TData>,
@@ -15,7 +16,7 @@ function useMutationToast<TVariables, TData>(
     mutationFn,
     onSuccess: (data) => {
       const message = successMessage ? successMessage(data) : "";
-      if (message) toast.push(message);
+      if (message) toast.push(localizeApiMessage(message));
       void queryClient.invalidateQueries({ queryKey: [invalidate] });
     },
     onError: (error) => {

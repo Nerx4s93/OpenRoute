@@ -2,6 +2,7 @@ import { useState } from "react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import type { ApiError } from "../api/client";
 import type { StatsProxyRow, StatsSeries, StatsSnapshot } from "../api/types";
+import { useI18n } from "../i18n";
 import { compareStatsProxies } from "../lib/stats";
 import { ErrorBanner } from "./Feedback";
 import { Section } from "./Section";
@@ -17,6 +18,7 @@ function buildChartSeries(
   data: StatsSnapshot | undefined,
   selected: string,
   rows: StatsProxyRow[],
+  otherLabel: string,
 ): TokenChartSeries[] {
   if (!data) return [];
   const length = data.dates?.length ?? 0;
@@ -46,7 +48,7 @@ function buildChartSeries(
         0,
       ),
     );
-    chartSeries.push({ label: "Другие", values, colorIndex: TOP_PROXIES });
+    chartSeries.push({ label: otherLabel, values, colorIndex: TOP_PROXIES });
   }
 
   return chartSeries;
@@ -57,24 +59,35 @@ export function TokenStatsPanel({
 }: {
   query: UseQueryResult<StatsSnapshot, ApiError>;
 }) {
+  const { t } = useI18n();
   const [selected, setSelected] = useState("");
   const data = query.data;
   // Sort defensively; the server uses the same in-pool-first ordering.
   const proxyRows = [...(data?.proxies ?? [])].sort(compareStatsProxies);
   const activeProxy = proxyRows.some((row) => row.proxy === selected) ? selected : "";
-  const chartSeries = buildChartSeries(data, activeProxy, proxyRows);
+  const chartSeries = buildChartSeries(
+    data,
+    activeProxy,
+    proxyRows,
+    t("tokenStats.other"),
+  );
 
   return (
-    <Section id="chart-title" icon="▦" title="Токены по дням" note="Дни — UTC">
+    <Section
+      id="chart-title"
+      icon="▦"
+      title={t("tokenStats.title")}
+      note={t("tokenStats.note")}
+    >
       <div className="chart-wrap">
         <div className="stats-toolbar">
           <label className="stats-select">
-            <span>Прокси</span>
+            <span>{t("tokenStats.proxy")}</span>
             <select
               value={activeProxy}
               onChange={(event) => setSelected(event.target.value)}
             >
-              <option value="">Все прокси</option>
+              <option value="">{t("tokenStats.allProxies")}</option>
               {proxyRows.map((row) => (
                 <option key={row.proxy} value={row.proxy}>{row.proxy}</option>
               ))}
@@ -83,11 +96,11 @@ export function TokenStatsPanel({
         </div>
         {query.isError ? (
           <ErrorBanner
-            message={query.error?.message ?? "Не удалось загрузить статистику"}
+            message={query.error?.message ?? t("tokenStats.loadFailed")}
             onRetry={() => void query.refetch()}
           />
         ) : query.isLoading ? (
-          <div className="chart-empty">Загрузка…</div>
+          <div className="chart-empty">{t("tokenStats.loading")}</div>
         ) : (
           <TokenChart dates={data?.dates ?? []} series={chartSeries} />
         )}

@@ -1,4 +1,5 @@
 import type { KeyState, ProxyRow } from "../api/types";
+import { translate, type Language } from "../i18n";
 import { formatDuration } from "./format";
 
 export type Tone = "ok" | "warn" | "err" | "off";
@@ -17,25 +18,47 @@ export const TONE_CLASS: Record<Tone, string> = {
   off: "b-off",
 };
 
-export function proxyState(proxy: ProxyRow): ProxyState {
+export function proxyState(proxy: ProxyRow, language: Language = "en"): ProxyState {
   // A permanent abusive-traffic ban is the strongest state: even if an
-  // operator later disables the row, the panel must keep showing «бан».
+  // operator later disables the row, the panel must keep showing "banned".
   if (proxy.banned) {
-    return { key: "ban", label: "бан", tone: "err", dead: false };
+    return {
+      key: "ban",
+      label: translate(language, "proxyState.banned"),
+      tone: "err",
+      dead: false,
+    };
   }
   if (proxy.disabled) {
-    return { key: "dead", label: "мёртв", tone: "err", dead: true };
+    return {
+      key: "dead",
+      label: translate(language, "proxyState.dead"),
+      tone: "err",
+      dead: true,
+    };
   }
   if (proxy.manual) {
-    return { key: "off", label: "выключен", tone: "off", dead: true };
+    return {
+      key: "off",
+      label: translate(language, "proxyState.disabled"),
+      tone: "off",
+      dead: true,
+    };
   }
   if (!proxy.enabled) {
-    return { key: "noproxy", label: "нет в пуле", tone: "warn", dead: false };
+    return {
+      key: "noproxy",
+      label: translate(language, "proxyState.notInPool"),
+      tone: "warn",
+      dead: false,
+    };
   }
   if (proxy.banned_seconds_left > 0) {
     return {
       key: "ban",
-      label: `бан ${formatDuration(proxy.banned_seconds_left)}`,
+      label: translate(language, "proxyState.bannedFor", {
+        duration: formatDuration(proxy.banned_seconds_left, language),
+      }),
       tone: "err",
       dead: false,
     };
@@ -43,7 +66,9 @@ export function proxyState(proxy: ProxyRow): ProxyState {
   if (proxy.quota_seconds_left > 0) {
     return {
       key: "quota",
-      label: `лимит ${formatDuration(proxy.quota_seconds_left)}`,
+      label: translate(language, "proxyState.quota", {
+        duration: formatDuration(proxy.quota_seconds_left, language),
+      }),
       tone: "warn",
       dead: false,
     };
@@ -51,24 +76,39 @@ export function proxyState(proxy: ProxyRow): ProxyState {
   if (proxy.cooldown_seconds_left > 0) {
     return {
       key: "cooldown",
-      label: `cooldown ${Math.round(proxy.cooldown_seconds_left)}s`,
+      label: translate(language, "proxyState.cooldown", {
+        seconds: Math.round(proxy.cooldown_seconds_left),
+      }),
       tone: "warn",
       dead: false,
     };
   }
   if (proxy.rpm_capped) {
-    return { key: "rpm", label: "RPM-кап", tone: "warn", dead: false };
+    return {
+      key: "rpm",
+      label: translate(language, "proxyState.rpmCapped"),
+      tone: "warn",
+      dead: false,
+    };
   }
-  return { key: "ok", label: "ok", tone: "ok", dead: false };
+  return {
+    key: "ok",
+    label: translate(language, "proxyState.ok"),
+    tone: "ok",
+    dead: false,
+  };
 }
 
-export function keyStateLabel(state: KeyState): { label: string; tone: Tone } {
+export function keyStateLabel(
+  state: KeyState,
+  language: Language = "en",
+): { label: string; tone: Tone } {
   switch (state) {
     case "active":
-      return { label: "активен", tone: "ok" };
+      return { label: translate(language, "keyState.active"), tone: "ok" };
     case "revoked":
-      return { label: "отозван", tone: "off" };
+      return { label: translate(language, "keyState.revoked"), tone: "off" };
     case "deleted":
-      return { label: "удалён", tone: "err" };
+      return { label: translate(language, "keyState.deleted"), tone: "err" };
   }
 }

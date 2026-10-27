@@ -1,5 +1,11 @@
 import { useState } from "react";
-import { formatCompact, formatNumber } from "../lib/format";
+import { useI18n } from "../i18n";
+import {
+  formatCompact,
+  formatLongDate,
+  formatNumber,
+  formatShortDate,
+} from "../lib/format";
 
 export interface TokenChartSeries {
   label: string;
@@ -37,25 +43,6 @@ function niceStep(value: number): number {
   return nice * base;
 }
 
-function shortDate(value: string): string {
-  const [, month, day] = value.split("-");
-  return month && day ? `${day}.${month}` : value;
-}
-
-const fullDateFormatter = new Intl.DateTimeFormat("ru-RU", {
-  weekday: "short",
-  day: "numeric",
-  month: "long",
-  year: "numeric",
-  timeZone: "UTC",
-});
-
-function fullDate(value: string): string {
-  const [year, month, day] = value.split("-").map(Number);
-  if (!year || !month || !day) return value;
-  return fullDateFormatter.format(new Date(Date.UTC(year, month - 1, day)));
-}
-
 function labelIndices(count: number, limit: number): number[] {
   if (count <= limit) return Array.from({ length: count }, (_, index) => index);
   const step = (count - 1) / (limit - 1);
@@ -73,6 +60,7 @@ export function TokenChart({
   dates: string[];
   series: TokenChartSeries[];
 }) {
+  const { language, t } = useI18n();
   const [activeDay, setActiveDay] = useState<number | null>(null);
   const totals = dates.map((_, index) =>
     series.reduce((sum, item) => sum + positive(item.values?.[index]), 0),
@@ -80,7 +68,7 @@ export function TokenChart({
   const maxTotal = totals.reduce((max, value) => Math.max(max, value), 0);
 
   if (!dates.length || !series.length || maxTotal <= 0) {
-    return <div className="chart-empty">Нет данных за выбранный период</div>;
+    return <div className="chart-empty">{t("tokenStats.chartNoData")}</div>;
   }
 
   const axisMax = niceStep(maxTotal / GRID_STEPS) * GRID_STEPS;
@@ -120,7 +108,7 @@ export function TokenChart({
           y2={y}
         />
         <text className="chart-axis" x={PAD_LEFT - 10} y={y + 4} textAnchor="end">
-          {formatCompact(value)}
+          {formatCompact(value, language)}
         </text>
       </g>
     );
@@ -176,7 +164,7 @@ export function TokenChart({
         y={PLOT_BOTTOM + 20}
         textAnchor="middle"
       >
-        {shortDate(dates[index])}
+        {formatShortDate(dates[index], language)}
       </text>
     );
   });
@@ -186,7 +174,9 @@ export function TokenChart({
       <div
         className="chart-legend"
         role="img"
-        aria-label={`Легенда: ${series.map((item) => item.label).join(", ")}`}
+        aria-label={t("tokenStats.chartLegend", {
+          labels: series.map((item) => item.label).join(", "),
+        })}
       >
         {series.map((item) => (
           <span key={item.label} className="chart-legend-item">
@@ -202,7 +192,7 @@ export function TokenChart({
         className="chart-svg"
         viewBox={`0 0 ${VIEW_WIDTH} ${VIEW_HEIGHT}`}
         role="img"
-        aria-label="Токены по дням (UTC)"
+        aria-label={t("tokenStats.chartAria")}
       >
         {gridLines}
         {activeIndex !== null ? (
@@ -249,14 +239,16 @@ export function TokenChart({
               x={tooltipX + 14}
               y={tooltipY + 23}
             >
-              {fullDate(dates[activeIndex])}
+              {formatLongDate(dates[activeIndex], language)}
             </text>
             <text
               className="chart-tooltip-value"
               x={tooltipX + 14}
               y={tooltipY + 45}
             >
-              Расход: {formatNumber(activeTotal)} токенов
+              {t("tokenStats.chartSpend", {
+                tokens: formatNumber(activeTotal, language),
+              })}
             </text>
           </g>
         ) : null}

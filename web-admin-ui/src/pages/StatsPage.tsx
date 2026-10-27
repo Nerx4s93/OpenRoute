@@ -1,4 +1,3 @@
-import { PERIOD_CAPTIONS, PERIOD_SECTIONS } from "../api/types";
 import { EmptyRow, ErrorBanner, LoadingRows } from "../components/Feedback";
 import { PeriodTabs } from "../components/PeriodTabs";
 import { ProxyStatsPanel } from "../components/ProxyStatsPanel";
@@ -8,24 +7,34 @@ import { TokenStatsPanel } from "../components/TokenStatsPanel";
 import { useProxiesLive } from "../hooks/useLiveSnapshot";
 import { usePeriod } from "../hooks/usePeriod";
 import { useStatsPeriod } from "../hooks/useStatsPeriod";
-import { formatNumber, formatTimestamp, requestTokens } from "../lib/format";
+import { periodCaption, periodSection, useI18n } from "../i18n";
+import {
+  formatNumber,
+  formatTimestamp,
+  requestTokens,
+} from "../lib/format";
 
 export function StatsPage() {
   const [period, setPeriod] = usePeriod();
   const query = useProxiesLive(period);
   const statsQuery = useStatsPeriod(period);
+  const { language, t } = useI18n();
   const snapshot = query.data;
-  const caption = PERIOD_CAPTIONS[period];
-  const requestsLabel = caption ? `Запросов ${caption}` : "Запросов всего";
-  const tokensLabel = caption ? `Токенов ${caption}` : "Токенов потрачено";
+  const caption = period === "all" ? null : periodCaption(period, language);
+  const requestsLabel = caption
+    ? t("stats.requestsPeriod", { period: caption })
+    : t("stats.requestsTotal");
+  const tokensLabel = caption
+    ? t("stats.tokensPeriod", { period: caption })
+    : t("stats.tokensTotal");
   const summary = snapshot?.summary;
 
   return (
     <>
       <div className="hero page-enter">
         <div className="hero-content">
-          <div className="eyebrow">Система / статистика</div>
-          <h1>Статистика</h1>
+          <div className="eyebrow">{t("stats.eyebrow")}</div>
+          <h1>{t("stats.title")}</h1>
         </div>
       </div>
 
@@ -33,7 +42,7 @@ export function StatsPage() {
 
       {query.isError ? (
         <ErrorBanner
-          message={query.error?.message ?? "Не удалось загрузить данные"}
+          message={query.error?.message ?? t("stats.loadFailed")}
           onRetry={() => void query.refetch()}
         />
       ) : null}
@@ -41,18 +50,18 @@ export function StatsPage() {
       <div className="cards page-enter" id="cards">
         <StatCard
           glyph="↗"
-          value={formatNumber(summary?.requests ?? 0)}
+          value={formatNumber(summary?.requests ?? 0, language)}
           label={requestsLabel}
         />
         <StatCard
           glyph="◈"
-          value={formatNumber(summary?.tokens ?? 0)}
+          value={formatNumber(summary?.tokens ?? 0, language)}
           label={tokensLabel}
         />
         <StatCard
           glyph="◎"
           value={`${summary?.proxies_ready ?? 0}/${summary?.proxies_total ?? 0}`}
-          label="Прокси в ротации"
+          label={t("stats.proxiesRotation")}
         />
       </div>
 
@@ -61,22 +70,27 @@ export function StatsPage() {
       <ProxyStatsPanel
         rows={statsQuery.data?.proxies ?? []}
         isLoading={statsQuery.isLoading}
-        note={PERIOD_SECTIONS[period]}
+        note={periodSection(period, language)}
       />
 
-      <Section id="requests-title" icon="↗" title="Последние запросы" note="Журнал активности">
+      <Section
+        id="requests-title"
+        icon="↗"
+        title={t("stats.recentTitle")}
+        note={t("stats.recentNote")}
+      >
         <div className="table-scroll">
           <table>
             <thead>
               <tr>
-                <th>Время</th>
-                <th>Key</th>
-                <th>Модель</th>
-                <th>Статус</th>
-                <th>Задержка</th>
-                <th>Токены</th>
-                <th>Прокси</th>
-                <th>Ошибка</th>
+                <th>{t("stats.time")}</th>
+                <th>{t("stats.key")}</th>
+                <th>{t("stats.model")}</th>
+                <th>{t("stats.status")}</th>
+                <th>{t("stats.latency")}</th>
+                <th>{t("stats.tokens")}</th>
+                <th>{t("stats.proxy")}</th>
+                <th>{t("stats.error")}</th>
               </tr>
             </thead>
             <tbody>
@@ -84,23 +98,30 @@ export function StatsPage() {
                 <LoadingRows colSpan={8} />
               ) : snapshot && snapshot.recent.length ? (
                 snapshot.recent.map((request, index) => {
-                  const tokens = requestTokens(request.prompt_tokens, request.completion_tokens);
+                  const tokens = requestTokens(
+                    request.prompt_tokens,
+                    request.completion_tokens,
+                  );
                   const failed = request.status >= 400 || Boolean(request.error);
                   return (
                     <tr key={`${request.ts}-${index}`} className={failed ? "dead" : undefined}>
-                      <td className="mono muted">{formatTimestamp(request.ts)}</td>
+                      <td className="mono muted">
+                        {formatTimestamp(request.ts, language)}
+                      </td>
                       <td className="mono">{request.key_id}</td>
                       <td className="mono">{request.model || request.path}</td>
                       <td>{request.status}</td>
-                      <td>{request.latency_ms} мс</td>
-                      <td>{tokens ? formatNumber(tokens) : "—"}</td>
+                      <td>
+                        {t("stats.latencyValue", { value: request.latency_ms })}
+                      </td>
+                      <td>{tokens ? formatNumber(tokens, language) : "—"}</td>
                       <td className="mono">{request.account || "—"}</td>
                       <td className="muted">{request.error || ""}</td>
                     </tr>
                   );
                 })
               ) : (
-                <EmptyRow colSpan={8}>Пусто</EmptyRow>
+                <EmptyRow colSpan={8}>{t("stats.empty")}</EmptyRow>
               )}
             </tbody>
           </table>

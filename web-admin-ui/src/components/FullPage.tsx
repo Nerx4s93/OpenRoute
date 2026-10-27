@@ -1,26 +1,32 @@
+import { useI18n } from "../i18n";
 import { ErrorBanner } from "./Feedback";
 
 export function FullPageLoader() {
+  const { t } = useI18n();
   return (
     <div className="full-page">
       <div className="full-page-card">
         <span className="live-dot" />
-        <span>Загрузка панели…</span>
+        <span>{t("full.loading")}</span>
       </div>
     </div>
   );
 }
 
 export function DisabledPage({ message }: { message: string }) {
+  const { t } = useI18n();
   return (
     <div className="full-page">
       <div className="full-page-card">
-        <span className="eyebrow">Панель выключена</span>
-        <h1>Админка недоступна</h1>
+        <span className="eyebrow">{t("full.disabledEyebrow")}</span>
+        <h1>{t("full.disabledTitle")}</h1>
         <p className="muted">{message}</p>
         <p className="form-hint">
-          Задайте <code>ADMIN_PASSWORD</code> в <code>web-admin/.env</code> и перезапустите
-          сервис.
+          {t("full.disabledHintPrefix")}
+          <code>ADMIN_PASSWORD</code>
+          {t("full.disabledHintMiddle")}
+          <code>web-admin/.env</code>
+          {t("full.disabledHintSuffix")}
         </p>
       </div>
     </div>
@@ -34,11 +40,12 @@ export function FullPageError({
   message: string;
   onRetry: () => void;
 }) {
+  const { t } = useI18n();
   return (
     <div className="full-page">
       <div className="full-page-card">
-        <span className="eyebrow">Ошибка</span>
-        <h1>Не удалось загрузить панель</h1>
+        <span className="eyebrow">{t("full.errorEyebrow")}</span>
+        <h1>{t("full.errorTitle")}</h1>
         <ErrorBanner message={message} onRetry={onRetry} />
       </div>
     </div>

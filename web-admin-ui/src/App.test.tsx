@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import App from "./App";
 import { AuthProvider } from "./auth/AuthProvider";
 import { ToastProvider } from "./components/Toast";
+import { I18nProvider } from "./i18n";
 import type { KeysSnapshot, ProxiesSnapshot, StatsSnapshot } from "./api/types";
 
 const proxies: ProxiesSnapshot = {
@@ -122,12 +123,14 @@ function renderApp(path: string) {
   return render(
     <QueryClientProvider client={queryClient}>
       <MemoryRouter initialEntries={[path]}>
-        <AuthProvider>
-          <ToastProvider>
-            <App />
-            <LocationProbe />
-          </ToastProvider>
-        </AuthProvider>
+        <I18nProvider>
+          <AuthProvider>
+            <ToastProvider>
+              <App />
+              <LocationProbe />
+            </ToastProvider>
+          </AuthProvider>
+        </I18nProvider>
       </MemoryRouter>
     </QueryClientProvider>,
   );
@@ -135,6 +138,7 @@ function renderApp(path: string) {
 
 beforeEach(() => {
   window.localStorage.clear();
+  document.documentElement.lang = "";
   vi.stubGlobal("EventSource", undefined);
 });
 
@@ -154,7 +158,7 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { name: "OpenRoute Admin" }),
     ).toBeInTheDocument();
-    expect(screen.getByLabelText("Пароль")).toBeInTheDocument();
+    expect(screen.getByLabelText("Password")).toBeInTheDocument();
   });
 
   it("renders the statistics page at its dedicated route", async () => {
@@ -174,43 +178,51 @@ describe("App", () => {
     renderApp("/admin/stats");
 
     expect(
-      await screen.findByRole("heading", { name: "Статистика", level: 1 }),
+      await screen.findByRole("heading", { name: "Statistics", level: 1 }),
     ).toBeInTheDocument();
     expect(
-      screen.queryByRole("button", { name: /Обновить список/ }),
+      screen.queryByRole("button", { name: /Refresh list/ }),
     ).not.toBeInTheDocument();
-    expect(screen.getByRole("link", { name: "Прокси" })).toHaveClass("nav-proxies");
-    expect(screen.getByRole("link", { name: "Статистика" })).toHaveClass("nav-stats");
-    expect(screen.getByRole("link", { name: "Статистика" })).toHaveAttribute(
+    expect(screen.getByRole("link", { name: "Proxies" })).toHaveClass("nav-proxies");
+    expect(screen.getByRole("link", { name: "Statistics" })).toHaveClass("nav-stats");
+    expect(screen.getByRole("link", { name: "Statistics" })).toHaveAttribute(
       "href",
       "/admin/stats",
+    );
+    expect(screen.getByRole("link", { name: "Settings" })).toHaveClass("nav-settings");
+    expect(screen.getByRole("link", { name: "Settings" })).toHaveAttribute(
+      "href",
+      "/admin/settings",
     );
     expect(
       within(screen.getByRole("banner"))
         .getAllByRole("link")
         .map((link) => link.textContent),
-    ).toEqual(["Прокси", "Статистика", "Ключи"]);
+    ).toEqual(["Proxies", "Statistics", "Keys", "Settings"]);
+    expect(
+      screen.getByRole("link", { name: "Settings" }).closest(".sidebar-bottom"),
+    ).not.toBeNull();
     expect(
       await screen.findByRole("cell", { name: "203.0.113.10:8080" }),
     ).toBeInTheDocument();
-    expect(screen.getByText("Прокси в ротации")).toBeInTheDocument();
-    expect(screen.queryByText("Токенов за всё время")).not.toBeInTheDocument();
-    expect(screen.getByText("Вне пула")).toBeInTheDocument();
+    expect(screen.getByText("Proxies in rotation")).toBeInTheDocument();
+    expect(screen.getByText("Tokens spent")).toBeInTheDocument();
+    expect(screen.getByText("Out of pool")).toBeInTheDocument();
     expect(
-      screen.getByRole("columnheader", { name: "Токенов за период" }),
+      screen.getByRole("columnheader", { name: "Tokens for the period" }),
     ).toBeInTheDocument();
-    expect(screen.getAllByRole("columnheader", { name: "Токены" })).toHaveLength(1);
-    expect(screen.queryByRole("columnheader", { name: "Действия" })).not.toBeInTheDocument();
+    expect(screen.getAllByRole("columnheader", { name: "Tokens" })).toHaveLength(1);
+    expect(screen.queryByRole("columnheader", { name: "Actions" })).not.toBeInTheDocument();
     expect(
-      await screen.findByRole("heading", { name: "Токены по дням" }),
+      await screen.findByRole("heading", { name: "Tokens by day" }),
     ).toBeInTheDocument();
     const sectionTitles = screen
       .getAllByRole("heading", { level: 2 })
       .map((node) => node.textContent);
-    expect(sectionTitles.indexOf("Прокси")).toBe(
-      sectionTitles.indexOf("Токены по дням") + 1,
+    expect(sectionTitles.indexOf("Proxies")).toBe(
+      sectionTitles.indexOf("Tokens by day") + 1,
     );
-    for (const label of ["1д", "3д", "7д", "30д", "90д", "Всё время"]) {
+    for (const label of ["1d", "3d", "7d", "30d", "90d", "All time"]) {
       expect(screen.getByRole("button", { name: label })).toBeInTheDocument();
     }
   });
@@ -230,7 +242,7 @@ describe("App", () => {
 
     renderApp("/admin/stats");
 
-    await screen.findByRole("heading", { name: "Токены по дням" });
+    await screen.findByRole("heading", { name: "Tokens by day" });
     await waitFor(() => {
       expect(
         fetchMock.mock.calls.some(([url]) =>
@@ -239,9 +251,9 @@ describe("App", () => {
       ).toBe(true);
     });
 
-    await user.click(screen.getByRole("button", { name: "7д" }));
+    await user.click(screen.getByRole("button", { name: "7d" }));
 
-    expect(await screen.findByText("За 7 дней")).toBeInTheDocument();
+    expect(await screen.findByText("Last 7 days")).toBeInTheDocument();
     await waitFor(() => {
       expect(
         fetchMock.mock.calls.some(([url]) =>
@@ -265,9 +277,9 @@ describe("App", () => {
     const user = userEvent.setup();
 
     const first = renderApp("/admin/stats");
-    await screen.findByRole("heading", { name: "Токены по дням" });
-    await user.click(screen.getByRole("button", { name: "7д" }));
-    expect(screen.getByRole("button", { name: "7д" })).toHaveAttribute(
+    await screen.findByRole("heading", { name: "Tokens by day" });
+    await user.click(screen.getByRole("button", { name: "7d" }));
+    expect(screen.getByRole("button", { name: "7d" })).toHaveAttribute(
       "aria-pressed",
       "true",
     );
@@ -276,8 +288,8 @@ describe("App", () => {
     fetchMock.mockClear();
     renderApp("/admin/stats");
 
-    await screen.findByRole("heading", { name: "Токены по дням" });
-    expect(screen.getByRole("button", { name: "7д" })).toHaveAttribute(
+    await screen.findByRole("heading", { name: "Tokens by day" });
+    expect(screen.getByRole("button", { name: "7d" })).toHaveAttribute(
       "aria-pressed",
       "true",
     );
@@ -319,10 +331,10 @@ describe("App", () => {
 
     renderApp("/admin/proxies");
 
-    const button = await screen.findByRole("button", { name: /Обновить список/ });
+    const button = await screen.findByRole("button", { name: /Refresh list/ });
     await user.click(button);
 
-    expect(await screen.findByText("Список прокси обновлён")).toBeInTheDocument();
+    expect(await screen.findByText("Proxy list refreshed")).toBeInTheDocument();
     const refreshCall = fetchMock.mock.calls.find(([url]) =>
       String(url).includes("/api/admin/proxies/refresh"),
     );
@@ -361,15 +373,15 @@ describe("App", () => {
     renderApp("/admin/proxies");
 
     expect(
-      await screen.findByRole("heading", { name: "Прокси", level: 1 }),
+      await screen.findByRole("heading", { name: "Proxies", level: 1 }),
     ).toBeInTheDocument();
-    expect(await screen.findByText(/250,50/)).toBeInTheDocument();
+    expect(await screen.findByText(/250\.50/)).toBeInTheDocument();
     expect(await screen.findByRole("cell", { name: "203.0.113.10:8080" })).toBeInTheDocument();
 
-    const toggle = await screen.findByRole("button", { name: "Выключить" });
+    const toggle = await screen.findByRole("button", { name: "Disable" });
     await user.click(toggle);
 
-    expect(await screen.findByText("Прокси отключён")).toBeInTheDocument();
+    expect(await screen.findByText("Proxy disabled")).toBeInTheDocument();
     const setCall = fetchMock.mock.calls.find(([url]) =>
       String(url).includes("/api/admin/proxies/set"),
     );
@@ -414,21 +426,23 @@ describe("App", () => {
 
     renderApp("/admin/proxies");
 
-    await screen.findByText(/250,50/);
+    await screen.findByText(/250\.50/);
     await waitFor(() => {
-      expect(screen.getByLabelText("Страна")).toHaveValue("ru");
+      expect(screen.getByLabelText("Country")).toHaveValue("ru");
     });
 
-    const submit = screen.getByRole("button", { name: "Купить" });
+    const submit = screen.getByRole("button", { name: "Buy" });
     await waitFor(() => expect(submit).toBeEnabled());
     await user.click(submit);
 
     const dialog = await screen.findByRole("dialog");
-    expect(within(dialog).getByText(/Прокси будут добавлены выключенными/)).toBeInTheDocument();
-    await user.click(within(dialog).getByRole("button", { name: "Купить" }));
+    expect(
+      within(dialog).getByText(/Proxies will be added disabled/),
+    ).toBeInTheDocument();
+    await user.click(within(dialog).getByRole("button", { name: "Buy" }));
 
     expect(
-      await screen.findByText("Куплено 1 прокси. Включите их в списке."),
+      await screen.findByText("1 proxy purchased. Enable it in the list."),
     ).toBeInTheDocument();
     const buyCall = fetchMock.mock.calls.find(([url]) =>
       String(url).includes("/api/admin/proxies/buy"),
@@ -455,19 +469,19 @@ describe("App", () => {
     renderApp("/admin/keys");
 
     expect(
-      await screen.findByRole("heading", { name: "Клиентские ключи", level: 1 }),
+      await screen.findByRole("heading", { name: "Client keys", level: 1 }),
     ).toBeInTheDocument();
     expect((await screen.findAllByText("default")).length).toBeGreaterThan(0);
-    expect(screen.queryByLabelText("Ключ доступа")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Access key")).not.toBeInTheDocument();
     expect(screen.getByLabelText("Key ID")).toBeInTheDocument();
     expect(
-      screen.queryByRole("columnheader", { name: "Имя" }),
+      screen.queryByRole("columnheader", { name: "Name" }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Имя")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Name")).not.toBeInTheDocument();
     expect(
       screen.queryByRole("columnheader", { name: "Admin" }),
     ).not.toBeInTheDocument();
-    expect(screen.queryByLabelText("Администратор")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Administrator")).not.toBeInTheDocument();
   });
 
   it("creates a key and shows the generated secret once", async () => {
@@ -492,11 +506,11 @@ describe("App", () => {
     const user = userEvent.setup();
 
     renderApp("/admin/keys");
-    await screen.findByRole("heading", { name: "Клиентские ключи", level: 1 });
-    await user.click(screen.getByRole("button", { name: /Создать ключ/ }));
+    await screen.findByRole("heading", { name: "Client keys", level: 1 });
+    await user.click(screen.getByRole("button", { name: /Create key/ }));
 
-    const dialog = await screen.findByRole("dialog", { name: "Ключ создан" });
-    expect(within(dialog).getByLabelText("Ключ доступа")).toHaveValue(generated);
+    const dialog = await screen.findByRole("dialog", { name: "Key created" });
+    expect(within(dialog).getByLabelText("Access key")).toHaveValue(generated);
     expect(within(dialog).getByText("k1")).toBeInTheDocument();
 
     const addCall = fetchMock.mock.calls.find(([url]) =>
@@ -506,11 +520,11 @@ describe("App", () => {
     expect(payload).not.toHaveProperty("key");
     expect(payload).toMatchObject({ key_id: "", rpm: null, tpm: null, models: [] });
 
-    await user.click(within(dialog).getByRole("button", { name: "Готово" }));
+    await user.click(within(dialog).getByRole("button", { name: "Done" }));
     await waitFor(() => {
-      expect(screen.queryByRole("dialog", { name: "Ключ создан" })).not.toBeInTheDocument();
+      expect(screen.queryByRole("dialog", { name: "Key created" })).not.toBeInTheDocument();
     });
-    expect(screen.queryByLabelText("Ключ доступа")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Access key")).not.toBeInTheDocument();
   });
 
   it("reissues a key and shows the new secret once", async () => {
@@ -535,23 +549,23 @@ describe("App", () => {
     const user = userEvent.setup();
 
     renderApp("/admin/keys");
-    await screen.findByRole("heading", { name: "Клиентские ключи", level: 1 });
+    await screen.findByRole("heading", { name: "Client keys", level: 1 });
     await user.click(
-      await screen.findByRole("button", { name: "Перевыпустить" }),
+      await screen.findByRole("button", { name: "Reissue" }),
     );
 
     const confirm = await screen.findByRole("dialog", {
-      name: /Перевыпустить ключ default/,
+      name: /Reissue key default/,
     });
     expect(
-      within(confirm).getByText(/Старый ключ сразу перестанет работать/),
+      within(confirm).getByText(/The old key will stop working immediately/),
     ).toBeInTheDocument();
     await user.click(
-      within(confirm).getByRole("button", { name: "Перевыпустить" }),
+      within(confirm).getByRole("button", { name: "Reissue" }),
     );
 
-    const dialog = await screen.findByRole("dialog", { name: "Ключ перевыпущен" });
-    expect(within(dialog).getByLabelText("Ключ доступа")).toHaveValue(generated);
+    const dialog = await screen.findByRole("dialog", { name: "Key reissued" });
+    expect(within(dialog).getByLabelText("Access key")).toHaveValue(generated);
 
     const rotateCall = fetchMock.mock.calls.find(([url]) =>
       String(url).includes("/api/admin/keys/rotate"),
@@ -559,13 +573,13 @@ describe("App", () => {
     const payload = JSON.parse(String((rotateCall?.[1] as RequestInit).body));
     expect(payload).toEqual({ key_hash: "hash-1" });
 
-    await user.click(within(dialog).getByRole("button", { name: "Готово" }));
+    await user.click(within(dialog).getByRole("button", { name: "Done" }));
     await waitFor(() => {
       expect(
-        screen.queryByRole("dialog", { name: "Ключ перевыпущен" }),
+        screen.queryByRole("dialog", { name: "Key reissued" }),
       ).not.toBeInTheDocument();
     });
-    expect(screen.queryByLabelText("Ключ доступа")).not.toBeInTheDocument();
+    expect(screen.queryByLabelText("Access key")).not.toBeInTheDocument();
   });
 
   it("redirects the admin root to the statistics endpoint", async () => {
@@ -585,7 +599,7 @@ describe("App", () => {
     renderApp("/admin?period=7d");
 
     expect(
-      await screen.findByRole("heading", { name: "Статистика", level: 1 }),
+      await screen.findByRole("heading", { name: "Statistics", level: 1 }),
     ).toBeInTheDocument();
     expect(screen.getByTestId("location")).toHaveTextContent(
       "/admin/stats?period=7d",
@@ -608,11 +622,11 @@ describe("App", () => {
 
     renderApp("/admin/keys");
 
-    await screen.findByRole("heading", { name: "Клиентские ключи", level: 1 });
-    await user.click(screen.getByRole("link", { name: "Статистика" }));
+    await screen.findByRole("heading", { name: "Client keys", level: 1 });
+    await user.click(screen.getByRole("link", { name: "Statistics" }));
 
     expect(
-      await screen.findByRole("heading", { name: "Статистика", level: 1 }),
+      await screen.findByRole("heading", { name: "Statistics", level: 1 }),
     ).toBeInTheDocument();
     expect(screen.getByTestId("location")).toHaveTextContent("/admin/stats");
     await waitFor(() => {
@@ -622,5 +636,53 @@ describe("App", () => {
         ),
       ).toBe(true);
     });
+  });
+
+  it("defaults to English and persists the selected language", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = String(input);
+        if (url.includes("/api/admin/session")) {
+          return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
+        }
+        return json({});
+      }),
+    );
+    const user = userEvent.setup();
+
+    const first = renderApp("/admin/settings");
+
+    expect(
+      await screen.findByRole("heading", { name: "Settings", level: 1 }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^English/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
+    expect(screen.getByRole("button", { name: /^Русский/ })).toHaveAttribute(
+      "aria-pressed",
+      "false",
+    );
+    await waitFor(() => expect(document.documentElement.lang).toBe("en"));
+
+    await user.click(screen.getByRole("button", { name: /^Русский/ }));
+
+    expect(
+      await screen.findByRole("heading", { name: "Настройки", level: 1 }),
+    ).toBeInTheDocument();
+    expect(window.localStorage.getItem("openroute.admin.language")).toBe("ru");
+    await waitFor(() => expect(document.documentElement.lang).toBe("ru"));
+
+    first.unmount();
+    renderApp("/admin/settings");
+
+    expect(
+      await screen.findByRole("heading", { name: "Настройки", level: 1 }),
+    ).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /^Русский/ })).toHaveAttribute(
+      "aria-pressed",
+      "true",
+    );
   });
 });

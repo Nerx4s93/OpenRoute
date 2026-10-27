@@ -6,6 +6,7 @@ import App from "./App";
 import { AuthProvider } from "./auth/AuthProvider";
 import { ApiError } from "./api/client";
 import { ToastProvider } from "./components/Toast";
+import { I18nProvider } from "./i18n";
 import "./styles/tokens.css";
 import "./styles/app.css";
 
@@ -26,11 +27,13 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <QueryClientProvider client={queryClient}>
       <BrowserRouter>
-        <AuthProvider>
-          <ToastProvider>
-            <App />
-          </ToastProvider>
-        </AuthProvider>
+        <I18nProvider>
+          <AuthProvider>
+            <ToastProvider>
+              <App />
+            </ToastProvider>
+          </AuthProvider>
+        </I18nProvider>
       </BrowserRouter>
     </QueryClientProvider>
   </React.StrictMode>,

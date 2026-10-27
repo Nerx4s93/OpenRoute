@@ -8,6 +8,7 @@ import type {
   Px6Price,
 } from "../api/types";
 import { useToast } from "../components/Toast";
+import { localizeApiMessage } from "../i18n";
 
 export function usePx6Account() {
   return useQuery<Px6Account, ApiError>({
@@ -47,7 +48,7 @@ export function useBuyProxies() {
   return useMutation<ProxyBuyResult, ApiError, ProxyBuyPayload>({
     mutationFn: api.buyProxies,
     onSuccess: (data) => {
-      toast.push(data.message);
+      toast.push(localizeApiMessage(data.message));
       // Use the balance returned by the purchase instead of invalidating all
       // px6 queries: buy + refresh already spend two px6.net requests, and the
       // upstream allows only three per second.

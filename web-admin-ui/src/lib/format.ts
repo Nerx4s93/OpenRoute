@@ -1,32 +1,60 @@
-const numberFormatter = new Intl.NumberFormat("ru-RU");
-const compactFormatter = new Intl.NumberFormat("ru-RU", {
-  notation: "compact",
-  maximumFractionDigits: 1,
-});
+import { localeFor, translate, type Language } from "../i18n";
 
-export function formatNumber(value: number): string {
-  return numberFormatter.format(value);
+const numberFormatters = new Map<string, Intl.NumberFormat>();
+const compactFormatters = new Map<string, Intl.NumberFormat>();
+
+function numberFormatter(language: Language): Intl.NumberFormat {
+  let formatter = numberFormatters.get(language);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(localeFor(language));
+    numberFormatters.set(language, formatter);
+  }
+  return formatter;
 }
 
-export function formatCompact(value: number): string {
-  return compactFormatter.format(value);
+function compactFormatter(language: Language): Intl.NumberFormat {
+  let formatter = compactFormatters.get(language);
+  if (!formatter) {
+    formatter = new Intl.NumberFormat(localeFor(language), {
+      notation: "compact",
+      maximumFractionDigits: 1,
+    });
+    compactFormatters.set(language, formatter);
+  }
+  return formatter;
 }
 
-export function formatLimit(value: number | null | undefined): string {
-  return value === null || value === undefined ? "—" : formatNumber(value);
+export function formatNumber(value: number, language: Language): string {
+  return numberFormatter(language).format(value);
 }
 
-export function formatDuration(seconds: number): string {
+export function formatCompact(value: number, language: Language): string {
+  return compactFormatter(language).format(value);
+}
+
+export function formatLimit(
+  value: number | null | undefined,
+  language: Language,
+): string {
+  return value === null || value === undefined ? "—" : formatNumber(value, language);
+}
+
+export function formatDuration(seconds: number, language: Language): string {
   const total = Math.max(0, Math.trunc(seconds));
-  if (total < 60) return "<1м";
+  if (total < 60) return translate(language, "duration.lessThanMinute");
   const hours = Math.floor(total / 3600);
   const minutes = Math.floor((total % 3600) / 60);
-  if (hours) return `${hours}ч ${String(minutes).padStart(2, "0")}м`;
-  return `${minutes}м`;
+  if (hours) {
+    return translate(language, "duration.hours", {
+      hours,
+      minutes: String(minutes).padStart(2, "0"),
+    });
+  }
+  return translate(language, "duration.minutes", { minutes });
 }
 
-export function formatTimestamp(ts: number): string {
-  return new Intl.DateTimeFormat("ru-RU", {
+export function formatTimestamp(ts: number, language: Language): string {
+  return new Intl.DateTimeFormat(localeFor(language), {
     day: "2-digit",
     month: "2-digit",
     hour: "2-digit",
@@ -35,11 +63,14 @@ export function formatTimestamp(ts: number): string {
   }).format(new Date(ts * 1000));
 }
 
-export function formatServerTime(iso: string | null | undefined): string {
+export function formatServerTime(
+  iso: string | null | undefined,
+  language: Language,
+): string {
   if (!iso) return "—";
   const date = new Date(iso);
   if (Number.isNaN(date.getTime())) return "—";
-  return new Intl.DateTimeFormat("ru-RU", {
+  return new Intl.DateTimeFormat(localeFor(language), {
     day: "2-digit",
     month: "2-digit",
     year: "numeric",
@@ -47,6 +78,28 @@ export function formatServerTime(iso: string | null | undefined): string {
     minute: "2-digit",
     second: "2-digit",
   }).format(date);
+}
+
+export function formatShortDate(value: string, language: Language): string {
+  const [year, month, day] = value.split("-").map(Number);
+  if (!year || !month || !day) return value;
+  return new Intl.DateTimeFormat(localeFor(language), {
+    month: "short",
+    day: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(Date.UTC(year, month - 1, day)));
+}
+
+export function formatLongDate(value: string, language: Language): string {
+  const [year, month, day] = value.split("-").map(Number);
+  if (!year || !month || !day) return value;
+  return new Intl.DateTimeFormat(localeFor(language), {
+    weekday: "short",
+    day: "numeric",
+    month: "long",
+    year: "numeric",
+    timeZone: "UTC",
+  }).format(new Date(Date.UTC(year, month - 1, day)));
 }
 
 export function formatModels(models: string[] | null | undefined): string {
@@ -57,11 +110,16 @@ export function requestTokens(prompt?: number | null, completion?: number | null
   return (prompt ?? 0) + (completion ?? 0);
 }
 
-export function formatMoney(value: number, currency = "RUB"): string {
+export function formatMoney(
+  value: number,
+  currency = "RUB",
+  language: Language = "en",
+): string {
   try {
-    return new Intl.NumberFormat("ru-RU", {
+    return new Intl.NumberFormat(localeFor(language), {
       style: "currency",
       currency: currency || "RUB",
+      currencyDisplay: "narrowSymbol",
       maximumFractionDigits: 2,
       minimumFractionDigits: 2,
     }).format(value);

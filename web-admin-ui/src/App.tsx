@@ -6,6 +6,7 @@ import { DisabledPage, FullPageError, FullPageLoader } from "./components/FullPa
 import { KeysPage } from "./pages/KeysPage";
 import { LoginPage } from "./pages/LoginPage";
 import { ProxiesPage } from "./pages/ProxiesPage";
+import { SettingsPage } from "./pages/SettingsPage";
 import { StatsPage } from "./pages/StatsPage";
 
 function ProtectedRoute({ children }: { children: ReactNode }) {
@@ -82,6 +83,16 @@ export default function App() {
           <ProtectedRoute>
             <AppShell>
               <ProxiesPage />
+            </AppShell>
+          </ProtectedRoute>
+        }
+      />
+      <Route
+        path="/admin/settings"
+        element={
+          <ProtectedRoute>
+            <AppShell>
+              <SettingsPage />
             </AppShell>
           </ProtectedRoute>
         }
