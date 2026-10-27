@@ -1,6 +1,11 @@
 # Проект зафиксирован, чтобы имена контейнеров/сети не зависели от имени каталога.
 name: openroute
 
+# Все Docker-сети создаются этим файлом автоматически: пользователю не нужно
+# выполнять `docker network create` или подключать контейнеры вручную. Наружу
+# открыт только edge; каждый внутренний сервис подключён только к тем сетям,
+# которые ему действительно нужны (описание — в блоке `networks` внизу).
+
 services:
   # --- edge: ЕДИНСТВЕННАЯ точка входа (API Gateway-паттерн) ---
   # Наружу (0.0.0.0:${OPENROUTE_EDGE_PORT:-53202}) торчит только nginx;
@@ -47,15 +52,15 @@ services:
         condition: service_healthy
 
   # --- PostgreSQL: база storage-service (proxies/keys/affinity/personas/лог).
-  # В приватной сети openroute-net; порт наружу НЕ публикуется (как у px6).
-  # Gateway к базе не подключается: единственный клиент — storage-service.
-  # Данные — в именованном томе pgdata (переживает пересоздание контейнера).
+  # Только приватная internal-сеть openroute-storage-db-net; порт наружу НЕ
+  # публикуется. Gateway к базе не подключён даже на уровне сети: единственный
+  # клиент — storage-service. Данные — в томе pgdata.
   postgres:
     image: postgres:17-alpine
     container_name: openroute-postgres
     environment:
       POSTGRES_USER: openroute
-      POSTGRES_PASSWORD: openroute  # только внутри openroute-net; поменяйте при необходимости
+      POSTGRES_PASSWORD: openroute  # только внутри openroute-storage-db-net; поменяйте при необходимости
       POSTGRES_DB: openroute
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -69,13 +74,15 @@ services:
       retries: 5
       start_period: 5s
     networks:
-      - net
+      - storage_db_net
 
   # --- storage-service: единственный компонент, который ходит в PostgreSQL.
   # Домены (proxies/keys/affinity/personas/лог запросов) отдаются gateway по
-  # HTTP с X-Storage-Token. Контейнер openroute-storage = DNS-имя в сети
-  # (STORAGE_SERVICE_URL=http://openroute-storage:8000). Хост-порт НЕ
-  # публикуется, edge его не маршрутизирует: наружу сервис недоступен.
+  # HTTP без токена: сервис доступен только в приватной internal-сети
+  # openroute-storage-api-net. Контейнер openroute-storage = DNS-имя в этой
+  # сети (STORAGE_SERVICE_URL=http://openroute-storage:8000).
+  # Вторая сеть — openroute-storage-db-net — только до PostgreSQL. Хост-порт
+  # НЕ публикуется, edge его не маршрутизирует: наружу сервис недоступен.
   storage-service:
     build: ./storage-service
     image: openroute-storage
@@ -83,9 +90,10 @@ services:
     env_file:
       - ./storage-service/.env
     environment:
-      # Единственное место в compose, где фигурирует DSN: внутри сети хост
-      # postgres вместо localhost из storage-service/.env (тот — для запуска
-      # без Docker). Gateway этот DSN не получает никогда.
+      # Единственное место в compose, где фигурирует DSN: в
+      # openroute-storage-db-net хост postgres вместо localhost из
+      # storage-service/.env (тот — для запуска без Docker). Gateway этот DSN
+      # не получает никогда.
       POSTGRES_DSN: postgresql://openroute:openroute@postgres:5432/openroute
     restart: unless-stopped
     # Стримов нет; 30с хватает, чтобы закрыть пул соединений.
@@ -109,17 +117,18 @@ services:
       # Запас на старт БД и первое применение схемы (DB_STARTUP_TIMEOUT_SECONDS=15).
       start_period: 20s
     networks:
-      - net
+      - storage_api_net
+      - storage_db_net
     # Стартуем только после готовности postgres: /health делает SELECT 1,
     # а схема применяется при первом подключении.
     depends_on:
       postgres:
         condition: service_healthy
 
-  # --- Redis: хранилище сессий web-admin. В приватной сети openroute-net;
-  # порт наружу НЕ публикуется. AOF (everysec) + том: сессии переживают
-  # рестарт. allkeys-lru: при нехватке памяти выгоняются старейшие ключи
-  # (только сессии), Redis не падает.
+  # --- Redis: хранилище сессий web-admin. Только приватная internal-сеть
+  # openroute-redis-net (с web-admin); порт наружу НЕ публикуется. AOF
+  # (everysec) + том: сессии переживают рестарт. allkeys-lru: при нехватке
+  # памяти выгоняются старейшие ключи (только сессии), Redis не падает.
   redis:
     image: redis:7-alpine
     container_name: openroute-redis
@@ -145,10 +154,13 @@ services:
       retries: 5
       start_period: 5s
     networks:
-      - net
+      - redis_net
 
   # --- шлюз OpenRoute: data plane (/v1/*, /health, /docs)
   # + internal API (/internal/*, X-Internal-Token) для web-admin ---
+  # Сети: openroute-net (edge -> /v1 и web-admin -> /internal),
+  # openroute-storage-api-net (клиент storage-service) и openroute-px6-net
+  # (список/покупка прокси). PostgreSQL и Redis шлюзу недоступны на уровне сети.
   gateway:
     build: .
     image: openroute-gateway
@@ -181,6 +193,8 @@ services:
       start_period: 10s
     networks:
       - net
+      - storage_api_net
+      - px6_net
     # Порядок старта: сначала px6 (шлюз тянет из него список прокси) и
     # storage-service (всё хранилище: прокси, ключи, affinity, personas, лог).
     # Gateway к postgres напрямую не подключён и не должен: DSN знает только
@@ -195,6 +209,8 @@ services:
 
   # --- web-admin: control plane (JSON API /api/admin/* + сессии в Redis).
   # Данными владеет шлюз; сюда ходит через его internal API с общим секретом.
+  # Сети: openroute-net (edge -> /api/admin) и openroute-redis-net (сессии).
+  # К storage-service и PostgreSQL не подключён.
   # Имя сервиса = DNS-имя в сети (web-admin:8000); на него ссылается
   # upstream в edge/nginx.conf — не переименовывать в одну сторону.
   web-admin:
@@ -222,6 +238,7 @@ services:
       start_period: 10s
     networks:
       - net
+      - redis_net
     depends_on:
       gateway:
         condition: service_healthy
@@ -261,13 +278,15 @@ services:
     image: openroute-px6
     # container_name задаёт DNS-имя в сети: шлюз ходит по
     # PROXIES_URL=http://openroute-px6:8000/proxies — не переименовывать.
+    # Сеть openroute-px6-net: только gateway и px6; отсюда нужен выход в
+    # px6.net, поэтому сеть не internal.
     # Имя уникально для всего docker-демона и не конфликтует с NVRoute
     # (у того контейнер прокси-сервиса называется proxy6-service).
     container_name: openroute-px6
     env_file:
       - ./px6-service/.env
     # Хост-порт НЕ публикуем: /proxies отдаёт креды прокси в открытом виде.
-    # Debug: docker run --rm --network openroute-net curlimages/curl \
+    # Debug: docker run --rm --network openroute-px6-net curlimages/curl \
     #   http://openroute-px6:8000/proxies
     restart: unless-stopped
     init: true
@@ -288,15 +307,39 @@ services:
       retries: 3
       start_period: 10s
     networks:
-      - net
+      - px6_net
 
 networks:
-  # Собственная (проектная, НЕ external) сеть OpenRoute: полностью изолирована
-  # от соседних стеков (в NVRoute — своя service-net), DNS-имена и имена
-  # контейнеров не пересекаются. Compose создаёт её сам — вручную создавать
-  # не нужно (и не нужно подключать к ней чужие контейнеры).
+  # Все сети — проектные (НЕ external) и создаются этим compose-файлом.
+  # Пользователю не нужно ничего создавать вручную; имена уникальны и не
+  # пересекаются с NVRoute.
+
+  # Входной контур: edge + gateway + web-admin + web-admin-ui. Не internal,
+  # потому что edge публикует хост-порт, а gateway ходит в интернет
+  # (opencode.ai и апстрим-прокси).
   net:
     name: openroute-net
+
+  # gateway -> storage-service. Internal: сеть без default route, поэтому
+  # storage-service не ходит наружу; gateway использует её только для storage.
+  storage_api_net:
+    name: openroute-storage-api-net
+    internal: true
+
+  # storage-service -> PostgreSQL. Gateway сюда не подключён, поэтому не может
+  # достучаться до базы даже при компрометации.
+  storage_db_net:
+    name: openroute-storage-db-net
+    internal: true
+
+  # web-admin <-> Redis. Redis доступен только web-admin, не edge/gateway.
+  redis_net:
+    name: openroute-redis-net
+    internal: true
+
+  # gateway <-> px6-service. Не internal: px6-service должен ходить в px6.net.
+  px6_net:
+    name: openroute-px6-net
 
 volumes:
   # Данные PostgreSQL (именованный том — переживает пересоздание контейнера

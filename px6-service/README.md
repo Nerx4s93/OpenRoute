@@ -70,7 +70,7 @@ docker compose up --build -d px6
 виде, а `/buy` тратит деньги. Диагностика из docker-сети:
 
 ```bash
-docker run --rm --network openroute-net curlimages/curl http://openroute-px6:8000/health
+docker run --rm --network openroute-px6-net curlimages/curl http://openroute-px6:8000/health
 ```
 
 ## Тесты

@@ -13,7 +13,6 @@ import pytest
 from fake_storage import FakeStorage
 from gateway.storage import (
     StorageAPIError,
-    StorageAuthError,
     StorageConflict,
     StorageNotFound,
     StorageUnavailable,
@@ -296,10 +295,6 @@ async def test_fail_hooks_disable_cleanly_and_context_manager_closes():
     assert await fake.ping() is False
 
     fake.raise_unavailable(False)
-    fake.raise_auth_error()
-    with pytest.raises(StorageAuthError):
-        await fake.check()
-    fake.raise_auth_error(False)
 
     fake.fail_next(StorageConflict("boom", status_code=409))
     with pytest.raises(StorageConflict):

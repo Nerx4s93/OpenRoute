@@ -78,8 +78,8 @@ N−1 дней, начиная с 00:00. Старые `day`, `week`, `month` с�
 |------------|------------|
 | `ADMIN_PASSWORD` | пароль входа; пусто — админка выключена |
 | `ADMIN_SESSION_TTL_SECONDS` | TTL сессии (по умолчанию 43200) |
-| `REDIS_URL` | хранилище сессий (`redis://redis:6379/0`) |
-| `GATEWAY_INTERNAL_URL` | `http://gateway:8000` в docker-сети |
+| `REDIS_URL` | хранилище сессий (`redis://redis:6379/0`, сеть `openroute-redis-net`) |
+| `GATEWAY_INTERNAL_URL` | `http://gateway:8000` в сети `openroute-net` |
 | `INTERNAL_API_TOKEN` | тот же секрет, что у шлюза |
 | `INTERNAL_TIMEOUT_SECONDS` | таймаут internal API (30 с) |
 

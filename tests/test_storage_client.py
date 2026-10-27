@@ -3,7 +3,7 @@
 Every test injects an ``httpx.MockTransport``: the client is exercised over its
 real request-building/serialisation path while responses stay in memory. A
 separate error matrix asserts the status -> exception mapping and that neither
-response bodies nor the token leak into exception messages.
+response bodies nor secrets leak into exception messages.
 """
 
 from __future__ import annotations
@@ -17,7 +17,6 @@ import pytest
 from gateway.reqlog import LogEntry
 from gateway.storage import (
     StorageAPIError,
-    StorageAuthError,
     StorageClient,
     StorageConflict,
     StorageNotFound,
@@ -25,7 +24,7 @@ from gateway.storage import (
 )
 
 BASE = "http://storage.test"
-TOKEN = "storage-token-DO-NOT-LEAK"
+SECRET = "storage-secret-DO-NOT-LEAK"
 SECRET_BODY = "upstream-body-DO-NOT-LEAK"
 
 PROXY = {
@@ -92,17 +91,17 @@ def _client(handler, **kwargs) -> tuple[StorageClient, list[httpx.Request]]:
 
     return (
         StorageClient(
-            BASE, TOKEN, transport=httpx.MockTransport(recording), **kwargs
+            BASE, transport=httpx.MockTransport(recording), **kwargs
         ),
         calls,
     )
 
 
-# --- health / token ---------------------------------------------------------
+# --- health -----------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_check_probes_health_then_authenticated_pool():
+async def test_check_probes_health_then_pool():
     calls: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
@@ -113,7 +112,7 @@ async def test_check_probes_health_then_authenticated_pool():
             return _ok(request, {"proxies": [PROXY]})
         return httpx.Response(404, request=request)
 
-    client = StorageClient(BASE, TOKEN, transport=httpx.MockTransport(handler))
+    client = StorageClient(BASE, transport=httpx.MockTransport(handler))
     info = await client.check()
     await client.aclose()
 
@@ -121,9 +120,6 @@ async def test_check_probes_health_then_authenticated_pool():
     assert [request.method for request in calls] == ["GET", "GET"]
     assert [request.url.path for request in calls] == ["/health", "/proxies"]
 
-    # /health is intentionally unauthenticated; the pool probe proves the token.
-    assert calls[0].headers.get("x-storage-token") is None
-    assert calls[1].headers["x-storage-token"] == TOKEN
     assert calls[1].url.params["listed"] == "true"
 
 
@@ -185,7 +181,6 @@ async def test_proxy_methods_paths_payloads_and_return_values():
         "banned_until": 0.0,
         "permanently_banned": False,
     }
-    assert all(request.headers["x-storage-token"] == TOKEN for request in calls)
 
 
 # --- keys -------------------------------------------------------------------
@@ -337,7 +332,7 @@ async def test_persona_path_encodes_hostile_quota_keys():
         calls.append(request)
         return httpx.Response(404, request=request)
 
-    client = StorageClient(BASE, TOKEN, transport=httpx.MockTransport(handler))
+    client = StorageClient(BASE, transport=httpx.MockTransport(handler))
     assert await client.get_persona("host name:8080/../x") is None
     await client.aclose()
 
@@ -420,8 +415,10 @@ async def test_request_log_and_stats_payloads():
 @pytest.mark.parametrize(
     ("status", "expected"),
     [
-        (401, StorageAuthError),
-        (403, StorageAuthError),
+        # The private service has no auth: an unexpected 401/403 means the call
+        # was misrouted or the service is unusable, so it degrades like 5xx.
+        (401, StorageUnavailable),
+        (403, StorageUnavailable),
         (404, StorageNotFound),
         (409, StorageConflict),
         (422, StorageAPIError),
@@ -434,18 +431,18 @@ async def test_status_to_exception_mapping_is_generic(status, expected):
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
             status,
-            json={"error": {"message": SECRET_BODY, "token": TOKEN}},
+            json={"error": {"message": SECRET_BODY, "token": SECRET}},
             request=request,
         )
 
-    client = StorageClient(BASE, TOKEN, transport=httpx.MockTransport(handler))
+    client = StorageClient(BASE, transport=httpx.MockTransport(handler))
     with pytest.raises(expected) as caught:
         await client.list_keys()
     await client.aclose()
 
     message = str(caught.value)
     assert SECRET_BODY not in message
-    assert TOKEN not in message
+    assert SECRET not in message
     assert caught.value.status_code == status
     if expected is StorageAPIError:
         assert str(status) in message
@@ -455,15 +452,16 @@ async def test_status_to_exception_mapping_is_generic(status, expected):
 @pytest.mark.parametrize("exc", [httpx.ConnectError, httpx.ReadTimeout])
 async def test_transport_and_timeout_map_to_unavailable(exc):
     def handler(request: httpx.Request) -> httpx.Response:
-        raise exc(f"{SECRET_BODY} {TOKEN}")
+        raise exc(f"{SECRET_BODY} {SECRET}")
 
-    client = StorageClient(BASE, TOKEN, transport=httpx.MockTransport(handler))
+    client = StorageClient(BASE, transport=httpx.MockTransport(handler))
     with pytest.raises(StorageUnavailable) as caught:
         await client.check()
+    assert await client.ping() is False
     await client.aclose()
 
     assert SECRET_BODY not in str(caught.value)
-    assert TOKEN not in str(caught.value)
+    assert SECRET not in str(caught.value)
     assert exc.__name__ in str(caught.value)
 
 
@@ -472,7 +470,7 @@ async def test_degraded_health_and_invalid_json_are_reported_safely():
     def degraded(request: httpx.Request) -> httpx.Response:
         return httpx.Response(503, json={"detail": SECRET_BODY}, request=request)
 
-    client = StorageClient(BASE, TOKEN, transport=httpx.MockTransport(degraded))
+    client = StorageClient(BASE, transport=httpx.MockTransport(degraded))
     with pytest.raises(StorageUnavailable) as caught:
         await client.check()
     await client.aclose()
@@ -482,28 +480,13 @@ async def test_degraded_health_and_invalid_json_are_reported_safely():
         return httpx.Response(200, text=SECRET_BODY, request=request)
 
     client = StorageClient(
-        BASE, TOKEN, transport=httpx.MockTransport(invalid_json)
+        BASE, transport=httpx.MockTransport(invalid_json)
     )
     with pytest.raises(StorageAPIError) as caught:
         await client.list_keys()
     await client.aclose()
     assert caught.value.status_code == 200
     assert SECRET_BODY not in str(caught.value)
-
-
-@pytest.mark.asyncio
-async def test_bad_token_is_reported_without_secret():
-    def handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/health":
-            return _ok(request, {"status": "ok", "database": "ok"})
-        return httpx.Response(401, text=TOKEN, request=request)
-
-    client = StorageClient(BASE, TOKEN, transport=httpx.MockTransport(handler))
-    with pytest.raises(StorageAuthError) as caught:
-        await client.check()
-    assert TOKEN not in str(caught.value)
-    assert await client.ping() is False
-    await client.aclose()
 
 
 # --- lifecycle --------------------------------------------------------------
@@ -523,7 +506,7 @@ async def test_aclose_context_manager_and_injected_client_ownership():
     await client.aclose()  # idempotent
 
     injected = httpx.AsyncClient(transport=httpx.MockTransport(handler))
-    wrapper = StorageClient(BASE, TOKEN, client=injected)
+    wrapper = StorageClient(BASE, client=injected)
     assert await wrapper.list_keys() == []
     assert injected.is_closed is False
     await wrapper.aclose()
@@ -534,6 +517,6 @@ def test_client_rejects_both_client_and_transport():
     injected = httpx.AsyncClient()
     with pytest.raises(ValueError):
         StorageClient(
-            BASE, TOKEN, client=injected,
+            BASE, client=injected,
             transport=httpx.MockTransport(lambda request: httpx.Response(200)),
         )

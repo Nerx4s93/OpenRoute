@@ -12,9 +12,9 @@ class Settings(BaseSettings):
     admin_password: str = ""
     # Admin session TTL, seconds (12 hours).
     admin_session_ttl_seconds: int = 43200
-    # Redis — session store (survives web-admin restarts).
+    # Redis — session store (openroute-redis-net; survives web-admin restarts).
     redis_url: str = "redis://redis:6379/0"
-    # Gateway internal API base URL (docker network name).
+    # Gateway internal API base URL (openroute-net).
     gateway_internal_url: str = "http://gateway:8000"
     # Must equal INTERNAL_API_TOKEN in the gateway's .env (X-Internal-Token).
     internal_api_token: str = ""

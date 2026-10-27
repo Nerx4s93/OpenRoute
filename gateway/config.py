@@ -33,16 +33,16 @@ class Settings(BaseSettings):
     internal_api_token: str = ""  # empty = internal API disabled (404)
 
     # --- storage-service (owns PostgreSQL; gateway has no DSN of its own) ---
-    # The gateway reaches it by container name inside the private Docker network.
+    # The gateway reaches it by container name on the private
+    # openroute-storage-api-net network; no token is exchanged.
     storage_service_url: str = "http://openroute-storage:8000"
-    storage_api_token: str = ""  # STORAGE_API_TOKEN (empty = service fails closed)
     storage_timeout_seconds: float = 10.0
 
     # --- proxy pool source ---
     proxies_url: str = "http://openroute-px6:8000/proxies"
     # px6-service base URL for account/price/buy operations. The gateway is the
     # only component web-admin talks to; px6-service is the only one that knows
-    # the px6.net API key.
+    # the px6.net API key. Docker network: openroute-px6-net.
     px6_service_url: str = "http://openroute-px6:8000"
     proxy_refresh_seconds: float = 300.0
     proxy_retry_seconds: float = 10.0

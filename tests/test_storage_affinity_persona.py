@@ -3,7 +3,7 @@
 These tests exercise the storage-backed gateway paths in isolation (unit
 level) and the startup contract: when the initial affinity/persona load fails
 after proxies and keys succeeded, the gateway must refuse to start with a
-secret-free error.
+DSN-free error.
 """
 
 from __future__ import annotations
@@ -20,8 +20,6 @@ from gateway.proxies import ProxyManager
 from gateway.storage import StorageUnavailable
 
 from gw import _quiet_refresh_loop, build_settings
-
-_STORAGE_TOKEN = "STORAGE-TOKEN-DO-NOT-LEAK"
 
 
 def _affinity(storage, proxies=("http://a.invalid:1", "http://b.invalid:1"),
@@ -186,7 +184,7 @@ class _PersonaLoadFails(FakeStorage):
 
 
 def _configure_startup(monkeypatch, storage):
-    settings = build_settings(storage_api_token=_STORAGE_TOKEN)
+    settings = build_settings()
     manager = ProxyManager(settings)
     keystore = KeyStore()
     monkeypatch.setattr(main, "settings", settings)
@@ -198,9 +196,8 @@ def _configure_startup(monkeypatch, storage):
     monkeypatch.setattr(main, "refresh_loop", _quiet_refresh_loop)
 
 
-def _assert_secret_free(exc_info) -> None:
+def _assert_no_dsn(exc_info) -> None:
     message = str(exc_info.value)
-    assert _STORAGE_TOKEN not in message
     assert "postgresql://" not in message  # no direct-DB configuration remains
 
 
@@ -213,7 +210,7 @@ def test_startup_fails_when_affinity_load_fails(monkeypatch):
         with TestClient(main.app):
             pass
 
-    _assert_secret_free(exc_info)
+    _assert_no_dsn(exc_info)
     # Proxies and keys loaded before the affinity failure (the fake is intact
     # apart from being closed) and no half-initialised gateway is left running.
     assert "http://proxy-a.invalid:8080" in storage.proxies
@@ -231,7 +228,7 @@ def test_startup_fails_when_persona_load_fails(monkeypatch):
         with TestClient(main.app):
             pass
 
-    _assert_secret_free(exc_info)
+    _assert_no_dsn(exc_info)
     assert "http://proxy-a.invalid:8080" in storage.proxies
     assert storage.closed is True
     assert main.storage is None

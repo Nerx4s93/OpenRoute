@@ -8,21 +8,17 @@ SQL owner. There are no migrations, no new tables and no new columns, so an
 existing `pgdata` volume keeps working unchanged.
 
 The service is not published by the edge, has no host port and exposes no
-public docs/OpenAPI route. It listens on `8000` inside the private Docker
-network.
+public docs/OpenAPI route. It listens on `8000` in `openroute-storage-api-net`
+(gateway) and reaches PostgreSQL through the separate private
+`openroute-storage-db-net`.
 
 ## Security
 
-- Every endpoint except `GET /health` requires:
-
-  ```http
-  X-Storage-Token: <STORAGE_API_TOKEN>
-  ```
-
-  The comparison is constant-time. A missing or wrong token returns `401`.
-  An empty `STORAGE_API_TOKEN` fails closed: all authenticated endpoints
-  reject requests (the container logs a warning at startup).
-- The token is never logged or echoed in a response.
+- No authentication: the service is reachable only by the gateway on the
+  private, `internal` Docker network `openroute-storage-api-net`. It has no
+  host port and no edge route, so network isolation is the access boundary.
+- Every endpoint (`/health` included) is therefore open to the gateway on that
+  network; no token is sent or required.
 - Database failures return a fixed `503`/`500` message; driver messages, SQL
   and the DSN are never returned to callers.
 - Startup waits for the first PostgreSQL connection and applies the schema.
@@ -31,14 +27,14 @@ network.
 
 ### Error envelope
 
-All application errors (401/404/409/503) use:
+All application errors (404/409/503) use:
 
 ```json
 {
   "error": {
-    "message": "Invalid or missing storage token",
-    "type": "authentication_error",
-    "code": 401
+    "message": "Proxy not found",
+    "type": "not_found_error",
+    "code": 404
   }
 }
 ```
@@ -50,7 +46,6 @@ generic (`"Storage operation failed"`) and never contains driver details.
 
 | Env var | Default | Meaning |
 |---------|---------|---------|
-| `STORAGE_API_TOKEN` | empty | Shared secret; empty = fail closed |
 | `POSTGRES_DSN` | `postgresql://openroute:openroute@localhost:5432/openroute` | The only DSN in the stack |
 | `DB_POOL_MIN_SIZE` | `1` | Async pool minimum |
 | `DB_POOL_MAX_SIZE` | `8` | Async pool maximum |
@@ -61,10 +56,11 @@ generic (`"Storage operation failed"`) and never contains driver details.
 
 Copy `.env.example` to `.env` and set:
 
-- `STORAGE_API_TOKEN` — must match `STORAGE_API_TOKEN` in the repository-root
-  `.env`; the gateway sends it as `X-Storage-Token`.
 - `POSTGRES_DSN` — the only DSN in the stack. The gateway never receives it;
   compose overrides it with the `postgres` service host.
+
+The repository root `.env` needs no storage credential: the gateway only
+needs `STORAGE_SERVICE_URL` and reaches this service over the private network.
 
 ## Quick start (Docker Compose)
 
@@ -72,9 +68,7 @@ From the repository root:
 
 ```bash
 cp .env.example .env                                  # if not created yet
-cp storage-service/.env.example storage-service/.env
-# set the SAME STORAGE_API_TOKEN in both .env files,
-# and POSTGRES_DSN in storage-service/.env
+cp storage-service/.env.example storage-service/.env  # POSTGRES_DSN
 docker compose up --build -d
 ```
 
@@ -90,7 +84,7 @@ seconds unless stated otherwise.
 
 | Method | Path | Purpose |
 |--------|------|---------|
-| GET | `/health` | `SELECT 1` check; unauthenticated |
+| GET | `/health` | `SELECT 1` check; open on the private network |
 | GET | `/proxies?listed=` | All proxy rows in insertion order |
 | POST | `/proxies/sync` | Apply one px6 catalogue snapshot |
 | POST | `/proxies/set-enabled` | Manual on/off of one proxy |
@@ -116,7 +110,7 @@ seconds unless stated otherwise.
 
 ## Health
 
-`GET /health` — no token.
+`GET /health` — open on the private gateway network.
 
 ```json
 {"status": "ok", "database": "ok"}
@@ -520,7 +514,7 @@ excluded. Used by `/internal/stats-data` for the token chart.
 cd storage-service
 python3 -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env          # STORAGE_API_TOKEN + POSTGRES_DSN
+cp .env.example .env          # POSTGRES_DSN
 uvicorn openroute_storage.main:app --host 127.0.0.1 --port 8000 --no-access-log
 ```
 
@@ -544,8 +538,9 @@ pytest tests/test_storage_service.py -q
 
 Tests use the isolated PostgreSQL database from `tests/conftest.py`
 (`pg_dsn`, one throwaway database per test) and `fastapi.testclient.TestClient`;
-no network or real secrets are needed. They cover authentication, every
-endpoint contract/error path, schema creation and repeat-startup idempotency.
+no network or real secrets are needed. They cover the open private surface,
+every endpoint contract/error path, schema creation and repeat-startup
+idempotency.
 This is the only suite that needs PostgreSQL: use `docker-compose.test.yml`
 (`127.0.0.1:55433`) or point `OPENROUTE_TEST_DSN` at a live instance. Gateway
 tests are hermetic and use `tests/fake_storage.py`.

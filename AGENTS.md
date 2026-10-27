@@ -14,8 +14,13 @@ OpenAI-совместимый API-шлюз, который балансируе�
 - **Хранение**: пул прокси, клиентские ключи, sticky-привязки, personas, лог
   запросов и статистика принадлежат приватному `storage-service` —
   единственному компоненту со SQL и `POSTGRES_DSN`. Gateway ходит в него по
-  HTTP с `X-Storage-Token` и никогда не получает DSN; без storage-service он
-  не стартует.
+  HTTP без токена: сервис доступен только в приватной сети
+  `openroute-storage-api-net`, а DSN gateway не получает никогда; без
+  storage-service он не стартует.
+- **Сети**: Compose сам создаёт `openroute-net` (edge/front), приватные
+  `openroute-storage-api-net`, `openroute-storage-db-net`,
+  `openroute-redis-net` и `openroute-px6-net`; вручную `docker network create`
+  не нужен. Gateway не подключён к сетям PostgreSQL и Redis.
 - При старте и периодически шлюз забирает **все активные прокси** из
   `px6-service` (обёртка над API [px6.net](https://px6.net)). Комментарий
   `descr` больше не фильтруется: новые прокси добавляются в пул **выключенными**,
@@ -83,8 +88,10 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
                      │  + каталог моделей)│        │ баланс/покупка)   │
                      └───────────────────┘        └───────────────────┘
 
-   Внутри OpenRoute (сеть openroute-net):
-   [gateway] ── HTTP + X-Storage-Token ──► [storage-service] ── SQL ──► [PostgreSQL]
+   Внутри OpenRoute (сегментированные сети, см. ниже):
+   [gateway] ── HTTP (private net, без токена) ──► [storage-service] ── SQL ──► [PostgreSQL]
+   [web-admin] ── openroute-redis-net ──► [redis]
+   [gateway] ── openroute-px6-net ──► [px6-service]
 ```
 
 ### C4 — контейнеры (уровень 2)
@@ -97,47 +104,78 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
                         └─ /api/admin/* ───────────────────────────► [web-admin] (JSON API)
                                                                          │
    (web-admin-ui — только статика; браузер сам ходит в /api/admin/* через edge)
-   [gateway] ──► [openroute-px6] ──► px6.net       (каталог, баланс, покупка прокси)
-   [gateway] ──► [openroute-storage] ──► [PostgreSQL]
+   [gateway] ── openroute-px6-net ──► [openroute-px6] ──► px6.net  (каталог, баланс, покупка)
+   [gateway] ── openroute-storage-api-net ──► [openroute-storage]
+   [openroute-storage] ── openroute-storage-db-net ──► [PostgreSQL]
                                                      (proxies + keys + session_affinity
                                                       + proxy_personas + request_log)
    [gateway] ──► opencode.ai                        (free-tier инференс через прокси)
-   [web-admin] ──► [Redis]                          (серверные сессии админки)
-   [web-admin] ──► [gateway] /internal/*            (X-Internal-Token, только внутри сети)
+   [web-admin] ── openroute-redis-net ──► [Redis]   (серверные сессии админки)
+   [web-admin] ── openroute-net ──► [gateway] /internal/*
+                                                      (X-Internal-Token; edge /internal/* не маршрутизирует)
 ```
 
 - **`edge/`** — nginx: единственная точка входа, маршрутизация на сервисы;
   `/internal/*` наружу не маршрутизируется вообще. SSE-стримы не буферизуются.
+  Подключён только к `openroute-net`.
 - **`gateway/`** — шлюз (data plane): `/v1/*`, пул прокси, клиентские
   ключи, internal API для админки; всё состояние читает и пишет через
-  `storage-service`. Своих хостовых портов не публикует, к PostgreSQL не
-  подключается.
+  `storage-service`. Своих хостовых портов не публикует. Подключён к
+  `openroute-net` (edge), `openroute-storage-api-net` (StorageClient) и
+  `openroute-px6-net`; к PostgreSQL и Redis не подключён.
 - **`storage-service/`** — приватный FastAPI-сервис хранения (образ
   `openroute-storage`, контейнер `openroute-storage`): единственный компонент
   со SQL и `POSTGRES_DSN`. Отдаёт gateway домены `proxies`, `keys`,
-  `affinity`, `personas`, `request-log/stats` по HTTP с `X-Storage-Token`.
-  Слушает `8000` только внутри `openroute-net`; хост-порт не публикуется, edge
-  его не маршрутизирует, публичного `/docs` нет.
+  `affinity`, `personas`, `request-log/stats` по HTTP без токена: сервис
+  доступен только gateway в приватной сети. Подключён к
+  `openroute-storage-api-net` (gateway) и
+  `openroute-storage-db-net` (PostgreSQL); слушает `8000` только в первой,
+  хост-порт не публикуется, edge его не маршрутизирует, публичного `/docs` нет.
 - **`web-admin/`** — backend админки (control plane): JSON API
   `/api/admin/*`, сессии в Redis, CSRF, SSE; своими данными не владеет —
-  ходит в шлюз по internal API.
+  ходит в шлюз по internal API. Подключён к `openroute-net` (edge) и
+  `openroute-redis-net`.
 - **`web-admin-ui/`** — React SPA (React + TypeScript + Vite + React Router +
   TanStack Query) в отдельном контейнере nginx. Секретов не получает; все
-  данные — через `/api/admin/*`.
+  данные — через `/api/admin/*`. Подключён только к `openroute-net`.
 - **`px6-service/`** — микросервис px6.net: обёртка над API с TTL-кэшем;
   отдаёт все активные прокси, баланс аккаунта, страны, цену и покупку. Это
-  единственный компонент, который знает `PX6_API_KEY`.
+  единственный компонент, который знает `PX6_API_KEY`. Подключён только к
+  `openroute-px6-net`.
 - **`postgres`** — PostgreSQL 17: хранилище `storage-service` (`request_log`,
   `proxies`, `keys`, `session_affinity`, `proxy_personas`). Том
-  `pgdata`; порт наружу не публикуется, DSN знает только storage-service.
-- **`redis`** — Redis 7: сессии админки (том `redisdata`), порт наружу не публикуется.
+  `pgdata`; подключён только к `openroute-storage-db-net`, порт наружу не
+  публикуется, DSN знает только storage-service.
+- **`redis`** — Redis 7: сессии админки (том `redisdata`); подключён только к
+  `openroute-redis-net`, порт наружу не публикуется.
+
+### Docker-сети
+
+Compose создаёт все сети сам; `docker network create` не нужен. Наружу
+публикуется только порт edge; внутренние сервисы хост-портов не имеют.
+
+| Сеть | internal | Кто подключён | Назначение |
+|------|----------|---------------|------------|
+| `openroute-net` | нет | edge, gateway, web-admin, web-admin-ui | ingress от edge; gateway ходит в интернет |
+| `openroute-storage-api-net` | да | gateway, storage-service | HTTP без токена (только gateway) |
+| `openroute-storage-db-net` | да | storage-service, postgres | SQL; gateway сюда не подключён |
+| `openroute-redis-net` | да | web-admin, redis | сессии админки |
+| `openroute-px6-net` | нет | gateway, px6-service | px6.net: нужен внешний egress |
+
+`internal: true` убирает default route у сети: storage-service, PostgreSQL и
+Redis не ходят наружу, а gateway не видит PostgreSQL и Redis. Это
+сегментация от случайного/бокового трафика между контейнерами, но не граница
+от root на хосте. `storage-service` не имеет собственной аутентификации:
+единственный клиент в его сети — gateway. Токен `X-Internal-Token` остаётся
+defense-in-depth для `/internal/*` шлюза: единственный клиент — web-admin, а
+edge этот префикс не маршрутизирует, в том числе при ошибке конфигурации.
 
 ### Отказ storage-service
 
-- **Старт**: gateway проверяет `GET /health` и авторизованный список прокси
+- **Старт**: gateway проверяет `GET /health` и список прокси
   (`StorageClient.check()`), затем загружает прокси, ключи, affinity и
-  personas. Недоступный сервис, неверный `STORAGE_API_TOKEN` или ошибка
-  загрузки прокси/ключей/affinity/personas — отказ старта, а не работа без
+  personas. Недоступный сервис или ошибка загрузки
+  прокси/ключей/affinity/personas — отказ старта, а не работа без
   персистентности. Ошибка отдельной загрузки parking старт не блокирует.
 - **После старта**: in-memory кэши (пул, ключи, привязки, personas) продолжают
   обслуживать `/v1/*`; проксирование не ждёт storage-service.
@@ -158,7 +196,7 @@ client.chat.completions.create(model="deepseek-v4.1-flash-free",
 OpenRoute/
 ├── AGENTS.md                 # техническая документация (этот файл)
 ├── README.md                 # пользовательская инструкция по установке (TODO)
-├── docker-compose.yml        # весь стек одной командой (сеть openroute-net)
+├── docker-compose.yml        # весь стек одной командой; сети создаёт compose
 ├── docker-compose.test.yml   # PostgreSQL для real-SQL тестов storage-service (127.0.0.1:55433)
 ├── Dockerfile                # шлюз (python:3.12-slim)
 ├── requirements.txt          # gateway: fastapi/uvicorn/httpx/pydantic-settings/curl_cffi (без psycopg)
@@ -177,7 +215,7 @@ OpenRoute/
 │   ├── openroute_storage/    # FastAPI: main, config, db, schema, schemas, services
 │   ├── Dockerfile
 │   ├── requirements.txt      # fastapi/uvicorn/pydantic-settings/psycopg
-│   ├── .env.example          # STORAGE_API_TOKEN + POSTGRES_DSN (реальный .env не коммитится)
+│   ├── .env.example          # POSTGRES_DSN + настройки пула (реальный .env не коммитится)
 │   └── README.md             # контракты storage-service
 ├── edge/                     # nginx: nginx.conf, proxy_params_edge.conf, Dockerfile
 ├── px6-service/              # РЕАЛИЗОВАНО: px6.net → все активные прокси, баланс, покупка
@@ -516,14 +554,15 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 ### storage-service (приватный API)
 
 `storage-service` слушает `openroute-storage:8000` только внутри
-`openroute-net`: у него нет хост-порта, edge его не маршрутизирует, публичного
-`/docs`/OpenAPI нет. Все методы, кроме `GET /health`, требуют
-`X-Storage-Token: <STORAGE_API_TOKEN>` (constant-time сравнение); пустой
-`STORAGE_API_TOKEN` = fail closed (401). `GET /health` неаутентифицирован и
-отдаёт `{"status":"ok","database":"ok"}` либо 503 при недоступном PostgreSQL.
-Доменные контракты (proxies, keys, affinity, personas, request-log/stats) —
-в `storage-service/README.md`; gateway обращается к ним через
-`gateway/storage.py`. Наружу этот API не выходит.
+`openroute-storage-api-net` (internal): у него нет хост-порта, edge его не
+маршрутизирует, публичного `/docs`/OpenAPI нет. PostgreSQL доступен ему
+только по `openroute-storage-db-net`, куда gateway не подключён. Собственной
+аутентификации у сервиса нет: единственный клиент в его сети — gateway,
+поэтому все методы, включая `GET /health`, открыты на этом приватном
+контуре. `GET /health` отдаёт `{"status":"ok","database":"ok"}` либо 503 при
+недоступном PostgreSQL. Доменные контракты (proxies, keys, affinity,
+personas, request-log/stats) — в `storage-service/README.md`; gateway
+обращается к ним через `gateway/storage.py`. Наружу этот API не выходит.
 
 ## Клиентские ключи
 
@@ -564,7 +603,7 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 | 429 | любой другой 429 upstream (провайдер/ключ) | тело upstream (passthrough, без cooldown и ротации) |
 | 502 | все прокси, которые пробовали, упали (`All upstream attempts failed`) | OpenAI-конверт |
 | 503 | пул пуст (нет прокси / фетч не удаётся) | OpenAI-конверт |
-| 503 | storage-service недоступен/отклонил токен при мутации ключа или прокси | OpenAI-конверт (`Storage service unavailable`); состояние не меняется |
+| 503 | storage-service недоступен при мутации ключа или прокси | OpenAI-конверт (`Storage service unavailable`); состояние не меняется |
 | 504 | исчерпан бюджет ретраев `RETRY_BUDGET_SECONDS` | OpenAI-конверт |
 
 ---
@@ -575,22 +614,28 @@ X25519MLKEM768, полный список из 11 signature_algorithms (вклю
 
 ```bash
 # перед первым запуском: скопируйте примеры и задайте секреты
-cp .env.example .env                                   # INTERNAL_API_TOKEN + STORAGE_API_TOKEN
-cp storage-service/.env.example storage-service/.env   # тот же STORAGE_API_TOKEN + POSTGRES_DSN
+cp .env.example .env                                   # INTERNAL_API_TOKEN
+cp storage-service/.env.example storage-service/.env   # POSTGRES_DSN
 cp web-admin/.env.example web-admin/.env               # ADMIN_PASSWORD + тот же INTERNAL_API_TOKEN
 cp px6-service/.env.example px6-service/.env           # PX6_API_KEY
 
-docker compose up --build -d                 # весь стек одной командой; сеть openroute-net compose создаёт сам
+docker compose up --build -d                 # весь стек одной командой; сети создаёт compose
 docker compose logs -f edge                  # логи стены
 docker compose logs -f gateway               # логи шлюза
 docker compose logs -f storage-service       # логи сервиса хранения
 docker compose down                          # остановка всего
 ```
 
-`STORAGE_API_TOKEN` в корневом `.env` и в `storage-service/.env` должен
-совпадать: gateway отправляет его как `X-Storage-Token`. `POSTGRES_DSN`
-получает **только** `storage-service` (в compose — `postgres:5432`); gateway
-его не знает и зависит от `storage-service` (healthy), а не от `postgres`.
+Все пять сетей создаются Compose автоматически; `docker network create` не
+нужен. При обновлении со старой плоской схемы `docker compose up -d --build`
+создаст недостающие private-сети и пересоздаст контейнеры; тома `pgdata` и
+`redisdata` сохраняются.
+
+Токена для storage-service нет: gateway ходит в него по
+`STORAGE_SERVICE_URL` в приватной сети `openroute-storage-api-net`, куда
+подключён только gateway. `POSTGRES_DSN` получает **только**
+`storage-service` (в compose — `postgres:5432`); gateway его не знает и
+зависит от `storage-service` (healthy), а не от `postgres`.
 
 Наружу смотрит **только edge** на http://127.0.0.1:53202 (хост-порт задаёт
 `OPENROUTE_EDGE_PORT`): и API (`/v1`), и админка (`/`, `/login`,
@@ -603,8 +648,10 @@ edge. Данные — в томах `pgdata`/`redisdata` (удаляются т
 останавливается за 30 с.
 
 > **Сосуществование с NVRoute.** OpenRoute полностью изолирован от соседнего
-> стека NVRoute: у него собственная docker-сеть `openroute-net` (не общая
-> `service-net`), уникальные имена контейнеров (`openroute-px6`,
+> стека NVRoute: у него собственные сегментированные docker-сети
+> (`openroute-net`, `openroute-storage-api-net`, `openroute-storage-db-net`,
+> `openroute-redis-net`, `openroute-px6-net`; не общая `service-net`),
+> уникальные имена контейнеров (`openroute-px6`,
 > `openroute-storage`, `openroute-postgres`, `openroute-redis`; остальные —
 > автоимена `openroute-gateway-*`, `openroute-web-admin-*` и
 > `openroute-web-admin-ui-*`) и собственный хост-порт edge
@@ -620,7 +667,7 @@ pip install -r requirements.txt -r storage-service/requirements.txt
 
 # терминал 1: storage-service (нужен доступный PostgreSQL)
 cd storage-service
-cp .env.example .env          # STORAGE_API_TOKEN + POSTGRES_DSN
+cp .env.example .env          # POSTGRES_DSN
 uvicorn openroute_storage.main:app --host 127.0.0.1 --port 8010 --no-access-log
 
 # терминал 2: px6-service (из корня репозитория)
@@ -628,7 +675,6 @@ cd px6-service && uvicorn app.main:app --host 127.0.0.1 --port 8001  # PX6_API_K
 
 # терминал 3: gateway (из корня репозитория)
 STORAGE_SERVICE_URL=http://127.0.0.1:8010 \
-STORAGE_API_TOKEN=<тот же, что в storage-service/.env> \
 PROXIES_URL=http://127.0.0.1:8001/proxies \
 PX6_SERVICE_URL=http://127.0.0.1:8001 \
   uvicorn gateway.main:app --host 127.0.0.1 --port 8000
@@ -636,8 +682,9 @@ PX6_SERVICE_URL=http://127.0.0.1:8001 \
 
 `STORAGE_SERVICE_URL` — база storage-service; локально выбран порт `8010`,
 чтобы не конфликтовать с gateway на `8000` (в контейнере сервис слушает
-`8000`). `STORAGE_API_TOKEN` должен совпадать с `storage-service/.env`.
-`POSTGRES_DSN` задаётся **только** в `storage-service/.env` (по умолчанию
+`8000`). Токен не нужен: локально сервис слушает loopback и доступен только
+запущенным на этой же машине процессам. `POSTGRES_DSN` задаётся **только** в
+`storage-service/.env` (по умолчанию
 `postgresql://openroute:openroute@localhost:5432/openroute`); схема создаётся
 storage-service при первом подключении, а gateway без доступного
 storage-service не стартует. `PX6_SERVICE_URL` — база px6-service (без
@@ -647,9 +694,11 @@ storage-service не стартует. `PX6_SERVICE_URL` — база px6-servic
 
 Обновление с предыдущей версии: отдельная миграция не нужна — storage-service
 идемпотентно применяет ту же схему к существующему тому `pgdata`, включая
-индекс `request_log(account, ts)`. Нужно лишь перенести `POSTGRES_DSN` в
-`storage-service/.env` и задать совпадающий `STORAGE_API_TOKEN` в корневом
-`.env` и `storage-service/.env`.
+индекс `request_log(account, ts)`. После `docker compose up --build -d`
+Compose сам создаст private-сети и пересоздаст контейнеры; тома `pgdata` и
+`redisdata` сохраняются. Нужно лишь перенести `POSTGRES_DSN` в
+`storage-service/.env`; отдельный секрет для storage больше не нужен, его
+можно удалить из обоих `.env`.
 
 ---
 
@@ -662,15 +711,15 @@ storage-service не стартует. `PX6_SERVICE_URL` — база px6-servic
 | `web-admin/` (JSON API: `config`, `sessions`, `auth`, `gateway`, `schemas`, `main`) | **реализовано** |
 | `web-admin-ui/` (React SPA: Vite, React Router, TanStack Query, SSE) | **реализовано** |
 | `px6-service/` | **реализовано** (все активные прокси, баланс, страны, цена, покупка) |
-| edge / compose / Dockerfile / requirements / .env.example | **готово** (storage-service в compose, у gateway нет DSN) |
+| edge / compose / Dockerfile / requirements / .env.example | **готово** (сегментированные private-сети, storage-service в compose, у gateway нет DSN) |
 | `tests/` (`test_gateway`, `test_gateway_storage`, `test_storage_client`, `test_fake_storage`, `test_storage_service`, `test_storage_affinity_persona`, `test_proxies`, `test_affinity`, `test_persona`, `test_keys`, `test_reqlog`, `test_admin_api`, `test_opencode`, `test_proxy6_client`, `test_px6_service`, `test_sessions`, `test_curlclient`) | **реализовано** |
 
 ## Тесты
 
 ```bash
 pip install -r requirements-dev.txt
-pytest tests                              # 388 passed, 2 skipped
-pytest tests/test_storage_service.py -q   # 12 passed (нужен живой PostgreSQL)
+pytest tests                              # 385 passed, 2 skipped
+pytest tests/test_storage_service.py -q   # 10 passed (нужен живой PostgreSQL)
 
 cd web-admin-ui
 npm ci
@@ -681,11 +730,11 @@ npm run build
 
 `tests/test_storage_service.py` — единственный набор с живым PostgreSQL:
 изолированная БД на каждый тест (`pg_dsn`, создание/удаление), `TestClient`,
-проверки auth, контрактов и идемпотентности схемы. Нужен
+проверки открытого приватного API, контрактов и идемпотентности схемы. Нужен
 `docker-compose.test.yml` (`127.0.0.1:55433`); DSN переопределяется
 `OPENROUTE_TEST_DSN`. `tests/test_storage_client.py` — `StorageClient` на
 `httpx.MockTransport` (без сети/БД), матрица ошибок и отсутствие утечки
-токена/тела; `tests/test_fake_storage.py` — семантика in-memory
+секретов/тела; `tests/test_fake_storage.py` — семантика in-memory
 `FakeStorage`; `tests/test_gateway_storage.py` — startup-контракт, мутации
 ключей/прокси через storage, 503 при сбое, refresh/parking;
 `tests/test_storage_affinity_persona.py` — affinity/personas через storage и

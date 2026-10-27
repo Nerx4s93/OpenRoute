@@ -84,7 +84,6 @@ from .proxies import (
 )
 from .reqlog import LogEntry, RequestLog
 from .storage import (
-    StorageAuthError,
     StorageClient,
     StorageConflict,
     StorageError,
@@ -153,18 +152,18 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
     # personas and the request log. Tests inject a fake by setting
     # ``main.storage`` before startup; production constructs the HTTP client
     # here. A gateway without its persistence service must NOT serve traffic
-    # (see STORAGE_SERVICE_URL / STORAGE_API_TOKEN).
+    # (see STORAGE_SERVICE_URL; the service is reachable only on the private
+    # openroute-storage-api-net network and needs no credential).
     if storage is None:
         storage = StorageClient(
             settings.storage_service_url,
-            settings.storage_api_token,
             timeout=settings.storage_timeout_seconds,
         )
     storage_client = storage
     try:
         await storage_client.check()
     except Exception as exc:
-        # Never chain the exception: no URL/token/DSN may leak into logs or the
+        # Never chain the exception: no URL/DSN may leak into logs or the
         # startup error. Only the type is diagnostic enough.
         logger.error("storage-service check failed (%s); refusing to start",
                      type(exc).__name__)
@@ -172,8 +171,8 @@ async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         if storage is storage_client:
             storage = None
         raise RuntimeError(
-            "storage-service is unreachable or rejected STORAGE_API_TOKEN; "
-            "refusing to start without persistence"
+            "storage-service is unreachable; refusing to start without "
+            "persistence"
         ) from None
 
     manager.bind_storage(storage_client)
@@ -1132,15 +1131,16 @@ def _storage_http_error(
 ) -> HTTPException:
     """Map a typed storage failure to a secret-free ``HTTPException``.
 
-    Only the exception CLASS is used — never the message, token or DSN. A
-    missing row is a 404, a write conflict a 409, and everything else
-    (transport/5xx/auth) is a 503: the gateway cannot persist the change.
+    Only the exception CLASS is used — never the message or DSN. A missing row
+    is a 404, a write conflict a 409, and everything else (transport/5xx and an
+    unexpected non-2xx from the private service) is a 503: the gateway cannot
+    persist the change.
     """
     if isinstance(exc, StorageNotFound):
         return HTTPException(404, not_found)
     if isinstance(exc, StorageConflict):
         return HTTPException(409, conflict)
-    if isinstance(exc, (StorageAuthError, StorageUnavailable)):
+    if isinstance(exc, StorageUnavailable):
         logger.error("storage-service unavailable during %s: %s",
                      action, type(exc).__name__)
     else:

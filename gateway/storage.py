@@ -10,12 +10,14 @@ Design notes:
 - **No import-time network**. The underlying ``httpx.AsyncClient`` is created
   in ``__init__`` (never at import time); tests inject either a ``transport``
   (``httpx.MockTransport``) or a pre-built ``client``.
-- **No SQL / no DSN**. The client knows only an HTTP base URL and the shared
-  ``X-Storage-Token`` header.
-- **Errors are typed and secret-free**. Response bodies, the token and the DSN
-  are never embedded in exception messages; callers map the exception class,
-  not response text. Transport errors, timeouts and 5xx are
-  :class:`StorageUnavailable`; 401/403 are :class:`StorageAuthError`; 404 is
+- **No SQL / no DSN and no credential**. The client knows only an HTTP base
+  URL: storage-service is reachable solely on the private
+  ``openroute-storage-api-net`` network, so the service itself is
+  unauthenticated and the gateway sends no secret.
+- **Errors are typed and secret-free**. Response bodies and the DSN are never
+  embedded in exception messages; callers map the exception class, not response
+  text. Transport errors, timeouts, 5xx and unexpected 401/403 (the private
+  service has no auth) are :class:`StorageUnavailable`; 404 is
   :class:`StorageNotFound`; 409 is :class:`StorageConflict`; every other
   non-2xx is :class:`StorageAPIError` carrying only the status code.
 - **No retries**. Retry policy belongs to the caller (the gateway already has
@@ -43,7 +45,6 @@ __all__ = [
     "RECENT_LIMIT_MAX",
     "RECENT_LIMIT_MIN",
     "StorageAPIError",
-    "StorageAuthError",
     "StorageClient",
     "StorageConflict",
     "StorageError",
@@ -64,7 +65,7 @@ class StorageError(Exception):
 
     ``status_code`` is the upstream HTTP status when one exists (``None`` for
     transport failures and a closed client). Messages are deliberately generic:
-    no response body, token or DSN is ever included.
+    no response body or DSN is ever included.
     """
 
     def __init__(self, message: str = "storage operation failed",
@@ -74,16 +75,7 @@ class StorageError(Exception):
 
 
 class StorageUnavailable(StorageError):
-    """Transport error, timeout, 5xx or degraded service (caller: 503)."""
-
-
-class StorageAuthError(StorageError):
-    """Wrong/missing ``X-Storage-Token`` or a disabled authenticated API.
-
-    Treated like :class:`StorageUnavailable` by callers: the gateway cannot
-    persist anything until its configuration is fixed, so the public surface
-    degrades instead of leaking details.
-    """
+    """Transport error, timeout, 5xx, 401/403 or degraded service (503)."""
 
 
 class StorageNotFound(StorageError):
@@ -226,15 +218,14 @@ class StorageClient:
     """Typed async client for ``storage-service``.
 
     ``base_url`` is the service root (``http://openroute-storage:8000`` inside
-    compose), ``token`` is ``STORAGE_API_TOKEN``. ``timeout`` applies to every
-    request. Pass ``transport=httpx.MockTransport(handler)`` (or a fully built
-    ``client``) in tests; no connection is opened at import time.
+    compose). ``timeout`` applies to every request. Pass
+    ``transport=httpx.MockTransport(handler)`` (or a fully built ``client``) in
+    tests; no connection is opened at import time.
     """
 
     def __init__(
         self,
         base_url: str,
-        token: str,
         *,
         timeout: float | httpx.Timeout | None = 10.0,
         transport: httpx.AsyncBaseTransport | None = None,
@@ -243,7 +234,6 @@ class StorageClient:
         if client is not None and transport is not None:
             raise ValueError("pass either client or transport, not both")
         self._base_url = base_url.rstrip("/")
-        self._token = token
         self._timeout = timeout
         self._closed = False
         self._client = client if client is not None else httpx.AsyncClient(
@@ -274,15 +264,14 @@ class StorageClient:
     # --- health -----------------------------------------------------------
 
     async def check(self) -> dict[str, Any]:
-        """Verify reachability and token validity (startup/health use).
+        """Verify reachability (startup/health use).
 
-        Calls the unauthenticated ``GET /health`` (so a database outage is
-        distinguishable from a bad token) and then the authenticated
-        ``GET /proxies?listed=true``. Returns a small summary; any failure
-        raises a typed :class:`StorageError` whose message contains neither
-        the token nor the DSN.
+        Calls ``GET /health`` (so a database outage is distinguishable from a
+        network problem) and then ``GET /proxies?listed=true``. Returns a small
+        summary; any failure raises a typed :class:`StorageError` whose message
+        contains neither the response body nor the DSN.
         """
-        health = await self._request("GET", "/health", auth=False)
+        health = await self._request("GET", "/health")
         data = _object(health)
         if data.get("status") != "ok" or data.get("database") != "ok":
             raise StorageUnavailable("storage service is degraded",
@@ -314,13 +303,10 @@ class StorageClient:
         *,
         params: Mapping[str, Any] | None = None,
         json: Mapping[str, Any] | None = None,
-        auth: bool = True,
     ) -> _Reply:
         if self._closed:
             raise StorageUnavailable("storage client is closed")
         headers = {"Accept": "application/json"}
-        if auth and self._token:
-            headers["X-Storage-Token"] = self._token
 
         try:
             response = await self._client.request(
@@ -344,8 +330,10 @@ class StorageClient:
                 status_code=status,
             )
         if status in (401, 403):
-            raise StorageAuthError(
-                f"storage authentication failed (HTTP {status})",
+            # The private service has no auth: this means the call was
+            # misrouted (e.g. to edge) or the service is otherwise unusable.
+            raise StorageUnavailable(
+                f"storage service rejected the request (HTTP {status})",
                 status_code=status,
             )
         if status == 404:

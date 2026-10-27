@@ -1,10 +1,10 @@
 """OpenRoute storage-service — the only component that talks to PostgreSQL.
 
-Private FastAPI microservice (no host port, no edge route). Every request
-except ``GET /health`` must carry ``X-Storage-Token: <STORAGE_API_TOKEN>``;
-the comparison is constant-time and the token is never logged. The service
-owns all SQL for the gateway's persistence domains and exposes a typed HTTP
-API; request/response examples live in ``README.md``.
+Private FastAPI microservice (no host port, no edge route, no authentication):
+it is reachable only by the gateway on the internal
+``openroute-storage-api-net`` network. The service owns all SQL for the
+gateway's persistence domains and exposes a typed HTTP API; request/response
+examples live in ``README.md``.
 
 Startup opens an ``AsyncConnectionPool``, waits for the first connection and
 applies the frozen DDL defined in ``schema.py``. An unreachable database fails
@@ -13,7 +13,6 @@ startup with a clear, DSN-free error instead of degrading silently.
 
 from __future__ import annotations
 
-import hmac
 import logging
 from contextlib import asynccontextmanager
 from collections.abc import AsyncIterator
@@ -26,7 +25,7 @@ from fastapi.responses import JSONResponse
 from . import __version__
 from .config import Settings, get_settings
 from .db import check_database, create_pool, get_pool, install_error_handlers
-from .errors import StorageError, error_body
+from .errors import StorageError
 from .schema import ensure_schema
 from .schemas import (
     AccountUsage,
@@ -104,10 +103,6 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
             "storage-service: PostgreSQL is unreachable; check POSTGRES_DSN"
         ) from exc
 
-    if not settings.storage_api_token:
-        logger.warning(
-            "STORAGE_API_TOKEN is empty: authenticated endpoints reject requests"
-        )
     logger.info("storage-service ready")
     try:
         yield
@@ -116,40 +111,12 @@ async def lifespan(application: FastAPI) -> AsyncIterator[None]:
         await pool.close()
 
 
-# --- auth (every endpoint except GET /health) -------------------------------
-
-
-def _auth_response() -> JSONResponse:
-    return JSONResponse(
-        status_code=401,
-        content=error_body(
-            401, "Invalid or missing storage token", "authentication_error"
-        ),
-    )
-
-
-async def _require_storage_token(request: Request, call_next: Any):
-    """ASGI middleware guard: constant-time token compare, no token logging."""
-    if request.method == "GET" and request.url.path == "/health":
-        return await call_next(request)
-
-    expected = request.app.state.settings.storage_api_token
-    supplied = request.headers.get("x-storage-token", "")
-    matches = hmac.compare_digest(
-        supplied.encode("utf-8"), expected.encode("utf-8")
-    )
-    # Empty configured token = fail closed (no request can authenticate).
-    if not expected or not supplied or not matches:
-        return _auth_response()
-    return await call_next(request)
-
-
 # --- health -----------------------------------------------------------------
 
 
 @router.get("/health", response_model=HealthResponse)
 async def health(request: Request) -> Any:
-    """Liveness + database connectivity; intentionally unauthenticated."""
+    """Liveness + database connectivity; open on the private network."""
     pool = getattr(request.app.state, "pool", None)
     if pool is None or not await check_database(pool):
         return JSONResponse(
@@ -400,8 +367,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description="Private persistence API for the OpenRoute gateway.",
         version=__version__,
         lifespan=lifespan,
-        # The service is private and every route except /health needs a
-        # token. Disable the public docs/OpenAPI surface entirely.
+        # The service is private (no host port, no edge route). Disable the
+        # docs/OpenAPI surface entirely.
         docs_url=None,
         redoc_url=None,
         openapi_url=None,
@@ -409,7 +376,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.state.settings = cfg
     application.state.pool = None
     install_error_handlers(application)
-    application.middleware("http")(_require_storage_token)
     application.include_router(router)
     return application
 

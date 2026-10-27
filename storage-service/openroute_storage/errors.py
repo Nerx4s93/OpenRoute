@@ -11,7 +11,7 @@ from typing import Any
 
 
 class StorageError(Exception):
-    """An expected API error (401/404/409/422/503) with a safe message."""
+    """An expected API error (404/409/422/503) with a safe message."""
 
     def __init__(
         self,

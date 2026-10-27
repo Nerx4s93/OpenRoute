@@ -1,9 +1,9 @@
 """storage-service configuration (pydantic-settings).
 
 Field names map to upper-case env vars case-insensitively
-(``storage_api_token`` <- ``STORAGE_API_TOKEN``). ``postgres_dsn`` is the only
-place in this service that knows the database DSN; the token is compared in
-constant time and is never logged.
+(``postgres_dsn`` <- ``POSTGRES_DSN``). ``postgres_dsn`` is the only place in
+this service that knows the database DSN. The service has no authentication:
+it is reachable only on the private ``openroute-storage-api-net`` network.
 """
 
 from __future__ import annotations
@@ -19,10 +19,6 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_file=".env", env_file_encoding="utf-8", extra="ignore"
     )
-
-    # Shared secret the gateway sends in X-Storage-Token. Empty = fail closed:
-    # every authenticated endpoint rejects requests (401).
-    storage_api_token: str = ""
 
     postgres_dsn: str = "postgresql://openroute:openroute@localhost:5432/openroute"
 

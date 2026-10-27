@@ -18,8 +18,8 @@ The fake is test-only. It is importable without a database and is never used by
 production code. ``StorageClient`` and the fake expose the same async method
 names, so gateway tests can swap one for the other.
 
-Test hooks: :meth:`raise_unavailable`, :meth:`raise_auth_error` and
-:meth:`fail_next` make every public method fail deterministically.
+Test hooks: :meth:`raise_unavailable` and :meth:`fail_next` make every public
+method fail deterministically.
 """
 
 from __future__ import annotations
@@ -34,7 +34,6 @@ from gateway.storage import (
     RECENT_LIMIT_MAX,
     RECENT_LIMIT_MIN,
     StorageAPIError,
-    StorageAuthError,
     StorageConflict,
     StorageError,
     StorageNotFound,
@@ -94,7 +93,6 @@ class FakeStorage:
         self.log: list[dict[str, Any]] = []
 
         self._unavailable = False
-        self._auth_failed = False
         self._forced: BaseException | None = None
         self._closed = False
 
@@ -123,14 +121,6 @@ class FakeStorage:
         """Alias of :meth:`raise_unavailable`."""
         self.raise_unavailable(enabled)
 
-    def raise_auth_error(self, enabled: bool = True) -> None:
-        """Make every call raise :class:`StorageAuthError` until disabled."""
-        self._auth_failed = bool(enabled)
-
-    def fail_auth(self, enabled: bool = True) -> None:
-        """Alias of :meth:`raise_auth_error`."""
-        self.raise_auth_error(enabled)
-
     def fail_next(self, exc: BaseException) -> None:
         """Raise ``exc`` on the next call, then resume normal operation."""
         self._forced = exc
@@ -144,9 +134,6 @@ class FakeStorage:
         if self._unavailable:
             raise StorageUnavailable("storage service unavailable",
                                      status_code=503)
-        if self._auth_failed:
-            raise StorageAuthError("storage authentication failed",
-                                   status_code=401)
 
     async def aclose(self) -> None:
         self._closed = True
