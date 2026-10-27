@@ -121,14 +121,6 @@ h1 { margin: 7px 0 5px; font-size: clamp(27px, 3vw, 38px); line-height: 1.16;
 .card-hint { margin-top: 8px; color: #6e818e; font-size: 10px; line-height: 1.35; }
 
 /* --- stats / chart ------------------------------------------------------- */
-.stats-toolbar { display: flex; align-items: center; justify-content: flex-end;
-  gap: 12px; flex-wrap: wrap; margin-bottom: 14px; }
-.stats-select { display: inline-flex; align-items: center; gap: 8px;
-  color: #8294a0; font-size: 11px; font-weight: 700; }
-.stats-select select { min-width: 190px; padding: 7px 10px; border: 1px solid #344756;
-  border-radius: 8px; background: #0d1720; color: var(--text); font: inherit;
-  font-size: 11px; outline: none; }
-.stats-select select:focus { border-color: #85dfcb; box-shadow: 0 0 0 3px #85dfcb1c; }
 .chart-wrap { padding: 18px 22px 20px; }
 .chart { min-width: 0; }
 .chart-svg { display: block; width: 100%; height: auto; }
@@ -233,7 +225,6 @@ form.add { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); gap:
 .field { grid-column: span 2; display: grid; gap: 7px; min-width: 0; }
 .field.wide { grid-column: span 3; }
 .field.full { grid-column: 1 / -1; }
-.field.buy-comment { grid-column: span 4; }
 .field label { color: #a9bac3; font-size: 11px; font-weight: 700; }
 form.add input[type=text], .login-box input[type=password],
 form.add select { width: 100%; min-width: 0;
@@ -276,7 +267,6 @@ form.add button:hover, .login-box button[type=submit]:hover {
 .confirm-summary > div { display: flex; justify-content: space-between; gap: 14px; }
 .confirm-summary dt { color: #7f929f; font-size: 11px; }
 .confirm-summary dd { margin: 0; text-align: right; font-size: 12px; }
-.confirm-note { margin: 0; line-height: 1.55; }
 
 /* --- feedback ------------------------------------------------------------ */
 .error-banner { display: flex; align-items: center; justify-content: space-between; gap: 16px;
@@ -412,7 +402,7 @@ form.add button:hover, .login-box button[type=submit]:hover {
     left: 0; width: max-content; padding: 10px 16px; color: #7895a3; font-size: 10px; }
   html[lang="ru"] .table-scroll::before { content: "Прокрутите таблицу →"; }
   .table-scroll table { min-width: 760px; }
-  .field, .field.wide, .field.full, .field.buy-comment { grid-column: span 6; }
+  .field, .field.wide, .field.full { grid-column: span 6; }
   .form-content, .settings-content { padding: 16px; }
   .language-grid { grid-template-columns: 1fr; }
   .form-footer { align-items: stretch; flex-direction: column; }
@@ -424,9 +414,6 @@ form.add button:hover, .login-box button[type=submit]:hover {
 }
 @media (max-width: 650px) {
   .chart-wrap { padding: 14px 16px 16px; }
-  .stats-toolbar { justify-content: flex-start; }
-  .stats-select { width: 100%; }
-  .stats-select select { flex: 1; min-width: 0; }
   .chart-empty { min-height: 170px; }
 }
 @media (prefers-reduced-motion: reduce) {

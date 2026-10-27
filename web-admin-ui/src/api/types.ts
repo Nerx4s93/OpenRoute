@@ -141,7 +141,6 @@ export interface ProxyBuyPayload {
   period: number;
   country: string;
   version: number;
-  descr?: string;
 }
 
 export interface ProxyBuyResult extends ApiMessage {

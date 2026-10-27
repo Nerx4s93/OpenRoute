@@ -216,6 +216,7 @@ describe("App", () => {
     expect(
       await screen.findByRole("heading", { name: "Tokens by day" }),
     ).toBeInTheDocument();
+    expect(screen.queryByRole("combobox")).not.toBeInTheDocument();
     const sectionTitles = screen
       .getAllByRole("heading", { level: 2 })
       .map((node) => node.textContent);
@@ -377,6 +378,16 @@ describe("App", () => {
     ).toBeInTheDocument();
     expect(await screen.findByText(/250\.50/)).toBeInTheDocument();
     expect(await screen.findByRole("cell", { name: "203.0.113.10:8080" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("columnheader", { name: "Comment" }),
+    ).not.toBeInTheDocument();
+    expect(screen.queryByText("ID px6-user")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Only enabled proxies enter the gateway pool"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByLabelText("Comment (optional)"),
+    ).not.toBeInTheDocument();
 
     const toggle = await screen.findByRole("button", { name: "Disable" });
     await user.click(toggle);
@@ -388,6 +399,59 @@ describe("App", () => {
     expect(setCall).toBeTruthy();
     expect((setCall?.[1] as RequestInit).method).toBe("POST");
     expect(String((setCall?.[1] as RequestInit).body)).toContain('"enabled":false');
+  });
+
+  it("allows 3-day purchases only for IPv6", async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes("/api/admin/session")) {
+        return json({ authenticated: true, csrf: "csrf-1", expires_at: 9_999_999_999 });
+      }
+      if (url.includes("/api/admin/proxies/account")) {
+        return json({ user_id: "px6-user", balance: 250.5, currency: "RUB" });
+      }
+      if (url.includes("/api/admin/proxies/countries")) {
+        return json({ version: 6, countries: ["de", "ru"] });
+      }
+      if (url.includes("/api/admin/proxies/price")) {
+        return json({
+          user_id: "px6-user", balance: 250.5, currency: "RUB",
+          price: 12.5, price_single: 12.5, period: 30, count: 1, version: 6,
+        });
+      }
+      if (url.includes("/api/admin/proxies")) return json(proxies);
+      return json({});
+    });
+    vi.stubGlobal("fetch", fetchMock);
+    const user = userEvent.setup();
+
+    renderApp("/admin/proxies");
+
+    const versionSelect = await screen.findByLabelText("Version");
+    const periodSelect = screen.getByLabelText("Period");
+
+    expect(
+      within(periodSelect).getByRole("option", { name: "3 days" }),
+    ).toBeInTheDocument();
+
+    await user.selectOptions(periodSelect, "3");
+    expect(periodSelect).toHaveValue("3");
+
+    await user.selectOptions(versionSelect, "4");
+    expect(periodSelect).toHaveValue("7");
+    expect(
+      within(periodSelect).queryByRole("option", { name: "3 days" }),
+    ).not.toBeInTheDocument();
+
+    await user.selectOptions(versionSelect, "3");
+    expect(
+      within(periodSelect).queryByRole("option", { name: "3 days" }),
+    ).not.toBeInTheDocument();
+
+    await user.selectOptions(versionSelect, "6");
+    expect(
+      within(periodSelect).getByRole("option", { name: "3 days" }),
+    ).toBeInTheDocument();
   });
 
   it("buys proxies after confirmation", async () => {
@@ -437,8 +501,8 @@ describe("App", () => {
 
     const dialog = await screen.findByRole("dialog");
     expect(
-      within(dialog).getByText(/Proxies will be added disabled/),
-    ).toBeInTheDocument();
+      within(dialog).queryByText(/Proxies will be added disabled/),
+    ).not.toBeInTheDocument();
     await user.click(within(dialog).getByRole("button", { name: "Buy" }));
 
     expect(

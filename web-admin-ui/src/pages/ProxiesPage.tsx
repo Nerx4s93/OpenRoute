@@ -28,6 +28,10 @@ const VERSIONS: ReadonlyArray<{ value: number; labelKey: TranslationKey }> = [
 
 const PERIODS = [3, 7, 14, 30, 60, 90] as const;
 
+function periodsForVersion(version: number): readonly number[] {
+  return version === 6 ? PERIODS : PERIODS.filter((days) => days >= 7);
+}
+
 function versionLabel(value: string | number, language: Language): string {
   if (value === "") return "-";
   const version = String(value);
@@ -65,7 +69,7 @@ export function ProxiesPage() {
   const [country, setCountry] = useState("");
   const [countText, setCountText] = useState("1");
   const [buyPeriod, setBuyPeriod] = useState(30);
-  const [descr, setDescr] = useState("");
+  const periods = periodsForVersion(version);
   const [confirmOpen, setConfirmOpen] = useState(false);
 
   const countriesQuery = usePx6Countries(version);
@@ -133,7 +137,6 @@ export function ProxiesPage() {
         period: buyPeriod,
         country,
         version,
-        descr: descr.trim() || undefined,
       },
       { onSuccess: () => setConfirmOpen(false) },
     );
@@ -185,13 +188,11 @@ export function ProxiesPage() {
                 : "—"
           }
           label={t("proxies.balance")}
-          hint={account?.user_id ? `ID ${account.user_id}` : undefined}
         />
         <StatCard
           glyph="⇄"
           value={`${enabledCount}/${summary?.proxies_total ?? rows.length}`}
           label={t("proxies.enabled")}
-          hint={t("proxies.enabledHint")}
         />
         <StatCard
           glyph="◎"
@@ -204,7 +205,6 @@ export function ProxiesPage() {
         id="buy-title"
         icon="＋"
         title={t("proxies.buyTitle")}
-        note={t("proxies.buyNote")}
       >
         <div className="form-content">
           <form className="add buy-form" onSubmit={submit}>
@@ -213,7 +213,13 @@ export function ProxiesPage() {
               <select
                 id="buy-version"
                 value={version}
-                onChange={(event) => setVersion(Number(event.target.value))}
+                onChange={(event) => {
+                  const nextVersion = Number(event.target.value);
+                  setVersion(nextVersion);
+                  if (!periodsForVersion(nextVersion).includes(buyPeriod)) {
+                    setBuyPeriod(7);
+                  }
+                }}
               >
                 {VERSIONS.map((item) => (
                   <option key={item.value} value={item.value}>
@@ -261,24 +267,12 @@ export function ProxiesPage() {
                 value={buyPeriod}
                 onChange={(event) => setBuyPeriod(Number(event.target.value))}
               >
-                {PERIODS.map((days) => (
+                {periods.map((days) => (
                   <option key={days} value={days}>
                     {formatDays(days, language)}
                   </option>
                 ))}
               </select>
-            </div>
-
-            <div className="field buy-comment">
-              <label htmlFor="buy-descr">{t("proxies.comment")}</label>
-              <input
-                id="buy-descr"
-                type="text"
-                maxLength={50}
-                placeholder={t("proxies.commentPlaceholder")}
-                value={descr}
-                onChange={(event) => setDescr(event.target.value)}
-              />
             </div>
 
             {countriesQuery.isError ? (
@@ -337,7 +331,6 @@ export function ProxiesPage() {
                 <th>{t("proxies.countryColumn")}</th>
                 <th>{t("proxies.versionColumn")}</th>
                 <th>{t("proxies.validUntil")}</th>
-                <th>{t("proxies.commentColumn")}</th>
                 <th>{t("proxies.status")}</th>
                 <th>{t("proxies.tokens")}</th>
                 <th>{t("proxies.actions")}</th>
@@ -345,11 +338,11 @@ export function ProxiesPage() {
             </thead>
             <tbody>
               {query.isLoading ? (
-                <LoadingRows colSpan={8} />
+                <LoadingRows colSpan={7} />
               ) : rows.length ? (
                 rows.map((row) => <ProxyTableRow key={row.id ?? row.display} row={row} />)
               ) : (
-                <EmptyRow colSpan={8}>{t("proxies.empty")}</EmptyRow>
+                <EmptyRow colSpan={7}>{t("proxies.empty")}</EmptyRow>
               )}
             </tbody>
           </table>
@@ -392,14 +385,7 @@ export function ProxiesPage() {
                 : "—"}
             </dd>
           </div>
-          {descr.trim() ? (
-            <div>
-              <dt>{t("proxies.confirmComment")}</dt>
-              <dd>{descr.trim()}</dd>
-            </div>
-          ) : null}
         </dl>
-        <p className="muted confirm-note">{t("proxies.confirmNote")}</p>
       </ConfirmDialog>
     </>
   );
@@ -418,7 +404,6 @@ function ProxyTableRow({ row }: { row: ProxyRow }) {
       <td>{countryLabel(meta?.country ?? "", language)}</td>
       <td>{versionLabel(meta?.version ?? "", language)}</td>
       <td className="mono muted">{proxyDate(meta?.date_end ?? "")}</td>
-      <td className="muted">{meta?.descr || "—"}</td>
       <td><StatusBadge label={state.label} tone={state.tone} /></td>
       <td>{formatNumber(row.usage.tokens, language)}</td>
       <td className="actions">

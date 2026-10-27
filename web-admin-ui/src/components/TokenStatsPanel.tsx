@@ -1,4 +1,3 @@
-import { useState } from "react";
 import type { UseQueryResult } from "@tanstack/react-query";
 import type { ApiError } from "../api/client";
 import type { StatsProxyRow, StatsSeries, StatsSnapshot } from "../api/types";
@@ -16,23 +15,12 @@ function tokensFor(series: StatsSeries | undefined, length: number): number[] {
 
 function buildChartSeries(
   data: StatsSnapshot | undefined,
-  selected: string,
   rows: StatsProxyRow[],
   otherLabel: string,
 ): TokenChartSeries[] {
   if (!data) return [];
   const length = data.dates?.length ?? 0;
   if (!length) return [];
-
-  if (selected) {
-    return [
-      {
-        label: selected,
-        values: tokensFor(data.series_by_proxy?.[selected], length),
-        colorIndex: 0,
-      },
-    ];
-  }
 
   const chartSeries: TokenChartSeries[] = rows.slice(0, TOP_PROXIES).map((row, index) => ({
     label: row.proxy,
@@ -60,17 +48,10 @@ export function TokenStatsPanel({
   query: UseQueryResult<StatsSnapshot, ApiError>;
 }) {
   const { t } = useI18n();
-  const [selected, setSelected] = useState("");
   const data = query.data;
   // Sort defensively; the server uses the same in-pool-first ordering.
   const proxyRows = [...(data?.proxies ?? [])].sort(compareStatsProxies);
-  const activeProxy = proxyRows.some((row) => row.proxy === selected) ? selected : "";
-  const chartSeries = buildChartSeries(
-    data,
-    activeProxy,
-    proxyRows,
-    t("tokenStats.other"),
-  );
+  const chartSeries = buildChartSeries(data, proxyRows, t("tokenStats.other"));
 
   return (
     <Section
@@ -80,20 +61,6 @@ export function TokenStatsPanel({
       note={t("tokenStats.note")}
     >
       <div className="chart-wrap">
-        <div className="stats-toolbar">
-          <label className="stats-select">
-            <span>{t("tokenStats.proxy")}</span>
-            <select
-              value={activeProxy}
-              onChange={(event) => setSelected(event.target.value)}
-            >
-              <option value="">{t("tokenStats.allProxies")}</option>
-              {proxyRows.map((row) => (
-                <option key={row.proxy} value={row.proxy}>{row.proxy}</option>
-              ))}
-            </select>
-          </label>
-        </div>
         {query.isError ? (
           <ErrorBanner
             message={query.error?.message ?? t("tokenStats.loadFailed")}
