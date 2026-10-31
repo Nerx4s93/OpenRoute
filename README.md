@@ -162,7 +162,7 @@ gateway availability at `http://localhost:53202/health`.
    minute limits) and the allowed models list.
 
 IPv6 is recommended. Quota is tracked separately for each proxy URL. Based on
-observations, one egress IP provides around 90 million tokens per day, but the
+observations, one egress IP provides around 10 million tokens per day, but the
 exact value depends on OpenCode. Multiple proxies increase the total available
 limit, and the gateway distributes requests automatically.
 
